@@ -1,0 +1,12 @@
+[package]
+name = "engram-a2a"
+description = "Google A2A protocol implementation for engram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engram-core = { path = "../engram-core" }
+engram-api = { path = "../engram-api" }
+thiserror = { workspace = true }
+tracing = { workspace = true }

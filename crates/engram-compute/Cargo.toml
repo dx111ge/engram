@@ -1,0 +1,11 @@
+[package]
+name = "engram-compute"
+description = "GPU/NPU/CPU compute abstraction for engram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engram-core = { path = "../engram-core" }
+thiserror = { workspace = true }
+tracing = { workspace = true }

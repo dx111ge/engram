@@ -1,0 +1,11 @@
+[package]
+name = "engram-api"
+description = "HTTP/gRPC/MCP server for engram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engram-core = { path = "../engram-core" }
+thiserror = { workspace = true }
+tracing = { workspace = true }

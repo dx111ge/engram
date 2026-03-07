@@ -1,0 +1,4 @@
+/target
+.claude/
+*.brain
+*.brain.wal

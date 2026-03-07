@@ -1,0 +1,21 @@
+[package]
+name = "engram-core"
+description = "Storage engine and graph operations for engram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Memory", "Win32_Foundation", "Win32_Security"] }
+
+[dev-dependencies]
+tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "storage_bench"
+harness = false

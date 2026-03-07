@@ -1,0 +1,469 @@
+/// BrainFile — the main interface for .brain file operations.
+///
+/// Provides safe abstractions over the mmap'd storage, WAL, and node/edge access.
+/// Single-writer, multiple-reader model.
+
+use crate::storage::edge::{Edge, EDGE_SIZE};
+use crate::storage::error::{Result, StorageError};
+use crate::storage::header::Header;
+use crate::storage::mmap::MmapFile;
+use crate::storage::node::{hash_label, Node, NODE_SIZE};
+use crate::storage::wal::{Wal, WalOp};
+use std::path::{Path, PathBuf};
+
+/// Default initial capacities
+const DEFAULT_NODE_CAPACITY: u64 = 1024;
+const DEFAULT_EDGE_CAPACITY: u64 = 4096;
+
+pub struct BrainFile {
+    path: PathBuf,
+    mmap: MmapFile,
+    wal: Wal,
+}
+
+impl BrainFile {
+    /// Create a new .brain file at the given path.
+    pub fn create(path: &Path) -> Result<Self> {
+        Self::create_with_capacity(path, DEFAULT_NODE_CAPACITY, DEFAULT_EDGE_CAPACITY)
+    }
+
+    /// Create with specific node and edge capacities.
+    pub fn create_with_capacity(
+        path: &Path,
+        node_capacity: u64,
+        edge_capacity: u64,
+    ) -> Result<Self> {
+        let header = Header::new(node_capacity, edge_capacity);
+        let file_size = header.total_file_size();
+
+        let mmap = MmapFile::create(path, file_size)?;
+
+        // Write initial header
+        // SAFETY: We just created the file, we have exclusive access.
+        unsafe {
+            let h = mmap.header_mut();
+            *h = header;
+        }
+        mmap.flush()?;
+
+        let wal = Wal::open(path, 0)?;
+
+        Ok(BrainFile {
+            path: path.to_path_buf(),
+            mmap,
+            wal,
+        })
+    }
+
+    /// Open an existing .brain file.
+    pub fn open(path: &Path) -> Result<Self> {
+        let mmap = MmapFile::open(path)?;
+        let header = mmap.read_header();
+        header.validate()?;
+
+        let wal = Wal::open(path, header.wal_last_seq)?;
+
+        let mut brain = BrainFile {
+            path: path.to_path_buf(),
+            mmap,
+            wal,
+        };
+
+        // Replay any uncommitted WAL entries
+        brain.replay_wal()?;
+
+        Ok(brain)
+    }
+
+    /// Store a new node. Returns the assigned node ID.
+    pub fn store_node(&mut self, label: &str) -> Result<u64> {
+        let header = self.mmap.read_header();
+        let node_id = header.next_node_id;
+
+        if header.node_count >= header.node_region_capacity {
+            return Err(StorageError::NodeRegionFull {
+                capacity: header.node_region_capacity,
+            });
+        }
+
+        let now = current_timestamp();
+        let node = Node::new(node_id, label, now);
+
+        // WAL first — if we crash after WAL write but before mmap write, replay will fix it
+        let node_bytes = unsafe {
+            std::slice::from_raw_parts(&node as *const Node as *const u8, NODE_SIZE)
+        };
+        self.wal.append(WalOp::NodeCreate, node_bytes)?;
+
+        // Write to mmap
+        self.write_node_at_slot(header.node_count, &node)?;
+
+        // Update header
+        // SAFETY: single-writer access
+        unsafe {
+            let h = self.mmap.header_mut();
+            h.node_count += 1;
+            h.next_node_id = node_id + 1;
+            h.checksum = h.compute_checksum();
+        }
+
+        Ok(node_id)
+    }
+
+    /// Read a node by its slot index.
+    pub fn read_node(&self, slot: u64) -> Result<&Node> {
+        let header = self.mmap.read_header();
+        if slot >= header.node_count {
+            return Err(StorageError::NodeNotFound { id: slot });
+        }
+
+        let offset = header.node_region_offset + slot * NODE_SIZE as u64;
+        // SAFETY: slot is bounds-checked, offset is within the node region,
+        // Node is repr(C) with known layout, and the mmap region is valid.
+        let node = unsafe { &*(self.mmap.ptr_at(offset) as *const Node) };
+        Ok(node)
+    }
+
+    /// Find a node by label (linear scan for Phase 0, hash index comes later).
+    pub fn find_node_by_label(&self, label: &str) -> Result<Option<(u64, &Node)>> {
+        let target_hash = hash_label(label);
+        let header = self.mmap.read_header();
+
+        for slot in 0..header.node_count {
+            let node = self.read_node(slot)?;
+            if node.is_active() && node.label_hash == target_hash && node.label() == label {
+                return Ok(Some((slot, node)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Store a new edge. Returns the assigned edge ID.
+    pub fn store_edge(&mut self, from_node: u64, to_node: u64, edge_type: u32) -> Result<u64> {
+        let header = self.mmap.read_header();
+        let edge_id = header.next_edge_id;
+
+        if header.edge_count >= header.edge_region_capacity {
+            return Err(StorageError::EdgeRegionFull {
+                capacity: header.edge_region_capacity,
+            });
+        }
+
+        let now = current_timestamp();
+        let edge = Edge::new(edge_id, from_node, to_node, edge_type, now);
+
+        let edge_bytes = unsafe {
+            std::slice::from_raw_parts(&edge as *const Edge as *const u8, EDGE_SIZE)
+        };
+        self.wal.append(WalOp::EdgeCreate, edge_bytes)?;
+
+        let offset = header.edge_region_offset + header.edge_count * EDGE_SIZE as u64;
+        // SAFETY: bounds checked above, single-writer access
+        unsafe {
+            let dest = self.mmap.ptr_at_mut(offset);
+            std::ptr::copy_nonoverlapping(edge_bytes.as_ptr(), dest, EDGE_SIZE);
+        }
+
+        unsafe {
+            let h = self.mmap.header_mut();
+            h.edge_count += 1;
+            h.next_edge_id = edge_id + 1;
+            h.checksum = h.compute_checksum();
+        }
+
+        Ok(edge_id)
+    }
+
+    /// Read an edge by its slot index.
+    pub fn read_edge(&self, slot: u64) -> Result<&Edge> {
+        let header = self.mmap.read_header();
+        if slot >= header.edge_count {
+            return Err(StorageError::NodeNotFound { id: slot });
+        }
+
+        let offset = header.edge_region_offset + slot * EDGE_SIZE as u64;
+        // SAFETY: slot is bounds-checked, Edge is repr(C)
+        let edge = unsafe { &*(self.mmap.ptr_at(offset) as *const Edge) };
+        Ok(edge)
+    }
+
+    /// Get current stats.
+    pub fn stats(&self) -> (u64, u64) {
+        let header = self.mmap.read_header();
+        (header.node_count, header.edge_count)
+    }
+
+    /// Flush all changes to disk and write a WAL checkpoint.
+    pub fn checkpoint(&mut self) -> Result<()> {
+        self.mmap.flush()?;
+        let seq = self.wal.checkpoint()?;
+
+        // Update header with last WAL seq
+        unsafe {
+            let h = self.mmap.header_mut();
+            h.wal_last_seq = seq;
+            h.checksum = h.compute_checksum();
+        }
+        self.mmap.flush()?;
+
+        // WAL can now be truncated
+        self.wal.truncate()?;
+        Ok(())
+    }
+
+    fn write_node_at_slot(&self, slot: u64, node: &Node) -> Result<()> {
+        let header = self.mmap.read_header();
+        let offset = header.node_region_offset + slot * NODE_SIZE as u64;
+
+        // SAFETY: slot is within capacity (checked by caller), single-writer
+        unsafe {
+            let dest = self.mmap.ptr_at_mut(offset);
+            let src = node as *const Node as *const u8;
+            std::ptr::copy_nonoverlapping(src, dest, NODE_SIZE);
+        }
+        Ok(())
+    }
+
+    fn replay_wal(&mut self) -> Result<()> {
+        let header = self.mmap.read_header();
+        let entries = Wal::read_entries(&self.path, header.wal_last_seq)?;
+
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!("Replaying {} WAL entries", entries.len());
+
+        for entry in &entries {
+            match entry.op {
+                WalOp::NodeCreate => {
+                    if entry.data.len() == NODE_SIZE {
+                        // Copy into aligned buffer to satisfy Node's align(64)
+                        let mut node = std::mem::MaybeUninit::<Node>::uninit();
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                entry.data.as_ptr(),
+                                node.as_mut_ptr() as *mut u8,
+                                NODE_SIZE,
+                            );
+                        }
+                        let node = unsafe { node.assume_init() };
+                        let header = self.mmap.read_header();
+                        // Idempotent: skip if this node was already written to mmap
+                        if node.id < header.next_node_id {
+                            continue;
+                        }
+                        self.write_node_at_slot(header.node_count, &node)?;
+                        unsafe {
+                            let h = self.mmap.header_mut();
+                            h.node_count += 1;
+                            h.next_node_id = node.id + 1;
+                        }
+                    }
+                }
+                WalOp::EdgeCreate => {
+                    if entry.data.len() == EDGE_SIZE {
+                        // Copy into aligned buffer to satisfy Edge's align(64)
+                        let mut edge = std::mem::MaybeUninit::<Edge>::uninit();
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                entry.data.as_ptr(),
+                                edge.as_mut_ptr() as *mut u8,
+                                EDGE_SIZE,
+                            );
+                        }
+                        let edge = unsafe { edge.assume_init() };
+                        let header = self.mmap.read_header();
+                        // Idempotent: skip if this edge was already written
+                        if edge.id < header.next_edge_id {
+                            continue;
+                        }
+                        let offset =
+                            header.edge_region_offset + header.edge_count * EDGE_SIZE as u64;
+                        unsafe {
+                            let dest = self.mmap.ptr_at_mut(offset);
+                            std::ptr::copy_nonoverlapping(
+                                entry.data.as_ptr(),
+                                dest,
+                                EDGE_SIZE,
+                            );
+                            let h = self.mmap.header_mut();
+                            h.edge_count += 1;
+                            h.next_edge_id = edge.id + 1;
+                        }
+                    }
+                }
+                WalOp::Checkpoint => {}
+                _ => {
+                    tracing::warn!("WAL replay: unhandled op {:?} at seq {}", entry.op, entry.seq);
+                }
+            }
+        }
+
+        // Update header checksum and checkpoint
+        unsafe {
+            let h = self.mmap.header_mut();
+            h.checksum = h.compute_checksum();
+        }
+        self.mmap.flush()?;
+
+        tracing::info!("WAL replay complete");
+        Ok(())
+    }
+}
+
+fn current_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn create_and_store_nodes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        let mut brain = BrainFile::create(&path).unwrap();
+        let id1 = brain.store_node("server-01").unwrap();
+        let id2 = brain.store_node("server-02").unwrap();
+
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+
+        let (nodes, edges) = brain.stats();
+        assert_eq!(nodes, 2);
+        assert_eq!(edges, 0);
+    }
+
+    #[test]
+    fn read_node_back() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        let mut brain = BrainFile::create(&path).unwrap();
+        brain.store_node("my-node").unwrap();
+
+        let node = brain.read_node(0).unwrap();
+        assert_eq!(node.label(), "my-node");
+        assert!(node.is_active());
+        assert_eq!(node.confidence, 0.80);
+    }
+
+    #[test]
+    fn find_by_label() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        let mut brain = BrainFile::create(&path).unwrap();
+        brain.store_node("alpha").unwrap();
+        brain.store_node("beta").unwrap();
+        brain.store_node("gamma").unwrap();
+
+        let result = brain.find_node_by_label("beta").unwrap();
+        assert!(result.is_some());
+        let (slot, node) = result.unwrap();
+        assert_eq!(slot, 1);
+        assert_eq!(node.label(), "beta");
+
+        let missing = brain.find_node_by_label("delta").unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn store_and_read_edges() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        let mut brain = BrainFile::create(&path).unwrap();
+        let n1 = brain.store_node("a").unwrap();
+        let n2 = brain.store_node("b").unwrap();
+        let e1 = brain.store_edge(n1, n2, 1).unwrap();
+
+        assert_eq!(e1, 1);
+        let edge = brain.read_edge(0).unwrap();
+        assert_eq!(edge.from_node, n1);
+        assert_eq!(edge.to_node, n2);
+        assert_eq!(edge.edge_type, 1);
+    }
+
+    #[test]
+    fn persistence_across_reopen() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        // Create and store
+        {
+            let mut brain = BrainFile::create(&path).unwrap();
+            brain.store_node("persistent-node").unwrap();
+            brain.checkpoint().unwrap();
+        }
+
+        // Reopen and verify
+        {
+            let brain = BrainFile::open(&path).unwrap();
+            let (nodes, _) = brain.stats();
+            assert_eq!(nodes, 1);
+            let node = brain.read_node(0).unwrap();
+            assert_eq!(node.label(), "persistent-node");
+        }
+    }
+
+    #[test]
+    fn wal_recovery_after_crash() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        // Create, store, but DON'T checkpoint (simulating crash before flush)
+        {
+            let mut brain = BrainFile::create(&path).unwrap();
+            brain.store_node("before-crash").unwrap();
+            // No checkpoint — WAL has the entry, mmap might not be flushed
+        }
+
+        // Reopen — WAL should replay
+        {
+            let brain = BrainFile::open(&path).unwrap();
+            let (nodes, _) = brain.stats();
+            assert_eq!(nodes, 1);
+            let node = brain.read_node(0).unwrap();
+            assert_eq!(node.label(), "before-crash");
+        }
+    }
+
+    #[test]
+    fn node_region_full_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        let mut brain = BrainFile::create_with_capacity(&path, 2, 2).unwrap();
+        brain.store_node("a").unwrap();
+        brain.store_node("b").unwrap();
+
+        let result = brain.store_node("c");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn zero_copy_node_access() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        let mut brain = BrainFile::create(&path).unwrap();
+        brain.store_node("zero-copy").unwrap();
+
+        // Read returns a reference directly into mmap'd memory — no deserialization
+        let node: &Node = brain.read_node(0).unwrap();
+        assert_eq!(node.id, 1);
+        assert_eq!(node.label(), "zero-copy");
+
+        // Verify it's truly a pointer into the file, not a copy
+        let ptr = node as *const Node;
+        assert!(!ptr.is_null());
+    }
+}

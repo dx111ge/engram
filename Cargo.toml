@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/engram-core",
+    "crates/engram-compute",
+    "crates/engram-inference",
+    "crates/engram-learning",
+    "crates/engram-mesh",
+    "crates/engram-a2a",
+    "crates/engram-api",
+]
+
+[package]
+name = "engram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "engram"
+path = "src/main.rs"
+
+[dependencies]
+engram-core = { path = "crates/engram-core" }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+repository = "http://192.168.178.26:3141/admin/engram"
+
+[workspace.dependencies]
+# Shared dependencies across crates
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[profile.bench]
+inherits = "release"
+debug = true
