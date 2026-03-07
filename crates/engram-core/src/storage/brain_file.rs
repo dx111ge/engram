@@ -11,9 +11,11 @@ use crate::storage::node::{hash_label, labels_eq, Node, NODE_SIZE};
 use crate::storage::wal::{Wal, WalOp};
 use std::path::{Path, PathBuf};
 
-/// Default initial capacities
-const DEFAULT_NODE_CAPACITY: u64 = 1024;
-const DEFAULT_EDGE_CAPACITY: u64 = 4096;
+/// Default initial capacities.
+/// These are starting sizes -- the file auto-grows when full (doubles each time).
+/// 10K nodes * 256 bytes = 2.5MB, 40K edges * 64 bytes = 2.5MB -> ~5MB initial file.
+const DEFAULT_NODE_CAPACITY: u64 = 10_000;
+const DEFAULT_EDGE_CAPACITY: u64 = 40_000;
 
 pub struct BrainFile {
     path: PathBuf,
@@ -81,14 +83,15 @@ impl BrainFile {
     }
 
     /// Store a new node. Returns the assigned node ID.
+    /// Auto-grows the file if the node region is full.
     pub fn store_node(&mut self, label: &str) -> Result<u64> {
         let header = self.mmap.read_header();
         let node_id = header.next_node_id;
+        let node_count = header.node_count;
+        let needs_grow = node_count >= header.node_region_capacity;
 
-        if header.node_count >= header.node_region_capacity {
-            return Err(StorageError::NodeRegionFull {
-                capacity: header.node_region_capacity,
-            });
+        if needs_grow {
+            self.grow_node_region()?;
         }
 
         let now = current_timestamp();
@@ -101,7 +104,7 @@ impl BrainFile {
         self.wal.append(WalOp::NodeCreate, node_bytes)?;
 
         // Write to mmap
-        self.write_node_at_slot(header.node_count, &node)?;
+        self.write_node_at_slot(node_count, &node)?;
 
         // Update header
         // SAFETY: single-writer access
@@ -144,14 +147,16 @@ impl BrainFile {
     }
 
     /// Store a new edge. Returns the assigned edge ID.
+    /// Auto-grows the file if the edge region is full.
     pub fn store_edge(&mut self, from_node: u64, to_node: u64, edge_type: u32) -> Result<u64> {
         let header = self.mmap.read_header();
         let edge_id = header.next_edge_id;
+        let edge_count = header.edge_count;
+        let edge_region_offset = header.edge_region_offset;
+        let needs_grow = edge_count >= header.edge_region_capacity;
 
-        if header.edge_count >= header.edge_region_capacity {
-            return Err(StorageError::EdgeRegionFull {
-                capacity: header.edge_region_capacity,
-            });
+        if needs_grow {
+            self.grow_edge_region()?;
         }
 
         let now = current_timestamp();
@@ -162,7 +167,7 @@ impl BrainFile {
         };
         self.wal.append(WalOp::EdgeCreate, edge_bytes)?;
 
-        let offset = header.edge_region_offset + header.edge_count * EDGE_SIZE as u64;
+        let offset = edge_region_offset + edge_count * EDGE_SIZE as u64;
         // SAFETY: bounds checked above, single-writer access
         unsafe {
             let dest = self.mmap.ptr_at_mut(offset);
@@ -278,6 +283,116 @@ impl BrainFile {
         // WAL can now be truncated
         self.wal.truncate()?;
         Ok(())
+    }
+
+    /// Double the node region capacity.
+    ///
+    /// Layout: [Header][Nodes][Edges][WAL]
+    /// Growing nodes means shifting edges forward. Steps:
+    ///   1. Read all edge data into memory
+    ///   2. Calculate new file size with doubled node capacity
+    ///   3. Remap the file to the new size
+    ///   4. Write edge data at the new edge region offset
+    ///   5. Update header with new capacities and offsets
+    fn grow_node_region(&mut self) -> Result<()> {
+        let header = *self.mmap.read_header();
+        let old_node_cap = header.node_region_capacity;
+        let new_node_cap = if old_node_cap == 0 {
+            DEFAULT_NODE_CAPACITY
+        } else {
+            old_node_cap * 2
+        };
+
+        tracing::info!(
+            "Auto-growing node region: {} -> {} slots",
+            old_node_cap,
+            new_node_cap
+        );
+
+        // Read all existing edge data into memory before remap
+        let edge_data = self.read_edge_region_bytes(&header);
+
+        // Calculate new layout
+        let new_node_region_bytes = new_node_cap * NODE_SIZE as u64;
+        let new_edge_region_offset = header.node_region_offset + new_node_region_bytes;
+        let edge_region_bytes = header.edge_region_capacity * EDGE_SIZE as u64;
+        let new_wal_offset = new_edge_region_offset + edge_region_bytes;
+        let new_file_size = new_wal_offset;
+
+        // Remap (invalidates all pointers)
+        self.mmap.remap(new_file_size)?;
+
+        // Write edge data at the new offset
+        if !edge_data.is_empty() {
+            unsafe {
+                let dest = self.mmap.ptr_at_mut(new_edge_region_offset);
+                std::ptr::copy_nonoverlapping(edge_data.as_ptr(), dest, edge_data.len());
+            }
+        }
+
+        // Update header
+        unsafe {
+            let h = self.mmap.header_mut();
+            h.node_region_capacity = new_node_cap;
+            h.edge_region_offset = new_edge_region_offset;
+            h.wal_region_offset = new_wal_offset;
+            h.checksum = h.compute_checksum();
+        }
+
+        self.mmap.flush()?;
+        Ok(())
+    }
+
+    /// Double the edge region capacity.
+    ///
+    /// Simpler than growing nodes: edges are at the end (before WAL),
+    /// so we just extend the file and update the header.
+    fn grow_edge_region(&mut self) -> Result<()> {
+        let header = *self.mmap.read_header();
+        let old_edge_cap = header.edge_region_capacity;
+        let new_edge_cap = if old_edge_cap == 0 {
+            DEFAULT_EDGE_CAPACITY
+        } else {
+            old_edge_cap * 2
+        };
+
+        tracing::info!(
+            "Auto-growing edge region: {} -> {} slots",
+            old_edge_cap,
+            new_edge_cap
+        );
+
+        let new_edge_region_bytes = new_edge_cap * EDGE_SIZE as u64;
+        let new_wal_offset = header.edge_region_offset + new_edge_region_bytes;
+        let new_file_size = new_wal_offset;
+
+        // Remap (invalidates all pointers)
+        self.mmap.remap(new_file_size)?;
+
+        // Update header
+        unsafe {
+            let h = self.mmap.header_mut();
+            h.edge_region_capacity = new_edge_cap;
+            h.wal_region_offset = new_wal_offset;
+            h.checksum = h.compute_checksum();
+        }
+
+        self.mmap.flush()?;
+        Ok(())
+    }
+
+    /// Read all edge data into a byte buffer (for relocation during node region growth).
+    fn read_edge_region_bytes(&self, header: &Header) -> Vec<u8> {
+        let edge_bytes = (header.edge_count * EDGE_SIZE as u64) as usize;
+        if edge_bytes == 0 {
+            return Vec::new();
+        }
+        let mut buf = vec![0u8; edge_bytes];
+        unsafe {
+            let src = self.mmap.ptr_at(header.edge_region_offset);
+            std::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), edge_bytes);
+        }
+        buf
     }
 
     fn write_node_at_slot(&self, slot: u64, node: &Node) -> Result<()> {
@@ -540,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn node_region_full_returns_error() {
+    fn auto_grow_node_region() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.brain");
 
@@ -548,8 +663,108 @@ mod tests {
         brain.store_node("a").unwrap();
         brain.store_node("b").unwrap();
 
-        let result = brain.store_node("c");
-        assert!(result.is_err());
+        // Third node triggers auto-grow (capacity was 2)
+        let id3 = brain.store_node("c").unwrap();
+        assert_eq!(id3, 3);
+
+        // Verify all three nodes are readable
+        assert_eq!(brain.read_node(0).unwrap().label(), "a");
+        assert_eq!(brain.read_node(1).unwrap().label(), "b");
+        assert_eq!(brain.read_node(2).unwrap().label(), "c");
+
+        let (nodes, _) = brain.stats();
+        assert_eq!(nodes, 3);
+    }
+
+    #[test]
+    fn auto_grow_edge_region() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        let mut brain = BrainFile::create_with_capacity(&path, 10, 2).unwrap();
+        let n1 = brain.store_node("a").unwrap();
+        let n2 = brain.store_node("b").unwrap();
+        let n3 = brain.store_node("c").unwrap();
+
+        brain.store_edge(n1, n2, 1).unwrap();
+        brain.store_edge(n2, n3, 1).unwrap();
+
+        // Third edge triggers auto-grow (capacity was 2)
+        let e3 = brain.store_edge(n1, n3, 1).unwrap();
+        assert_eq!(e3, 3);
+
+        let (_, edges) = brain.stats();
+        assert_eq!(edges, 3);
+
+        // Verify all edges are readable
+        let edge = brain.read_edge(2).unwrap();
+        assert_eq!(edge.from_node, n1);
+        assert_eq!(edge.to_node, n3);
+    }
+
+    #[test]
+    fn auto_grow_preserves_edges_during_node_grow() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        // Start with tiny capacity: 2 nodes, 4 edges
+        let mut brain = BrainFile::create_with_capacity(&path, 2, 4).unwrap();
+        let n1 = brain.store_node("x").unwrap();
+        let n2 = brain.store_node("y").unwrap();
+        brain.store_edge(n1, n2, 1).unwrap();
+        brain.store_edge(n2, n1, 2).unwrap();
+
+        // This triggers node region grow, which must relocate edge data
+        let n3 = brain.store_node("z").unwrap();
+        assert_eq!(n3, 3);
+
+        // Edges must still be intact after relocation
+        let edge0 = brain.read_edge(0).unwrap();
+        assert_eq!(edge0.from_node, n1);
+        assert_eq!(edge0.to_node, n2);
+        assert_eq!(edge0.edge_type, 1);
+
+        let edge1 = brain.read_edge(1).unwrap();
+        assert_eq!(edge1.from_node, n2);
+        assert_eq!(edge1.to_node, n1);
+        assert_eq!(edge1.edge_type, 2);
+
+        // Can still add more edges after grow
+        brain.store_edge(n1, n3, 3).unwrap();
+        let (nodes, edges) = brain.stats();
+        assert_eq!(nodes, 3);
+        assert_eq!(edges, 3);
+    }
+
+    #[test]
+    fn auto_grow_persistence() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        // Create with tiny capacity, grow, and checkpoint
+        {
+            let mut brain = BrainFile::create_with_capacity(&path, 2, 2).unwrap();
+            brain.store_node("p").unwrap();
+            brain.store_node("q").unwrap();
+            brain.store_node("r").unwrap(); // triggers grow
+            let n1 = 1;
+            let n2 = 2;
+            brain.store_edge(n1, n2, 1).unwrap();
+            brain.store_edge(n2, n1, 1).unwrap();
+            brain.store_edge(n1, n1, 1).unwrap(); // triggers edge grow
+            brain.checkpoint().unwrap();
+        }
+
+        // Reopen and verify everything survived
+        {
+            let brain = BrainFile::open(&path).unwrap();
+            let (nodes, edges) = brain.stats();
+            assert_eq!(nodes, 3);
+            assert_eq!(edges, 3);
+            assert_eq!(brain.read_node(0).unwrap().label(), "p");
+            assert_eq!(brain.read_node(1).unwrap().label(), "q");
+            assert_eq!(brain.read_node(2).unwrap().label(), "r");
+        }
     }
 
     #[test]

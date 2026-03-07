@@ -123,6 +123,43 @@ impl MmapFile {
         self.len
     }
 
+    /// Resize the mapped file to a new (larger) size.
+    /// Unmaps the current view, extends the file, and remaps.
+    ///
+    /// SAFETY: All pointers/references into the old mapping become invalid.
+    /// Caller must ensure no references to mmap'd data are held across this call.
+    pub fn remap(&mut self, new_size: u64) -> Result<()> {
+        if new_size <= self.len {
+            return Ok(());
+        }
+
+        // Step 1: Flush pending changes
+        self.flush()?;
+
+        // Step 2: Unmap current view
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::System::Memory::UnmapViewOfFile(
+                windows_sys::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS {
+                    Value: self.ptr as *mut std::ffi::c_void,
+                },
+            );
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::munmap(self.ptr as *mut libc::c_void, self.len as usize);
+        }
+
+        // Step 3: Extend the file
+        self.file.set_len(new_size)?;
+
+        // Step 4: Remap with new size
+        self.ptr = Self::map_file(&self.file, new_size)?;
+        self.len = new_size;
+
+        Ok(())
+    }
+
     #[cfg(windows)]
     fn map_file(file: &File, size: u64) -> Result<*mut u8> {
         use std::os::windows::io::AsRawHandle;
