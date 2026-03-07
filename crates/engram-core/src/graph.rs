@@ -14,9 +14,16 @@ use crate::index::query::{self, CmpOp, Query};
 use crate::index::temporal::{TemporalIndex, TimeAxis};
 use crate::learning::cooccurrence::CooccurrenceTracker;
 use crate::learning::confidence::{confidence_cap, initial_confidence};
+use crate::learning::contradiction::{self, ConflictCheckResult, ConflictKind, Contradiction};
 use crate::learning::correction::{self, CorrectionResult};
 use crate::learning::decay;
+use crate::learning::evidence::{
+    CooccurrenceEvidence, ContradictingFact, EnrichedResult, Evidence, SupportingFact,
+};
+use crate::learning::inference::{Bindings, InferenceResult, ProofResult, ProofStep, RuleFiring};
 use crate::learning::reinforce;
+use crate::learning::rules::{Action, ConfidenceExpr, Condition, ConditionOp, Rule};
+use crate::learning::tier::{self, TierSweepResult};
 use crate::storage::brain_file::BrainFile;
 use crate::storage::error::{Result, StorageError};
 use crate::storage::node::{hash_label, Node};
@@ -812,6 +819,639 @@ impl Graph {
             .into_iter()
             .map(|(cons, stats)| (cons.to_string(), stats.count))
             .collect()
+    }
+
+    // --- Contradiction detection ---
+
+    /// Check for property contradictions when setting a property.
+    /// Returns any contradictions found (does NOT prevent the write).
+    pub fn check_property_contradiction(
+        &self,
+        label: &str,
+        key: &str,
+        new_value: &str,
+    ) -> Result<ConflictCheckResult> {
+        let slot = match self.find_slot_by_label(label)? {
+            Some(s) => s,
+            None => return Ok(ConflictCheckResult::none()),
+        };
+
+        if let Some(existing) = self.props.get(slot, key) {
+            if contradiction::values_conflict(existing, new_value) {
+                let c = Contradiction {
+                    existing_slot: slot,
+                    new_slot: slot,
+                    reason: format!(
+                        "property '{key}' conflict: existing='{existing}' vs new='{new_value}'"
+                    ),
+                    kind: ConflictKind::PropertyConflict,
+                };
+                return Ok(ConflictCheckResult::with(vec![c]));
+            }
+        }
+
+        Ok(ConflictCheckResult::none())
+    }
+
+    /// Set a property with contradiction checking.
+    /// Returns (success, contradictions). Contradictions are flagged but do NOT block the write.
+    pub fn set_property_checked(
+        &mut self,
+        label: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(bool, ConflictCheckResult)> {
+        let conflicts = self.check_property_contradiction(label, key, value)?;
+        let ok = self.set_property(label, key, value)?;
+        Ok((ok, conflicts))
+    }
+
+    // --- Evidence surfacing ---
+
+    /// Search with evidence — returns enriched results with co-occurrence stats,
+    /// supporting facts, and contradictions.
+    pub fn search_with_evidence(
+        &self,
+        query_str: &str,
+        limit: usize,
+    ) -> Result<Vec<EnrichedResult>> {
+        let results = self.search_text(query_str, limit)?;
+        let mut enriched = Vec::with_capacity(results.len());
+
+        for r in results {
+            let evidence = self.gather_evidence(r.slot, &r.label)?;
+            enriched.push(EnrichedResult {
+                slot: r.slot,
+                node_id: r.node_id,
+                label: r.label,
+                confidence: r.confidence,
+                score: r.score,
+                evidence,
+            });
+        }
+
+        Ok(enriched)
+    }
+
+    /// Gather evidence for a specific node.
+    fn gather_evidence(&self, slot: u64, label: &str) -> Result<Evidence> {
+        let mut evidence = Evidence::empty();
+
+        // Co-occurrence evidence
+        let pairs = self.cooccurrence.for_antecedent(label);
+        for (consequent, stats) in pairs {
+            evidence.cooccurrences.push(CooccurrenceEvidence {
+                antecedent: label.to_string(),
+                consequent: consequent.to_string(),
+                count: stats.count,
+                probability: stats.probability(),
+            });
+        }
+
+        // Supporting facts: nodes connected via outgoing edges
+        let node = self.brain.read_node(slot)?;
+        if let Some(edge_slots) = self.adj_out.get(&node.id) {
+            for &edge_slot in edge_slots {
+                let edge = self.brain.read_edge(edge_slot)?;
+                if let Some(target_slot) = self.find_slot_by_id(edge.to_node) {
+                    let target = self.brain.read_node(target_slot)?;
+                    if target.is_active() {
+                        let rel_name = self.type_registry.name_or_default(edge.edge_type);
+                        evidence.supporting.push(SupportingFact {
+                            slot: target_slot,
+                            label: target.label().to_string(),
+                            confidence: target.confidence,
+                            relationship: rel_name,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Property contradictions: check all properties for multi-valued conflicts
+        if let Some(props) = self.props.get_all(slot) {
+            for (key, value) in props {
+                // Check if any other active node has the same property key with different value
+                // and is connected to this node
+                if let Some(edge_slots) = self.adj_out.get(&node.id) {
+                    for &edge_slot in edge_slots {
+                        let edge = self.brain.read_edge(edge_slot)?;
+                        if let Some(target_slot) = self.find_slot_by_id(edge.to_node) {
+                            if let Some(target_val) = self.props.get(target_slot, key) {
+                                if target_val != value {
+                                    let target = self.brain.read_node(target_slot)?;
+                                    evidence.contradictions.push(ContradictingFact {
+                                        slot: target_slot,
+                                        label: target.label().to_string(),
+                                        confidence: target.confidence,
+                                        reason: format!(
+                                            "property '{key}': '{value}' vs '{target_val}'"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(evidence)
+    }
+
+    // --- Tier management ---
+
+    /// Run a tier sweep: evaluate all nodes and promote/demote based on stats.
+    /// Returns a summary of changes.
+    pub fn sweep_tiers(&mut self) -> Result<TierSweepResult> {
+        let (node_count, _) = self.brain.stats();
+        let now = current_timestamp();
+        let mut result = TierSweepResult::default();
+
+        for slot in 0..node_count {
+            let node = self.brain.read_node(slot)?;
+            if !node.is_active() {
+                continue;
+            }
+
+            result.evaluated += 1;
+            let recommended = tier::recommended_tier(
+                node.confidence,
+                node.access_count,
+                node.last_accessed,
+                now,
+                node.memory_tier,
+            );
+
+            if recommended != node.memory_tier {
+                let old_tier = node.memory_tier;
+                self.tier_bitmap.remove(old_tier as u32, slot);
+                self.brain.update_node_field(slot, |n| {
+                    n.memory_tier = recommended;
+                    n.updated_at = now;
+                })?;
+                self.tier_bitmap.insert(recommended as u32, slot);
+
+                if recommended == 0 {
+                    result.promoted_to_core += 1;
+                } else if recommended == 2 {
+                    result.demoted_to_archival += 1;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Manually set a node's tier (user override).
+    pub fn set_tier(&mut self, label: &str, tier: u8) -> Result<bool> {
+        let slot = match self.find_slot_by_label(label)? {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        let node = self.brain.read_node(slot)?;
+        let old_tier = node.memory_tier;
+        self.tier_bitmap.remove(old_tier as u32, slot);
+        self.brain.update_node_field(slot, |n| {
+            n.memory_tier = tier;
+        })?;
+        self.tier_bitmap.insert(tier as u32, slot);
+        Ok(true)
+    }
+
+    /// Get all core-tier nodes (always in LLM context).
+    pub fn core_nodes(&self) -> Result<Vec<NodeSearchResult>> {
+        let slots = self.tier_bitmap.slots_for(0); // TIER_CORE = 0
+        let mut results = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let node = self.brain.read_node(slot)?;
+            if node.is_active() {
+                results.push(NodeSearchResult {
+                    slot,
+                    node_id: node.id,
+                    label: node.label().to_string(),
+                    confidence: node.confidence,
+                    score: 0.0,
+                });
+            }
+        }
+        Ok(results)
+    }
+
+    // --- Inference engine ---
+
+    /// Forward chaining: evaluate rules against the graph and fire matching actions.
+    /// Returns a summary of what was inferred.
+    pub fn forward_chain(
+        &mut self,
+        rules: &[Rule],
+        provenance: &Provenance,
+    ) -> Result<InferenceResult> {
+        let mut result = InferenceResult::default();
+        let derived_prov = Provenance {
+            source_type: SourceType::Derived,
+            source_id: provenance.source_id.clone(),
+        };
+
+        for rule in rules {
+            result.rules_evaluated += 1;
+            let matches = self.find_rule_matches(rule)?;
+
+            for bindings in matches {
+                result.rules_fired += 1;
+                let mut actions_taken = Vec::new();
+
+                for action in &rule.actions {
+                    match action {
+                        Action::CreateEdge {
+                            from_var,
+                            relationship,
+                            to_var,
+                            confidence_expr,
+                        } => {
+                            let from_label = match bindings.get(from_var.as_str()) {
+                                Some(l) => l.clone(),
+                                None => continue,
+                            };
+                            let to_label = match bindings.get(to_var.as_str()) {
+                                Some(l) => l.clone(),
+                                None => continue,
+                            };
+
+                            // Check if edge already exists
+                            if self.edge_exists(&from_label, &to_label, relationship)? {
+                                continue;
+                            }
+
+                            let conf = self.eval_confidence_expr(confidence_expr, &bindings)?;
+                            self.relate(&from_label, &to_label, relationship, &derived_prov)?;
+                            // Update edge confidence
+                            let (_, edge_count) = self.brain.stats();
+                            let edge_slot = edge_count - 1;
+                            self.brain.update_edge_field(edge_slot, |e| {
+                                e.confidence = conf;
+                            })?;
+
+                            actions_taken.push(format!(
+                                "edge({from_label}, {relationship}, {to_label}, conf={conf:.2})"
+                            ));
+                            result.edges_created += 1;
+                        }
+                        Action::SetProperty {
+                            node_var,
+                            key,
+                            value,
+                        } => {
+                            if let Some(label) = bindings.get(node_var.as_str()) {
+                                self.set_property(label, key, value)?;
+                                actions_taken.push(format!("prop({label}, {key}={value})"));
+                            }
+                        }
+                        Action::Flag { node_var, reason } => {
+                            if let Some(label) = bindings.get(node_var.as_str()) {
+                                self.set_property(label, "_flag", reason)?;
+                                actions_taken.push(format!("flag({label}: {reason})"));
+                                result.flags_raised += 1;
+                            }
+                        }
+                    }
+                }
+
+                result.firings.push(RuleFiring {
+                    rule_name: rule.name.clone(),
+                    bindings,
+                    actions_taken,
+                });
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Backward chaining: try to prove a relationship exists between two nodes.
+    /// Searches the graph for direct and transitive evidence.
+    pub fn prove(
+        &self,
+        from_label: &str,
+        to_label: &str,
+        relationship: &str,
+        max_depth: u32,
+    ) -> Result<ProofResult> {
+        // Direct edge check
+        if self.edge_exists(from_label, to_label, relationship)? {
+            let from_slot = self.find_slot_by_label(from_label)?;
+            let conf = if let Some(slot) = from_slot {
+                self.brain.read_node(slot)?.confidence
+            } else {
+                0.0
+            };
+            return Ok(ProofResult {
+                supported: true,
+                confidence: conf,
+                chain: vec![ProofStep {
+                    fact: format!("{from_label} -[{relationship}]-> {to_label}"),
+                    confidence: conf,
+                    evidence: vec!["direct edge".into()],
+                    depth: 0,
+                }],
+            });
+        }
+
+        // Transitive search via BFS
+        if max_depth > 0 {
+            let from_id = match self.find_node_id(from_label)? {
+                Some(id) => id,
+                None => return Ok(ProofResult::unsupported()),
+            };
+            let to_id = match self.find_node_id(to_label)? {
+                Some(id) => id,
+                None => return Ok(ProofResult::unsupported()),
+            };
+
+            let mut visited: HashSet<u64> = HashSet::new();
+            let mut queue: VecDeque<(u64, Vec<ProofStep>)> = VecDeque::new();
+            visited.insert(from_id);
+            queue.push_back((from_id, Vec::new()));
+
+            while let Some((node_id, path)) = queue.pop_front() {
+                if path.len() as u32 >= max_depth {
+                    continue;
+                }
+
+                if let Some(edge_slots) = self.adj_out.get(&node_id) {
+                    for &edge_slot in edge_slots {
+                        let edge = self.brain.read_edge(edge_slot)?;
+                        let edge_rel = self.type_registry.name_or_default(edge.edge_type);
+
+                        if edge_rel != relationship {
+                            continue;
+                        }
+
+                        let target = edge.to_node;
+                        let target_label = self.label_for_id(target)?;
+                        let mut new_path = path.clone();
+                        let src_label = self.label_for_id(node_id)?;
+                        new_path.push(ProofStep {
+                            fact: format!("{src_label} -[{relationship}]-> {target_label}"),
+                            confidence: edge.confidence,
+                            evidence: vec![format!("edge slot {edge_slot}")],
+                            depth: new_path.len() as u32,
+                        });
+
+                        if target == to_id {
+                            // Found a transitive path!
+                            let min_conf = new_path
+                                .iter()
+                                .map(|s| s.confidence)
+                                .fold(f32::MAX, f32::min);
+                            return Ok(ProofResult {
+                                supported: true,
+                                confidence: min_conf,
+                                chain: new_path,
+                            });
+                        }
+
+                        if visited.insert(target) {
+                            queue.push_back((target, new_path));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ProofResult::unsupported())
+    }
+
+    // --- Inference helpers ---
+
+    fn find_rule_matches(&self, rule: &Rule) -> Result<Vec<Bindings>> {
+        // Start with edge conditions (most selective)
+        let edge_conditions: Vec<&Condition> = rule
+            .conditions
+            .iter()
+            .filter(|c| matches!(c, Condition::Edge { .. }))
+            .collect();
+
+        if edge_conditions.is_empty() {
+            return self.match_node_conditions(rule);
+        }
+
+        // Recursively match edge conditions, building bindings as we go
+        let initial = vec![Bindings::new()];
+        let mut candidates = initial;
+
+        for cond in &edge_conditions {
+            if let Condition::Edge { from_var, relationship, to_var } = cond {
+                let mut next_candidates = Vec::new();
+                let (_, edge_count) = self.brain.stats();
+
+                for bindings in &candidates {
+                    for edge_slot in 0..edge_count {
+                        let edge = self.brain.read_edge(edge_slot)?;
+                        let edge_rel = self.type_registry.name_or_default(edge.edge_type);
+                        if edge_rel != *relationship {
+                            continue;
+                        }
+
+                        let from_label = self.label_for_id(edge.from_node)?;
+                        let to_label = self.label_for_id(edge.to_node)?;
+
+                        // Check if from_var is already bound
+                        if let Some(bound) = bindings.get(from_var.as_str()) {
+                            if *bound != from_label {
+                                continue;
+                            }
+                        }
+                        // Check if to_var is already bound
+                        if let Some(bound) = bindings.get(to_var.as_str()) {
+                            if *bound != to_label {
+                                continue;
+                            }
+                        }
+
+                        let mut new_bindings = bindings.clone();
+                        new_bindings.insert(from_var.clone(), from_label);
+                        new_bindings.insert(to_var.clone(), to_label);
+                        next_candidates.push(new_bindings);
+                    }
+                }
+
+                candidates = next_candidates;
+            }
+        }
+
+        // Filter by non-edge conditions
+        let non_edge: Vec<&Condition> = rule
+            .conditions
+            .iter()
+            .filter(|c| !matches!(c, Condition::Edge { .. }))
+            .collect();
+
+        let mut results = Vec::new();
+        for bindings in candidates {
+            let mut all_match = true;
+            for cond in &non_edge {
+                if !self.check_condition(cond, &bindings)? {
+                    all_match = false;
+                    break;
+                }
+            }
+            if all_match {
+                results.push(bindings);
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn match_node_conditions(&self, rule: &Rule) -> Result<Vec<Bindings>> {
+        // For rules with only confidence/property conditions, scan all nodes
+        let (node_count, _) = self.brain.stats();
+        let mut results = Vec::new();
+
+        for slot in 0..node_count {
+            let node = self.brain.read_node(slot)?;
+            if !node.is_active() {
+                continue;
+            }
+
+            // Extract variable name from first condition
+            let var_name = match &rule.conditions[0] {
+                Condition::Confidence { var, .. } => var.clone(),
+                Condition::Property { node_var, .. } => node_var.clone(),
+                _ => continue,
+            };
+
+            let mut bindings = Bindings::new();
+            bindings.insert(var_name, node.label().to_string());
+
+            let mut all_match = true;
+            for cond in &rule.conditions {
+                if !self.check_condition(cond, &bindings)? {
+                    all_match = false;
+                    break;
+                }
+            }
+
+            if all_match {
+                results.push(bindings);
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn check_condition(&self, cond: &Condition, bindings: &Bindings) -> Result<bool> {
+        match cond {
+            Condition::Edge {
+                from_var,
+                relationship,
+                to_var,
+            } => {
+                let from_label = match bindings.get(from_var.as_str()) {
+                    Some(l) => l,
+                    None => return Ok(false),
+                };
+                let to_label = match bindings.get(to_var.as_str()) {
+                    Some(l) => l,
+                    None => {
+                        // to_var not bound — check if ANY edge of this type exists
+                        // (This is for pattern matching where we don't know the target yet)
+                        return Ok(true); // optimistic — full binding check happens later
+                    }
+                };
+                self.edge_exists(from_label, to_label, relationship)
+            }
+            Condition::Property {
+                node_var,
+                key,
+                value,
+            } => {
+                let label = match bindings.get(node_var.as_str()) {
+                    Some(l) => l,
+                    None => return Ok(false),
+                };
+                match self.get_property(label, key)? {
+                    Some(v) => Ok(v == *value),
+                    None => Ok(false),
+                }
+            }
+            Condition::Confidence {
+                var,
+                op,
+                threshold,
+            } => {
+                let label = match bindings.get(var.as_str()) {
+                    Some(l) => l,
+                    None => return Ok(false),
+                };
+                let node = match self.get_node(label)? {
+                    Some(n) => n,
+                    None => return Ok(false),
+                };
+                Ok(match op {
+                    ConditionOp::Gt => node.confidence > *threshold,
+                    ConditionOp::Gte => node.confidence >= *threshold,
+                    ConditionOp::Lt => node.confidence < *threshold,
+                    ConditionOp::Lte => node.confidence <= *threshold,
+                })
+            }
+        }
+    }
+
+    fn edge_exists(&self, from_label: &str, to_label: &str, relationship: &str) -> Result<bool> {
+        let from_id = match self.find_node_id(from_label)? {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+        let to_id = match self.find_node_id(to_label)? {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+
+        if let Some(edge_slots) = self.adj_out.get(&from_id) {
+            for &edge_slot in edge_slots {
+                let edge = self.brain.read_edge(edge_slot)?;
+                if edge.to_node == to_id {
+                    let rel = self.type_registry.name_or_default(edge.edge_type);
+                    if rel == relationship {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn eval_confidence_expr(
+        &self,
+        expr: &ConfidenceExpr,
+        bindings: &Bindings,
+    ) -> Result<f32> {
+        match expr {
+            ConfidenceExpr::Literal(v) => Ok(*v),
+            ConfidenceExpr::Min(a, b) => {
+                let ca = self.binding_confidence(bindings, a)?;
+                let cb = self.binding_confidence(bindings, b)?;
+                Ok(ca.min(cb))
+            }
+            ConfidenceExpr::Product(a, b) => {
+                let ca = self.binding_confidence(bindings, a)?;
+                let cb = self.binding_confidence(bindings, b)?;
+                Ok(ca * cb)
+            }
+        }
+    }
+
+    fn binding_confidence(&self, bindings: &Bindings, var: &str) -> Result<f32> {
+        // Try to resolve the variable as a bound node label
+        if let Some(label) = bindings.get(var) {
+            if let Some(node) = self.get_node(label)? {
+                return Ok(node.confidence);
+            }
+        }
+        // Default
+        Ok(0.5)
     }
 
     /// Get the confidence cap for a node based on its source type.
@@ -1734,6 +2374,240 @@ mod tests {
             let (count, _) = g.get_cooccurrence("deploy", "error").unwrap();
             assert_eq!(count, 2);
         }
+    }
+
+    #[test]
+    fn property_contradiction_detected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("server-01", &prov).unwrap();
+        g.set_property("server-01", "ip", "10.0.0.1").unwrap();
+
+        // Setting a different value should flag a contradiction
+        let conflicts = g.check_property_contradiction("server-01", "ip", "10.0.0.2").unwrap();
+        assert!(conflicts.has_conflicts);
+        assert_eq!(conflicts.contradictions.len(), 1);
+        assert!(conflicts.contradictions[0].reason.contains("10.0.0.1"));
+
+        // Same value should NOT flag
+        let no_conflict = g.check_property_contradiction("server-01", "ip", "10.0.0.1").unwrap();
+        assert!(!no_conflict.has_conflicts);
+    }
+
+    #[test]
+    fn set_property_checked_flags_but_writes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("server-01", &prov).unwrap();
+        g.set_property("server-01", "ip", "10.0.0.1").unwrap();
+
+        // Change value: should flag contradiction but still write
+        let (ok, conflicts) = g.set_property_checked("server-01", "ip", "10.0.0.2").unwrap();
+        assert!(ok);
+        assert!(conflicts.has_conflicts);
+
+        // Value should be updated despite contradiction
+        assert_eq!(
+            g.get_property("server-01", "ip").unwrap(),
+            Some("10.0.0.2".to_string())
+        );
+    }
+
+    #[test]
+    fn evidence_surfaces_cooccurrences() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("migration", &prov).unwrap();
+        g.record_cooccurrence("migration", "missing-index");
+        g.record_cooccurrence("migration", "missing-index");
+
+        let results = g.search_with_evidence("migration", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].evidence.cooccurrences.len(), 1);
+        assert_eq!(results[0].evidence.cooccurrences[0].count, 2);
+    }
+
+    #[test]
+    fn evidence_surfaces_supporting_facts() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("server-01", &prov).unwrap();
+        g.store("postgresql", &prov).unwrap();
+        g.relate("server-01", "postgresql", "runs", &prov).unwrap();
+
+        let results = g.search_with_evidence("server", 10).unwrap();
+        assert!(!results.is_empty());
+        // server-01 should have postgresql as supporting fact
+        let server_result = results.iter().find(|r| r.label == "server-01").unwrap();
+        assert_eq!(server_result.evidence.supporting.len(), 1);
+        assert_eq!(server_result.evidence.supporting[0].label, "postgresql");
+        assert_eq!(server_result.evidence.supporting[0].relationship, "runs");
+    }
+
+    #[test]
+    fn tier_sweep_promotes_and_demotes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        // High confidence + many accesses → should promote to core
+        g.store_with_confidence("popular", 0.95, &prov).unwrap();
+        for _ in 0..12 {
+            g.reinforce_access("popular").unwrap();
+        }
+
+        // Low confidence → should demote to archival
+        g.store_with_confidence("forgotten", 0.15, &prov).unwrap();
+
+        let result = g.sweep_tiers().unwrap();
+        assert!(result.promoted_to_core > 0 || result.demoted_to_archival > 0);
+
+        let popular_node = g.get_node("popular").unwrap().unwrap();
+        assert_eq!(popular_node.memory_tier, 0); // TIER_CORE
+
+        let forgotten_node = g.get_node("forgotten").unwrap().unwrap();
+        assert_eq!(forgotten_node.memory_tier, 2); // TIER_ARCHIVAL
+    }
+
+    #[test]
+    fn manual_tier_override() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("important", &prov).unwrap();
+        g.set_tier("important", 0).unwrap(); // force core
+
+        let node = g.get_node("important").unwrap().unwrap();
+        assert_eq!(node.memory_tier, 0);
+
+        let core = g.core_nodes().unwrap();
+        assert_eq!(core.len(), 1);
+        assert_eq!(core[0].label, "important");
+    }
+
+    #[test]
+    fn forward_chain_transitive_inference() {
+        use crate::learning::rules;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        // Setup: cat is_a feline, feline is_a animal
+        g.store("cat", &prov).unwrap();
+        g.store("feline", &prov).unwrap();
+        g.store("animal", &prov).unwrap();
+        g.relate("cat", "feline", "is_a", &prov).unwrap();
+        g.relate("feline", "animal", "is_a", &prov).unwrap();
+
+        // Rule: transitive is_a
+        let rule = rules::parse_rule(r#"
+rule transitive_type
+when edge(A, "is_a", B)
+when edge(B, "is_a", C)
+then edge(A, "is_a", C, min(A, C))
+"#).unwrap();
+
+        let result = g.forward_chain(&[rule], &prov).unwrap();
+        assert!(result.rules_fired > 0);
+        assert!(result.edges_created > 0);
+
+        // cat should now have a derived is_a edge to animal
+        assert!(g.edge_exists("cat", "animal", "is_a").unwrap());
+    }
+
+    #[test]
+    fn forward_chain_confidence_flag() {
+        use crate::learning::rules;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store_with_confidence("weak-fact", 0.15, &prov).unwrap();
+        g.store_with_confidence("strong-fact", 0.95, &prov).unwrap();
+
+        let rule = rules::parse_rule(r#"
+rule stale_warning
+when confidence(node, "<", 0.2)
+then flag(node, "low confidence")
+"#).unwrap();
+
+        let result = g.forward_chain(&[rule], &prov).unwrap();
+        assert_eq!(result.flags_raised, 1);
+
+        // Check that the flag was set as a property
+        let flag = g.get_property("weak-fact", "_flag").unwrap();
+        assert_eq!(flag, Some("low confidence".to_string()));
+
+        // Strong fact should NOT be flagged
+        let no_flag = g.get_property("strong-fact", "_flag").unwrap();
+        assert_eq!(no_flag, None);
+    }
+
+    #[test]
+    fn prove_direct_edge() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("a", &prov).unwrap();
+        g.store("b", &prov).unwrap();
+        g.relate("a", "b", "connects", &prov).unwrap();
+
+        let proof = g.prove("a", "b", "connects", 3).unwrap();
+        assert!(proof.supported);
+        assert_eq!(proof.chain.len(), 1);
+    }
+
+    #[test]
+    fn prove_transitive() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("a", &prov).unwrap();
+        g.store("b", &prov).unwrap();
+        g.store("c", &prov).unwrap();
+        g.relate("a", "b", "is_a", &prov).unwrap();
+        g.relate("b", "c", "is_a", &prov).unwrap();
+
+        let proof = g.prove("a", "c", "is_a", 3).unwrap();
+        assert!(proof.supported);
+        assert_eq!(proof.chain.len(), 2); // a->b, b->c
+    }
+
+    #[test]
+    fn prove_unsupported() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("a", &prov).unwrap();
+        g.store("b", &prov).unwrap();
+
+        let proof = g.prove("a", "b", "is_a", 3).unwrap();
+        assert!(!proof.supported);
     }
 
     #[test]

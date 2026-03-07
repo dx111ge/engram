@@ -61,7 +61,7 @@ mod tests {
 
         assert_eq!(idx.get(100), &[0, 2]);
         assert_eq!(idx.get(200), &[1]);
-        assert_eq!(idx.get(999), &[]);
+        assert_eq!(idx.get(999), &[] as &[u64]);
     }
 
     #[test]
@@ -78,7 +78,7 @@ mod tests {
         let mut idx = HashIndex::new();
         idx.insert(100, 0);
         idx.remove(100, 0);
-        assert_eq!(idx.get(100), &[]);
+        assert_eq!(idx.get(100), &[] as &[u64]);
         assert_eq!(idx.len(), 0);
     }
 }

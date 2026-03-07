@@ -1649,7 +1649,7 @@ Simplifications for Phase 0 (deferred complexity):
 - [x] CLI `search` command with query language
 - [ ] ONNX Runtime integration (`ort` crate, optional feature for real models)
 
-### Phase 3: Intelligence & Learning — IN PROGRESS
+### Phase 3: Intelligence & Learning — COMPLETE
 - [x] Confidence model (source-based initial scoring: Sensor 0.95, API 0.90, User 0.80, Derived 0.50, LLM 0.30)
 - [x] Confidence caps per source type (prevents LLM facts from reaching certainty)
 - [x] Confidence reinforcement on access (+0.02, capped)
@@ -1657,13 +1657,13 @@ Simplifications for Phase 0 (deferred complexity):
 - [x] Knowledge decay (0.999/day, ~30%/year unaccessed, threshold at 0.10)
 - [x] Correction handling ("this is wrong" → zero confidence + BFS distrust propagation with 0.5 damping)
 - [x] Co-occurrence tracking (passive frequency counters with conditional probability, persisted sidecar)
-- [ ] Contradiction flagging (detect conflicts, surface both sides, never auto-resolve)
-- [ ] Evidence surfacing on queries (return statistical evidence alongside facts)
-- [ ] Forward chaining inference engine (user-defined rules only)
-- [ ] Backward chaining / proof engine
-- [ ] Rule definition format and parser (humans create rules, engram executes them)
-- [ ] Temporal reasoning
-- [ ] Memory tier management (core/active/archival promotion/demotion)
+- [x] Contradiction flagging (property conflict detection, checked writes, surfaced in evidence)
+- [x] Evidence surfacing on queries (co-occurrences, supporting facts, contradictions)
+- [x] Forward chaining inference engine (pattern matching with variable binding, multi-edge rules)
+- [x] Backward chaining / proof engine (transitive BFS with confidence chain)
+- [x] Rule definition format and parser (edge/property/confidence conditions, edge/flag actions)
+- [x] Memory tier management (core/active/archival with automatic promotion/demotion sweep)
+- [ ] Temporal reasoning (time-based rule conditions — deferred to Phase 5 compute layer)
 
 ### Phase 4: API & Integration
 - [ ] HTTP server (axum)
@@ -1972,7 +1972,7 @@ Milestones map to phases:
   v0.1.0  — Phase 0: Storage POC passes GO/NO-GO gate              [DONE]
   v0.2.0  — Phase 1: Core graph engine (store, relate, traverse)   [DONE]
   v0.3.0  — Phase 2: Search & indexing (HNSW, BM25, temporal)      [DONE]
-  v0.4.0  — Phase 3: Intelligence & learning (rules, confidence, evidence)
+  v0.4.0  — Phase 3: Intelligence & learning (rules, confidence, evidence) [DONE]
   v0.5.0  — Phase 4: API & integration (HTTP, MCP, gRPC)
   v0.6.0  — Phase 5: Compute acceleration (SIMD, Vulkan, NPU)
   v0.7.0  — Phase 6: Knowledge mesh (federation, sync, trust)

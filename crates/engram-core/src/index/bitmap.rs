@@ -251,7 +251,7 @@ mod tests {
 
         assert_eq!(idx.slots_for(0), vec![0, 2]);
         assert_eq!(idx.slots_for(1), vec![1, 3]);
-        assert_eq!(idx.slots_for(99), vec![]);
+        assert_eq!(idx.slots_for(99), Vec::<u64>::new());
     }
 
     #[test]
