@@ -364,23 +364,9 @@ impl HnswIndex {
     }
 }
 
-/// Cosine distance: 1.0 - cosine_similarity
+/// Cosine distance: 1.0 - cosine_similarity (SIMD-accelerated when available)
 fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
-
-    for i in 0..a.len().min(b.len()) {
-        dot += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
-    }
-
-    let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom < f32::EPSILON {
-        return 1.0;
-    }
-    1.0 - (dot / denom)
+    engram_compute::simd::cosine_distance(a, b)
 }
 
 /// Write vectors to binary file.

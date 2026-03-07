@@ -6,6 +6,4 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-engram-core = { path = "../engram-core" }
-thiserror = { workspace = true }
 tracing = { workspace = true }
