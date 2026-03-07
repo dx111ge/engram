@@ -1,4 +1,5 @@
 use engram_core::graph::{Graph, Provenance};
+use engram_core::Embedder;
 use std::path::PathBuf;
 
 fn default_path(args: &[String], idx: usize) -> PathBuf {
@@ -198,11 +199,20 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let path = default_path(args, 2);
     let addr = args.get(3).map(|s| s.as_str()).unwrap_or("0.0.0.0:3030");
 
-    let g = if path.exists() {
+    let mut g = if path.exists() {
         Graph::open(&path)?
     } else {
         Graph::create(&path)?
     };
+
+    // Auto-configure embedder from environment if ENGRAM_EMBED_ENDPOINT is set
+    if let Some(embedder) = engram_core::ApiEmbedder::from_env() {
+        println!("Embedder: {} ({}D) via {}", embedder.model_id(), embedder.dim(),
+            std::env::var("ENGRAM_EMBED_ENDPOINT").unwrap_or_default());
+        g.set_embedder(Box::new(embedder));
+    } else {
+        println!("Embedder: none (set ENGRAM_EMBED_ENDPOINT for semantic search)");
+    }
 
     let state = engram_api::state::AppState::new(g);
 
@@ -232,8 +242,13 @@ fn cmd_reindex(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let path = default_path(args, 2);
     let mut g = Graph::open(&path)?;
 
-    // Reindex requires an embedder. For now, use the dummy embedder for testing.
-    // In production, configure ONNX embedder before calling reindex.
+    if let Some(embedder) = engram_core::ApiEmbedder::from_env() {
+        println!("Using embedder: {} ({}D)", embedder.model_id(), embedder.dim());
+        g.set_embedder(Box::new(embedder));
+    } else {
+        return Err("ENGRAM_EMBED_ENDPOINT must be set for reindex".into());
+    }
+
     let count = g.reindex()?;
     g.checkpoint()?;
     println!("Re-embedded {count} nodes");

@@ -9,4 +9,5 @@ pub use storage::node::Node;
 pub use storage::error::StorageError;
 pub use graph::Graph;
 pub use index::embedding::{Embedder, EmbedError};
+pub use index::embed_api::ApiEmbedder;
 pub use index::hnsw::HnswIndex;

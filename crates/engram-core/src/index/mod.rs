@@ -1,4 +1,5 @@
 pub mod bitmap;
+pub mod embed_api;
 pub mod embedding;
 pub mod fulltext;
 pub mod hash;
