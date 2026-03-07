@@ -20,6 +20,9 @@ fn main() {
         Some("query") => cmd_query(&args),
         Some("search") => cmd_search(&args),
         Some("delete") => cmd_delete(&args),
+        Some("serve") => cmd_serve(&args),
+        Some("mcp") => cmd_mcp(&args),
+        Some("reindex") => cmd_reindex(&args),
         _ => {
             print_usage();
             Ok(())
@@ -191,8 +194,54 @@ fn cmd_delete(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let path = default_path(args, 2);
+    let addr = args.get(3).map(|s| s.as_str()).unwrap_or("0.0.0.0:3030");
+
+    let g = if path.exists() {
+        Graph::open(&path)?
+    } else {
+        Graph::create(&path)?
+    };
+
+    let state = engram_api::state::AppState::new(g);
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        engram_api::server::serve(state, addr).await
+    })?;
+
+    Ok(())
+}
+
+fn cmd_mcp(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let path = default_path(args, 2);
+
+    let g = if path.exists() {
+        Graph::open(&path)?
+    } else {
+        Graph::create(&path)?
+    };
+
+    let state = engram_api::state::AppState::new(g);
+    engram_api::mcp::run_stdio(state);
+    Ok(())
+}
+
+fn cmd_reindex(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let path = default_path(args, 2);
+    let mut g = Graph::open(&path)?;
+
+    // Reindex requires an embedder. For now, use the dummy embedder for testing.
+    // In production, configure ONNX embedder before calling reindex.
+    let count = g.reindex()?;
+    g.checkpoint()?;
+    println!("Re-embedded {count} nodes");
+    Ok(())
+}
+
 fn print_usage() {
-    println!("engram v0.1.0 — AI Memory Engine");
+    println!("engram v0.1.0 -- AI Memory Engine");
     println!();
     println!("Usage:");
     println!("  engram create [path]                          Create a new .brain file");
@@ -203,6 +252,9 @@ fn print_usage() {
     println!("  engram query <label> [depth] [path]           Query a node and its edges");
     println!("  engram search <query> [path]                  Search (BM25, filters, boolean)");
     println!("  engram delete <label> [path]                  Soft-delete a node");
+    println!("  engram serve [path] [addr]                    Start HTTP API server (default: 0.0.0.0:3030)");
+    println!("  engram mcp [path]                             Start MCP server (JSON-RPC over stdio)");
+    println!("  engram reindex [path]                         Re-embed all nodes (after model change)");
     println!();
     println!("Search syntax:");
     println!("  engram search \"postgresql\"                    Full-text search");

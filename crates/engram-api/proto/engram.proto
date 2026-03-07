@@ -1,0 +1,172 @@
+syntax = "proto3";
+
+package engram;
+
+service EngramService {
+  rpc Store(StoreRequest) returns (StoreResponse);
+  rpc Relate(RelateRequest) returns (RelateResponse);
+  rpc Query(QueryRequest) returns (QueryResponse);
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc GetNode(GetNodeRequest) returns (NodeResponse);
+  rpc DeleteNode(DeleteNodeRequest) returns (DeleteResponse);
+  rpc Reinforce(ReinforceRequest) returns (ReinforceResponse);
+  rpc Correct(CorrectRequest) returns (CorrectResponse);
+  rpc Decay(DecayRequest) returns (DecayResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Stats(StatsRequest) returns (StatsResponse);
+  rpc Ask(AskRequest) returns (AskResponse);
+  rpc Tell(TellRequest) returns (TellResponse);
+}
+
+message StoreRequest {
+  string entity = 1;
+  string entity_type = 2;
+  map<string, string> properties = 3;
+  string source = 4;
+  float confidence = 5;
+}
+
+message StoreResponse {
+  uint64 node_id = 1;
+  string label = 2;
+  float confidence = 3;
+}
+
+message RelateRequest {
+  string from = 1;
+  string to = 2;
+  string relationship = 3;
+  float confidence = 4;
+}
+
+message RelateResponse {
+  string from = 1;
+  string to = 2;
+  string relationship = 3;
+  uint64 edge_slot = 4;
+}
+
+message QueryRequest {
+  string start = 1;
+  uint32 depth = 2;
+  float min_confidence = 3;
+}
+
+message QueryResponse {
+  repeated NodeHit nodes = 1;
+  repeated EdgeHit edges = 2;
+}
+
+message NodeHit {
+  uint64 node_id = 1;
+  string label = 2;
+  float confidence = 3;
+  double score = 4;
+  uint32 depth = 5;
+}
+
+message EdgeHit {
+  string from = 1;
+  string to = 2;
+  string relationship = 3;
+  float confidence = 4;
+}
+
+message SearchRequest {
+  string query = 1;
+  uint32 limit = 2;
+}
+
+message SearchResponse {
+  repeated NodeHit results = 1;
+  uint32 total = 2;
+}
+
+message GetNodeRequest {
+  string label = 1;
+}
+
+message NodeResponse {
+  uint64 node_id = 1;
+  string label = 2;
+  float confidence = 3;
+  map<string, string> properties = 4;
+  repeated EdgeHit edges_from = 5;
+  repeated EdgeHit edges_to = 6;
+}
+
+message DeleteNodeRequest {
+  string label = 1;
+}
+
+message DeleteResponse {
+  bool deleted = 1;
+  string entity = 2;
+}
+
+message ReinforceRequest {
+  string entity = 1;
+  string source = 2;
+}
+
+message ReinforceResponse {
+  string entity = 1;
+  float new_confidence = 2;
+}
+
+message CorrectRequest {
+  string entity = 1;
+  string reason = 2;
+  string source = 3;
+}
+
+message CorrectResponse {
+  string corrected = 1;
+  repeated string propagated_to = 2;
+}
+
+message DecayRequest {}
+
+message DecayResponse {
+  uint32 nodes_decayed = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+  string version = 2;
+}
+
+message StatsRequest {}
+
+message StatsResponse {
+  uint64 nodes = 1;
+  uint64 edges = 2;
+}
+
+message AskRequest {
+  string question = 1;
+}
+
+message AskResult {
+  string label = 1;
+  float confidence = 2;
+  string relationship = 3;
+  string detail = 4;
+}
+
+message AskResponse {
+  string interpretation = 1;
+  repeated AskResult results = 2;
+}
+
+message TellRequest {
+  string statement = 1;
+  string source = 2;
+}
+
+message TellResponse {
+  string interpretation = 1;
+  repeated string actions = 2;
+}

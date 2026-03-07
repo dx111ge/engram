@@ -1462,6 +1462,70 @@ impl Graph {
         }
     }
 
+    /// Re-embed all active nodes. Call after changing the embedder model.
+    /// Returns the number of nodes re-embedded.
+    pub fn reindex(&mut self) -> Result<u32> {
+        let embedder = match &self.embedder {
+            Some(e) => e,
+            None => {
+                return Err(StorageError::InvalidFile {
+                    reason: "no embedder configured".into(),
+                });
+            }
+        };
+
+        // Clear the HNSW index
+        self.hnsw = HnswIndex::new(self.brain.path());
+
+        let (node_count, _) = self.brain.stats();
+        let mut count = 0u32;
+
+        for slot in 0..node_count {
+            let node = self.brain.read_node(slot)?;
+            if !node.is_active() {
+                continue;
+            }
+
+            let mut text = node.label().to_string();
+            if let Some(props) = self.props.get_all(slot) {
+                for (k, v) in props {
+                    text.push(' ');
+                    text.push_str(k);
+                    text.push(' ');
+                    text.push_str(v);
+                }
+            }
+
+            match embedder.embed(&text) {
+                Ok(vector) => {
+                    self.hnsw.insert(slot, vector);
+                    count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("failed to embed node {}: {e}", node.label());
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Get a node by its internal node_id.
+    pub fn get_node_by_id(&self, node_id: u64) -> Result<Option<&Node>> {
+        if let Some(slot) = self.find_slot_by_id(node_id) {
+            let node = self.brain.read_node(slot)?;
+            if node.is_active() {
+                return Ok(Some(node));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Get a node's label by its storage slot.
+    pub fn get_node_label_by_slot(&self, slot: u64) -> Option<String> {
+        self.brain.read_node(slot).ok().map(|n| n.label().to_string())
+    }
+
     /// Flush and checkpoint everything: mmap, WAL, types, properties, vectors, co-occurrence.
     pub fn checkpoint(&mut self) -> Result<()> {
         self.brain.checkpoint()?;

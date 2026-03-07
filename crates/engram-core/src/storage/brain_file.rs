@@ -75,6 +75,11 @@ impl BrainFile {
         Ok(brain)
     }
 
+    /// Get the file path of this .brain file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Store a new node. Returns the assigned node ID.
     pub fn store_node(&mut self, label: &str) -> Result<u64> {
         let header = self.mmap.read_header();
