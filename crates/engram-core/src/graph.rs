@@ -12,6 +12,11 @@ use crate::index::hnsw::HnswIndex;
 use crate::index::hybrid;
 use crate::index::query::{self, CmpOp, Query};
 use crate::index::temporal::{TemporalIndex, TimeAxis};
+use crate::learning::cooccurrence::CooccurrenceTracker;
+use crate::learning::confidence::{confidence_cap, initial_confidence};
+use crate::learning::correction::{self, CorrectionResult};
+use crate::learning::decay;
+use crate::learning::reinforce;
 use crate::storage::brain_file::BrainFile;
 use crate::storage::error::{Result, StorageError};
 use crate::storage::node::{hash_label, Node};
@@ -93,6 +98,10 @@ pub struct Graph {
     hnsw: HnswIndex,
     /// Optional embedding model for automatic text-to-vector conversion
     embedder: Option<Box<dyn Embedder>>,
+    /// Co-occurrence tracker for passive frequency statistics
+    cooccurrence: CooccurrenceTracker,
+    /// Source type per node slot (for confidence cap lookups)
+    source_types: HashMap<u64, SourceType>,
 }
 
 impl Graph {
@@ -119,6 +128,8 @@ impl Graph {
             node_type_lookup: HashMap::new(),
             hnsw: HnswIndex::new(path),
             embedder: None,
+            cooccurrence: CooccurrenceTracker::new(path),
+            source_types: HashMap::new(),
         })
     }
 
@@ -128,6 +139,8 @@ impl Graph {
         let type_registry = TypeRegistry::load(path)?;
         let props = PropertyStore::load(path)?;
         let hnsw = HnswIndex::load(path);
+        let cooccurrence = CooccurrenceTracker::load(path)
+            .unwrap_or_else(|_| CooccurrenceTracker::new(path));
         let mut graph = Graph {
             brain,
             label_index: HashIndex::new(),
@@ -144,6 +157,8 @@ impl Graph {
             node_type_lookup: HashMap::new(),
             hnsw,
             embedder: None,
+            cooccurrence,
+            source_types: HashMap::new(),
         };
         graph.rebuild_indexes()?;
         Ok(graph)
@@ -155,14 +170,19 @@ impl Graph {
     }
 
     /// Store a new node with a label. Returns node ID.
+    /// Confidence is automatically set based on the provenance source type.
     pub fn store(&mut self, label: &str, provenance: &Provenance) -> Result<u64> {
         let node_id = self.brain.store_node(label)?;
         let (node_count, _) = self.brain.stats();
         let slot = node_count - 1;
 
-        // Update source_id from provenance
-        self.brain
-            .update_node_field(slot, |n| n.source_id = provenance.to_source_hash())?;
+        // Set source-based initial confidence and source_id
+        let init_conf = initial_confidence(provenance.source_type);
+        self.brain.update_node_field(slot, |n| {
+            n.source_id = provenance.to_source_hash();
+            n.confidence = init_conf;
+        })?;
+        self.source_types.insert(slot, provenance.source_type);
 
         self.label_index.insert(hash_label(label), slot);
 
@@ -621,13 +641,197 @@ impl Graph {
         self.brain.stats()
     }
 
-    /// Flush and checkpoint everything: mmap, WAL, types, properties, vectors.
+    // --- Learning operations ---
+
+    /// Reinforce a node — called when a fact is accessed or used.
+    /// Increments access_count, updates last_accessed, and boosts confidence.
+    pub fn reinforce_access(&mut self, label: &str) -> Result<bool> {
+        let slot = match self.find_slot_by_label(label)? {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        let cap = self.source_cap(slot);
+        let now = current_timestamp();
+        self.brain.update_node_field(slot, |n| {
+            n.access_count = n.access_count.saturating_add(1);
+            n.last_accessed = now;
+            n.confidence = reinforce::reinforce_access(n.confidence, cap);
+            n.updated_at = now;
+        })?;
+        Ok(true)
+    }
+
+    /// Confirm a node — called when new evidence supports this fact.
+    /// Larger confidence boost than access reinforcement.
+    pub fn reinforce_confirm(&mut self, label: &str, provenance: &Provenance) -> Result<bool> {
+        let slot = match self.find_slot_by_label(label)? {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        let cap = self.source_cap(slot);
+        let now = current_timestamp();
+        self.brain.update_node_field(slot, |n| {
+            n.access_count = n.access_count.saturating_add(1);
+            n.last_accessed = now;
+            n.confidence = reinforce::reinforce_confirm(n.confidence, cap);
+            n.source_id = provenance.to_source_hash();
+            n.updated_at = now;
+        })?;
+        Ok(true)
+    }
+
+    /// Apply time-based decay to all active nodes.
+    /// Returns the number of nodes whose confidence was reduced.
+    pub fn apply_decay(&mut self) -> Result<u32> {
+        let (node_count, _) = self.brain.stats();
+        let now = current_timestamp();
+        let mut decayed_count = 0u32;
+
+        for slot in 0..node_count {
+            let node = self.brain.read_node(slot)?;
+            if !node.is_active() || node.confidence <= 0.0 {
+                continue;
+            }
+
+            let new_conf = decay::apply_decay(node.confidence, node.last_accessed, now);
+            if (new_conf - node.confidence).abs() > f32::EPSILON {
+                self.brain.update_node_field(slot, |n| {
+                    n.confidence = new_conf;
+                })?;
+                decayed_count += 1;
+            }
+        }
+
+        Ok(decayed_count)
+    }
+
+    /// Correct a fact — mark it as wrong and propagate distrust to neighbors.
+    /// The corrected node's confidence drops to 0. Connected nodes get penalized
+    /// with damping (weaker with distance).
+    pub fn correct(
+        &mut self,
+        label: &str,
+        provenance: &Provenance,
+        max_depth: u32,
+    ) -> Result<Option<CorrectionResult>> {
+        let slot = match self.find_slot_by_label(label)? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let now = current_timestamp();
+
+        // Read old confidence for propagation base (copy values before mutable borrow)
+        let node_ref = self.brain.read_node(slot)?;
+        let base_penalty = node_ref.confidence;
+        let node_id = node_ref.id;
+
+        // Zero out the corrected node
+        self.brain.update_node_field(slot, |n| {
+            n.confidence = 0.0;
+            n.source_id = provenance.to_source_hash();
+            n.updated_at = now;
+        })?;
+
+        // BFS propagation of distrust
+        let mut propagated = Vec::new();
+        let mut visited: HashSet<u64> = HashSet::new();
+        let mut queue: VecDeque<(u64, u32)> = VecDeque::new();
+        visited.insert(node_id);
+
+        // Seed with direct neighbors
+        if let Some(edge_slots) = self.adj_out.get(&node_id) {
+            for &edge_slot in edge_slots {
+                let edge = self.brain.read_edge(edge_slot)?;
+                if visited.insert(edge.to_node) {
+                    queue.push_back((edge.to_node, 1));
+                }
+            }
+        }
+
+        while let Some((node_id, distance)) = queue.pop_front() {
+            if distance > max_depth {
+                continue;
+            }
+
+            if let Some(neighbor_slot) = self.find_slot_by_id(node_id) {
+                let neighbor = self.brain.read_node(neighbor_slot)?;
+                if !neighbor.is_active() {
+                    continue;
+                }
+
+                let penalty = correction::propagated_penalty(base_penalty, distance);
+                let old_conf = neighbor.confidence;
+                let new_conf = (old_conf - penalty).max(0.0);
+
+                if (new_conf - old_conf).abs() > f32::EPSILON {
+                    self.brain.update_node_field(neighbor_slot, |n| {
+                        n.confidence = new_conf;
+                        n.updated_at = now;
+                    })?;
+                    propagated.push((neighbor_slot, old_conf, new_conf));
+                }
+
+                // Continue BFS
+                if distance < max_depth {
+                    if let Some(edge_slots) = self.adj_out.get(&node_id) {
+                        for &edge_slot in edge_slots {
+                            let edge = self.brain.read_edge(edge_slot)?;
+                            if visited.insert(edge.to_node) {
+                                queue.push_back((edge.to_node, distance + 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Some(CorrectionResult {
+            corrected_slot: slot,
+            propagated,
+        }))
+    }
+
+    /// Record a co-occurrence between two labels.
+    pub fn record_cooccurrence(&mut self, antecedent: &str, consequent: &str) {
+        let now = current_timestamp();
+        self.cooccurrence.record(antecedent, consequent, now);
+    }
+
+    /// Get co-occurrence stats for a pair.
+    pub fn get_cooccurrence(&self, antecedent: &str, consequent: &str) -> Option<(u32, f32)> {
+        self.cooccurrence
+            .get(antecedent, consequent)
+            .map(|s| (s.count, s.probability()))
+    }
+
+    /// Get all co-occurrences for an antecedent.
+    pub fn cooccurrences_for(&self, antecedent: &str) -> Vec<(String, u32)> {
+        self.cooccurrence
+            .for_antecedent(antecedent)
+            .into_iter()
+            .map(|(cons, stats)| (cons.to_string(), stats.count))
+            .collect()
+    }
+
+    /// Get the confidence cap for a node based on its source type.
+    fn source_cap(&self, slot: u64) -> f32 {
+        match self.source_types.get(&slot) {
+            Some(st) => confidence_cap(*st),
+            None => 0.95, // default cap (user-level)
+        }
+    }
+
+    /// Flush and checkpoint everything: mmap, WAL, types, properties, vectors, co-occurrence.
     pub fn checkpoint(&mut self) -> Result<()> {
         self.brain.checkpoint()?;
         self.type_registry.flush()?;
         self.props.flush()?;
         self.hnsw.flush().map_err(|e| StorageError::InvalidFile {
             reason: format!("vector flush failed: {e}"),
+        })?;
+        self.cooccurrence.flush().map_err(|e| StorageError::InvalidFile {
+            reason: format!("co-occurrence flush failed: {e}"),
         })?;
         Ok(())
     }
@@ -1373,6 +1577,162 @@ mod tests {
             let results = g.search_vector(&[1.0, 0.0, 0.0], 5).unwrap();
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].label, "node-a");
+        }
+    }
+
+    #[test]
+    fn source_based_initial_confidence() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+
+        // User source → 0.80 initial
+        let user_prov = Provenance::user("test");
+        g.store("user-fact", &user_prov).unwrap();
+        let node = g.get_node("user-fact").unwrap().unwrap();
+        assert!((node.confidence - 0.80).abs() < f32::EPSILON);
+
+        // Sensor source → 0.95 initial
+        let sensor_prov = Provenance {
+            source_type: SourceType::Sensor,
+            source_id: "temp-sensor".into(),
+        };
+        g.store("sensor-fact", &sensor_prov).unwrap();
+        let node = g.get_node("sensor-fact").unwrap().unwrap();
+        assert!((node.confidence - 0.95).abs() < f32::EPSILON);
+
+        // LLM source → 0.30 initial
+        let llm_prov = Provenance {
+            source_type: SourceType::Llm,
+            source_id: "gpt-4".into(),
+        };
+        g.store("llm-fact", &llm_prov).unwrap();
+        let node = g.get_node("llm-fact").unwrap().unwrap();
+        assert!((node.confidence - 0.30).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn reinforce_access_boosts_confidence() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("fact-a", &prov).unwrap();
+        let before = g.get_node("fact-a").unwrap().unwrap().confidence;
+
+        g.reinforce_access("fact-a").unwrap();
+        let after = g.get_node("fact-a").unwrap().unwrap().confidence;
+        assert!(after > before);
+
+        let node = g.get_node("fact-a").unwrap().unwrap();
+        assert_eq!(node.access_count, 1);
+    }
+
+    #[test]
+    fn reinforce_confirm_boosts_more() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("fact-b", &prov).unwrap();
+        let before = g.get_node("fact-b").unwrap().unwrap().confidence;
+
+        g.reinforce_confirm("fact-b", &prov).unwrap();
+        let after = g.get_node("fact-b").unwrap().unwrap().confidence;
+        assert!(after - before > 0.05); // confirmation boost is 0.10
+    }
+
+    #[test]
+    fn reinforce_respects_source_cap() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let llm_prov = Provenance {
+            source_type: SourceType::Llm,
+            source_id: "model".into(),
+        };
+
+        g.store("llm-fact", &llm_prov).unwrap();
+        // LLM cap is 0.70, initial is 0.30
+        // Even with many confirmations, should not exceed 0.70
+        for _ in 0..10 {
+            g.reinforce_confirm("llm-fact", &llm_prov).unwrap();
+        }
+        let node = g.get_node("llm-fact").unwrap().unwrap();
+        assert!(node.confidence <= 0.70 + f32::EPSILON);
+    }
+
+    #[test]
+    fn correction_zeros_and_propagates() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("wrong-fact", &prov).unwrap();
+        g.store("derived-a", &prov).unwrap();
+        g.store("derived-b", &prov).unwrap();
+        g.relate("wrong-fact", "derived-a", "supports", &prov).unwrap();
+        g.relate("wrong-fact", "derived-b", "supports", &prov).unwrap();
+
+        let before_a = g.get_node("derived-a").unwrap().unwrap().confidence;
+        let before_b = g.get_node("derived-b").unwrap().unwrap().confidence;
+
+        let result = g.correct("wrong-fact", &prov, 2).unwrap().unwrap();
+
+        // Corrected node is zeroed
+        let slot = result.corrected_slot;
+        let raw_node = g.brain.read_node(slot).unwrap();
+        assert_eq!(raw_node.confidence, 0.0);
+
+        // Neighbors got penalized
+        assert!(!result.propagated.is_empty());
+        let after_a = g.get_node("derived-a").unwrap().unwrap().confidence;
+        let after_b = g.get_node("derived-b").unwrap().unwrap().confidence;
+        assert!(after_a < before_a);
+        assert!(after_b < before_b);
+    }
+
+    #[test]
+    fn cooccurrence_tracking() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+
+        g.record_cooccurrence("migration", "missing-index");
+        g.record_cooccurrence("migration", "missing-index");
+        g.record_cooccurrence("migration", "missing-index");
+        g.record_cooccurrence("deploy", "latency-spike");
+
+        let (count, _prob) = g.get_cooccurrence("migration", "missing-index").unwrap();
+        assert_eq!(count, 3);
+
+        let pairs = g.cooccurrences_for("migration");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "missing-index");
+        assert_eq!(pairs[0].1, 3);
+    }
+
+    #[test]
+    fn cooccurrence_persists() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let prov = test_provenance();
+
+        {
+            let mut g = Graph::create(&path).unwrap();
+            g.store("a", &prov).unwrap();
+            g.record_cooccurrence("deploy", "error");
+            g.record_cooccurrence("deploy", "error");
+            g.checkpoint().unwrap();
+        }
+
+        {
+            let g = Graph::open(&path).unwrap();
+            let (count, _) = g.get_cooccurrence("deploy", "error").unwrap();
+            assert_eq!(count, 2);
         }
     }
 

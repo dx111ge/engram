@@ -1649,13 +1649,15 @@ Simplifications for Phase 0 (deferred complexity):
 - [x] CLI `search` command with query language
 - [ ] ONNX Runtime integration (`ort` crate, optional feature for real models)
 
-### Phase 3: Intelligence & Learning
-- [ ] Confidence model (source-based initial scoring)
-- [ ] Confidence reinforcement on access/confirmation
-- [ ] Knowledge decay (time-based confidence reduction)
-- [ ] Correction handling (explicit "this is wrong" with distrust propagation)
+### Phase 3: Intelligence & Learning — IN PROGRESS
+- [x] Confidence model (source-based initial scoring: Sensor 0.95, API 0.90, User 0.80, Derived 0.50, LLM 0.30)
+- [x] Confidence caps per source type (prevents LLM facts from reaching certainty)
+- [x] Confidence reinforcement on access (+0.02, capped)
+- [x] Confidence reinforcement on confirmation (+0.10, capped)
+- [x] Knowledge decay (0.999/day, ~30%/year unaccessed, threshold at 0.10)
+- [x] Correction handling ("this is wrong" → zero confidence + BFS distrust propagation with 0.5 damping)
+- [x] Co-occurrence tracking (passive frequency counters with conditional probability, persisted sidecar)
 - [ ] Contradiction flagging (detect conflicts, surface both sides, never auto-resolve)
-- [ ] Co-occurrence tracking (passive edge-type frequency counters)
 - [ ] Evidence surfacing on queries (return statistical evidence alongside facts)
 - [ ] Forward chaining inference engine (user-defined rules only)
 - [ ] Backward chaining / proof engine

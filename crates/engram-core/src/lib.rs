@@ -1,6 +1,7 @@
 pub mod storage;
 pub mod index;
 pub mod graph;
+pub mod learning;
 
 pub use storage::brain_file::BrainFile;
 pub use storage::edge::Edge;

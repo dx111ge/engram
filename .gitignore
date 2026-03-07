@@ -5,3 +5,4 @@
 *.brain.props
 *.brain.types
 *.brain.vectors
+*.brain.cooccur
