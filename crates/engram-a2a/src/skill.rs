@@ -1,0 +1,414 @@
+/// Skill routing — maps A2A skill IDs to engram operations.
+///
+/// Each skill corresponds to a set of graph operations. The router
+/// parses the incoming message, executes against the graph, and
+/// returns artifacts.
+
+use std::sync::{Arc, Mutex};
+
+use engram_core::graph::{Graph, Provenance};
+
+use crate::task::{Artifact, MessagePart, TaskMessage, TaskRequest, TaskResponse};
+
+/// Route a task to the appropriate skill handler.
+pub fn route_task(
+    request: &TaskRequest,
+    graph: &Arc<Mutex<Graph>>,
+) -> TaskResponse {
+    let task_id = request.id.as_deref().unwrap_or("auto");
+    let text = request.message.text();
+
+    match request.skill_id.as_str() {
+        "store-knowledge" => handle_store(task_id, &request.message, graph),
+        "query-knowledge" => handle_query(task_id, &text, graph),
+        "reason" => handle_reason(task_id, &text, graph),
+        "learn" => handle_learn(task_id, &request.message, graph),
+        "explain" => handle_explain(task_id, &text, graph),
+        other => TaskResponse::failed(task_id, &format!("Unknown skill: {other}")),
+    }
+}
+
+/// Store knowledge — handles both text and structured input.
+fn handle_store(task_id: &str, message: &TaskMessage, graph: &Arc<Mutex<Graph>>) -> TaskResponse {
+    let mut g = match graph.lock() {
+        Ok(g) => g,
+        Err(_) => return TaskResponse::failed(task_id, "graph lock poisoned"),
+    };
+    let prov = Provenance::user("a2a");
+    let text = message.text();
+
+    // Check for structured data input
+    if let Some(data) = message.data() {
+        return handle_store_structured(task_id, data, &mut g, &prov);
+    }
+
+    // Natural language store via the tell handler
+    let result = engram_api::natural::handle_tell(&mut g, &text, Some("a2a"));
+    TaskResponse::completed(task_id, vec![
+        Artifact::json(serde_json::json!({
+            "action": "store",
+            "result": serde_json::to_value(&result).unwrap_or_default(),
+        })),
+    ])
+}
+
+fn handle_store_structured(
+    task_id: &str,
+    data: &serde_json::Value,
+    g: &mut Graph,
+    prov: &Provenance,
+) -> TaskResponse {
+    let entity = data.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+    if entity.is_empty() {
+        return TaskResponse::failed(task_id, "missing 'entity' field in data");
+    }
+
+    let confidence = data.get("confidence").and_then(|v| v.as_f64()).map(|c| c as f32);
+
+    let slot = if let Some(conf) = confidence {
+        g.store_with_confidence(entity, conf, prov)
+    } else {
+        g.store(entity, prov)
+    };
+
+    match slot {
+        Ok(slot) => TaskResponse::completed(task_id, vec![
+            Artifact::json(serde_json::json!({
+                "action": "store",
+                "entity": entity,
+                "slot": slot,
+                "confidence": confidence.unwrap_or(0.5),
+            })),
+        ]),
+        Err(e) => TaskResponse::failed(task_id, &e.to_string()),
+    }
+}
+
+/// Query knowledge — natural language or structured.
+fn handle_query(task_id: &str, text: &str, graph: &Arc<Mutex<Graph>>) -> TaskResponse {
+    let g = match graph.lock() {
+        Ok(g) => g,
+        Err(_) => return TaskResponse::failed(task_id, "graph lock poisoned"),
+    };
+
+    // Use the NL ask handler
+    let result = engram_api::natural::handle_ask(&g, text);
+
+    TaskResponse::completed(task_id, vec![
+        Artifact::json(serde_json::json!({
+            "action": "query",
+            "query": text,
+            "result": result,
+        })),
+    ])
+}
+
+/// Reason & prove — inference and proof.
+fn handle_reason(task_id: &str, text: &str, graph: &Arc<Mutex<Graph>>) -> TaskResponse {
+    let g = match graph.lock() {
+        Ok(g) => g,
+        Err(_) => return TaskResponse::failed(task_id, "graph lock poisoned"),
+    };
+
+    // Try to extract "from" and "to" for prove, otherwise use search
+    let lower = text.to_lowercase();
+    if lower.contains(" related to ") || lower.contains(" connected to ") || lower.contains(" linked to ") {
+        // Try to extract entities for proof
+        let parts: Vec<&str> = if lower.contains(" related to ") {
+            text.splitn(2, " related to ").collect()
+        } else if lower.contains(" connected to ") {
+            text.splitn(2, " connected to ").collect()
+        } else {
+            text.splitn(2, " linked to ").collect()
+        };
+
+        if parts.len() == 2 {
+            let from = parts[0].trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+            let to = parts[1].trim_end_matches('?').trim();
+            let proof = g.prove(from, to, "is_a", 5);
+            return TaskResponse::completed(task_id, vec![
+                Artifact::json(serde_json::json!({
+                    "action": "prove",
+                    "from": from,
+                    "to": to,
+                    "proof": format!("{:?}", proof),
+                })),
+            ]);
+        }
+    }
+
+    // Fallback: search
+    let result = engram_api::natural::handle_ask(&g, text);
+    TaskResponse::completed(task_id, vec![
+        Artifact::json(serde_json::json!({
+            "action": "reason",
+            "query": text,
+            "result": result,
+        })),
+    ])
+}
+
+/// Learn & correct — reinforce, correct, decay.
+fn handle_learn(task_id: &str, message: &TaskMessage, graph: &Arc<Mutex<Graph>>) -> TaskResponse {
+    let mut g = match graph.lock() {
+        Ok(g) => g,
+        Err(_) => return TaskResponse::failed(task_id, "graph lock poisoned"),
+    };
+
+    let text = message.text();
+    let lower = text.to_lowercase();
+    let prov = Provenance::user("a2a");
+
+    if lower.starts_with("confirm ") || lower.starts_with("reinforce ") {
+        let entity = text.splitn(2, ' ').nth(1).unwrap_or("").trim();
+        match g.reinforce_confirm(entity, &prov) {
+            Ok(updated) => {
+                let new_conf = g.get_node(entity).ok().flatten().map(|n| n.confidence).unwrap_or(0.0);
+                return TaskResponse::completed(task_id, vec![
+                    Artifact::json(serde_json::json!({
+                        "action": "reinforce",
+                        "entity": entity,
+                        "updated": updated,
+                        "confidence": new_conf,
+                    })),
+                ]);
+            }
+            Err(e) => return TaskResponse::failed(task_id, &e.to_string()),
+        }
+    }
+
+    if lower.starts_with("correct ") || lower.contains(" was wrong") {
+        let entity = if lower.starts_with("correct ") {
+            text.splitn(2, ' ').nth(1).unwrap_or("").trim()
+        } else {
+            text.split(" was wrong").next().unwrap_or("").trim()
+        };
+        match g.correct(entity, &prov, 3) {
+            Ok(Some(correction)) => {
+                return TaskResponse::completed(task_id, vec![
+                    Artifact::json(serde_json::json!({
+                        "action": "correct",
+                        "entity": entity,
+                        "corrected_slot": correction.corrected_slot,
+                        "propagated_count": correction.propagated.len(),
+                    })),
+                ]);
+            }
+            Ok(None) => {
+                return TaskResponse::completed(task_id, vec![
+                    Artifact::json(serde_json::json!({
+                        "action": "correct",
+                        "entity": entity,
+                        "result": "entity not found",
+                    })),
+                ]);
+            }
+            Err(e) => return TaskResponse::failed(task_id, &e.to_string()),
+        }
+    }
+
+    if lower.starts_with("forget ") || lower.starts_with("decay ") {
+        match g.apply_decay() {
+            Ok(count) => {
+                return TaskResponse::completed(task_id, vec![
+                    Artifact::json(serde_json::json!({
+                        "action": "decay",
+                        "nodes_decayed": count,
+                    })),
+                ]);
+            }
+            Err(e) => return TaskResponse::failed(task_id, &e.to_string()),
+        }
+    }
+
+    // Fallback: store via tell
+    let result = engram_api::natural::handle_tell(&mut g, &text, Some("a2a"));
+    TaskResponse::completed(task_id, vec![
+        Artifact::json(serde_json::json!({
+            "action": "learn",
+            "result": serde_json::to_value(&result).unwrap_or_default(),
+        })),
+    ])
+}
+
+/// Explain provenance.
+fn handle_explain(task_id: &str, text: &str, graph: &Arc<Mutex<Graph>>) -> TaskResponse {
+    let g = match graph.lock() {
+        Ok(g) => g,
+        Err(_) => return TaskResponse::failed(task_id, "graph lock poisoned"),
+    };
+
+    // Extract entity name from questions like "How do we know about X?"
+    let lower = text.to_lowercase();
+    let entity = if lower.contains("about ") {
+        text.split("about ").last().unwrap_or(text).trim_end_matches('?').trim()
+    } else if lower.contains("for ") {
+        text.split("for ").last().unwrap_or(text).trim_end_matches('?').trim()
+    } else {
+        text.trim_end_matches('?').trim()
+    };
+
+    let node = g.get_node(entity);
+    match node {
+        Ok(Some(n)) => {
+            let props = g.get_properties(entity).unwrap_or(None).unwrap_or_default();
+            let edges_from = g.edges_from(entity).unwrap_or_default();
+            let edges_to = g.edges_to(entity).unwrap_or_default();
+            let cooccurrences = g.cooccurrences_for(entity);
+            TaskResponse::completed(task_id, vec![
+                Artifact::json(serde_json::json!({
+                    "action": "explain",
+                    "entity": entity,
+                    "confidence": n.confidence,
+                    "properties": props,
+                    "edges_from": edges_from.iter().map(|e| serde_json::json!({
+                        "to": e.to, "relationship": e.relationship, "confidence": e.confidence
+                    })).collect::<Vec<_>>(),
+                    "edges_to": edges_to.iter().map(|e| serde_json::json!({
+                        "from": e.from, "relationship": e.relationship, "confidence": e.confidence
+                    })).collect::<Vec<_>>(),
+                    "cooccurrences": cooccurrences.iter().map(|(e, c)| serde_json::json!({
+                        "entity": e, "count": c
+                    })).collect::<Vec<_>>(),
+                })),
+            ])
+        }
+        Ok(None) => TaskResponse::failed(task_id, &format!("entity not found: {entity}")),
+        Err(e) => TaskResponse::failed(task_id, &e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_graph() -> Arc<Mutex<Graph>> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.brain");
+        let g = Graph::create(&path).unwrap();
+        // Leak tempdir to keep it alive
+        std::mem::forget(dir);
+        Arc::new(Mutex::new(g))
+    }
+
+    #[test]
+    fn store_text_skill() {
+        let graph = make_graph();
+        let req = TaskRequest {
+            id: Some("t1".to_string()),
+            skill_id: "store-knowledge".to_string(),
+            message: TaskMessage::user_text("Rust is a systems language"),
+            metadata: None,
+            push_notification_url: None,
+        };
+        let resp = route_task(&req, &graph);
+        assert_eq!(resp.status.state, crate::task::TaskState::Completed);
+    }
+
+    #[test]
+    fn store_structured_skill() {
+        let graph = make_graph();
+        let req = TaskRequest {
+            id: Some("t2".to_string()),
+            skill_id: "store-knowledge".to_string(),
+            message: TaskMessage {
+                role: "user".to_string(),
+                parts: vec![
+                    MessagePart::Data {
+                        data: serde_json::json!({
+                            "entity": "PostgreSQL",
+                            "confidence": 0.9
+                        }),
+                    },
+                ],
+            },
+            metadata: None,
+            push_notification_url: None,
+        };
+        let resp = route_task(&req, &graph);
+        assert_eq!(resp.status.state, crate::task::TaskState::Completed);
+        let art = &resp.artifacts.unwrap()[0];
+        assert_eq!(art.data["entity"], "PostgreSQL");
+    }
+
+    #[test]
+    fn query_skill() {
+        let graph = make_graph();
+        // Store something first
+        graph.lock().unwrap().store("Rust", &Provenance::user("test")).unwrap();
+
+        let req = TaskRequest {
+            id: Some("t3".to_string()),
+            skill_id: "query-knowledge".to_string(),
+            message: TaskMessage::user_text("What is Rust?"),
+            metadata: None,
+            push_notification_url: None,
+        };
+        let resp = route_task(&req, &graph);
+        assert_eq!(resp.status.state, crate::task::TaskState::Completed);
+    }
+
+    #[test]
+    fn unknown_skill() {
+        let graph = make_graph();
+        let req = TaskRequest {
+            id: Some("t4".to_string()),
+            skill_id: "unknown-skill".to_string(),
+            message: TaskMessage::user_text("test"),
+            metadata: None,
+            push_notification_url: None,
+        };
+        let resp = route_task(&req, &graph);
+        assert_eq!(resp.status.state, crate::task::TaskState::Failed);
+    }
+
+    #[test]
+    fn explain_skill() {
+        let graph = make_graph();
+        graph.lock().unwrap().store("Rust", &Provenance::user("test")).unwrap();
+
+        let req = TaskRequest {
+            id: Some("t5".to_string()),
+            skill_id: "explain".to_string(),
+            message: TaskMessage::user_text("How do we know about Rust?"),
+            metadata: None,
+            push_notification_url: None,
+        };
+        let resp = route_task(&req, &graph);
+        assert_eq!(resp.status.state, crate::task::TaskState::Completed);
+    }
+
+    #[test]
+    fn learn_reinforce() {
+        let graph = make_graph();
+        graph.lock().unwrap().store("Rust", &Provenance::user("test")).unwrap();
+
+        let req = TaskRequest {
+            id: Some("t6".to_string()),
+            skill_id: "learn".to_string(),
+            message: TaskMessage::user_text("Confirm Rust"),
+            metadata: None,
+            push_notification_url: None,
+        };
+        let resp = route_task(&req, &graph);
+        assert_eq!(resp.status.state, crate::task::TaskState::Completed);
+        assert!(resp.artifacts.unwrap()[0].data["action"] == "reinforce");
+    }
+
+    #[test]
+    fn reason_skill() {
+        let graph = make_graph();
+        graph.lock().unwrap().store("A", &Provenance::user("test")).unwrap();
+        graph.lock().unwrap().store("B", &Provenance::user("test")).unwrap();
+
+        let req = TaskRequest {
+            id: Some("t7".to_string()),
+            skill_id: "reason".to_string(),
+            message: TaskMessage::user_text("Is A related to B?"),
+            metadata: None,
+            push_notification_url: None,
+        };
+        let resp = route_task(&req, &graph);
+        assert_eq!(resp.status.state, crate::task::TaskState::Completed);
+    }
+}

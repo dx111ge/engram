@@ -1,0 +1,184 @@
+/// SSE streaming for A2A tasks.
+///
+/// Large result sets are streamed as Server-Sent Events (SSE) via
+/// POST /tasks/sendSubscribe. Each event is a partial result that
+/// the client assembles into the full response.
+///
+/// Format follows the SSE spec:
+///   event: <event-type>
+///   data: <json-payload>
+///
+///   (blank line separates events)
+
+/// SSE event types in the A2A protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventType {
+    /// Task status changed
+    StatusUpdate,
+    /// Partial artifact available
+    ArtifactChunk,
+    /// Task completed with final artifacts
+    TaskComplete,
+    /// Task failed
+    TaskFailed,
+}
+
+impl EventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EventType::StatusUpdate => "status-update",
+            EventType::ArtifactChunk => "artifact-chunk",
+            EventType::TaskComplete => "task-complete",
+            EventType::TaskFailed => "task-failed",
+        }
+    }
+}
+
+/// A single SSE event.
+#[derive(Debug, Clone)]
+pub struct SseEvent {
+    pub event_type: EventType,
+    pub data: serde_json::Value,
+    /// Optional event ID for reconnection
+    pub id: Option<String>,
+}
+
+impl SseEvent {
+    pub fn status_update(data: serde_json::Value) -> Self {
+        SseEvent {
+            event_type: EventType::StatusUpdate,
+            data,
+            id: None,
+        }
+    }
+
+    pub fn artifact_chunk(data: serde_json::Value) -> Self {
+        SseEvent {
+            event_type: EventType::ArtifactChunk,
+            data,
+            id: None,
+        }
+    }
+
+    pub fn task_complete(data: serde_json::Value) -> Self {
+        SseEvent {
+            event_type: EventType::TaskComplete,
+            data,
+            id: None,
+        }
+    }
+
+    pub fn task_failed(error: &str) -> Self {
+        SseEvent {
+            event_type: EventType::TaskFailed,
+            data: serde_json::json!({"error": error}),
+            id: None,
+        }
+    }
+
+    /// Format as SSE wire format.
+    pub fn to_sse_string(&self) -> String {
+        let mut s = String::new();
+        s.push_str(&format!("event: {}\n", self.event_type.as_str()));
+        if let Some(ref id) = self.id {
+            s.push_str(&format!("id: {id}\n"));
+        }
+        let data_str = serde_json::to_string(&self.data).unwrap_or_default();
+        // SSE data lines: split on newlines
+        for line in data_str.lines() {
+            s.push_str(&format!("data: {line}\n"));
+        }
+        s.push('\n'); // blank line terminates event
+        s
+    }
+}
+
+/// Build an SSE stream from a list of results, chunked into events.
+pub fn stream_results(
+    task_id: &str,
+    results: &[serde_json::Value],
+    chunk_size: usize,
+) -> Vec<SseEvent> {
+    let mut events = Vec::new();
+
+    // Status: working
+    events.push(SseEvent::status_update(serde_json::json!({
+        "taskId": task_id,
+        "state": "working",
+        "total": results.len(),
+    })));
+
+    // Artifact chunks
+    for (i, chunk) in results.chunks(chunk_size).enumerate() {
+        events.push(SseEvent {
+            event_type: EventType::ArtifactChunk,
+            data: serde_json::json!({
+                "taskId": task_id,
+                "chunkIndex": i,
+                "items": chunk,
+            }),
+            id: Some(format!("{task_id}-{i}")),
+        });
+    }
+
+    // Complete
+    events.push(SseEvent::task_complete(serde_json::json!({
+        "taskId": task_id,
+        "state": "completed",
+        "totalChunks": (results.len() + chunk_size - 1) / chunk_size.max(1),
+    })));
+
+    events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_format() {
+        let event = SseEvent::status_update(serde_json::json!({"state": "working"}));
+        let sse = event.to_sse_string();
+        assert!(sse.starts_with("event: status-update\n"));
+        assert!(sse.contains("data: "));
+        assert!(sse.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn sse_with_id() {
+        let event = SseEvent {
+            event_type: EventType::ArtifactChunk,
+            data: serde_json::json!({"chunk": 1}),
+            id: Some("evt-1".to_string()),
+        };
+        let sse = event.to_sse_string();
+        assert!(sse.contains("id: evt-1\n"));
+    }
+
+    #[test]
+    fn stream_results_chunked() {
+        let results: Vec<serde_json::Value> = (0..10)
+            .map(|i| serde_json::json!({"item": i}))
+            .collect();
+        let events = stream_results("t1", &results, 3);
+        // 1 status + 4 chunks (ceil(10/3)) + 1 complete = 6
+        assert_eq!(events.len(), 6);
+        assert_eq!(events[0].event_type, EventType::StatusUpdate);
+        assert_eq!(events[1].event_type, EventType::ArtifactChunk);
+        assert_eq!(events[5].event_type, EventType::TaskComplete);
+    }
+
+    #[test]
+    fn stream_empty_results() {
+        let events = stream_results("t2", &[], 5);
+        // 1 status + 0 chunks + 1 complete = 2
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn task_failed_event() {
+        let event = SseEvent::task_failed("something went wrong");
+        assert_eq!(event.event_type, EventType::TaskFailed);
+        assert_eq!(event.data["error"], "something went wrong");
+    }
+}

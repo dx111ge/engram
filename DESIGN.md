@@ -1697,12 +1697,12 @@ Simplifications for Phase 0 (deferred complexity):
 - [x] Audit trail for all received facts
 
 ### Phase 7: A2A Protocol
-- [ ] Agent Card serving (/.well-known/agent.json)
-- [ ] A2A task handling (send, subscribe)
-- [ ] Skill routing (store, query, reason, learn, explain)
-- [ ] SSE streaming for large result sets
-- [ ] Agent discovery (find other A2A agents)
-- [ ] Push notifications (webhook callbacks)
+- [x] Agent Card serving (/.well-known/agent.json)
+- [x] A2A task handling (send, subscribe)
+- [x] Skill routing (store, query, reason, learn, explain)
+- [x] SSE streaming for large result sets
+- [x] Agent discovery (find other A2A agents)
+- [x] Push notifications (webhook callbacks)
 
 ### Phase 8: Polish & Distribution
 - [ ] Cross-compilation CI/CD

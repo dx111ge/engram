@@ -263,6 +263,9 @@ version = "0.1.0"
 dependencies = [
  "engram-api",
  "engram-core",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
  "tracing",
 ]
