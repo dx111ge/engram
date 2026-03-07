@@ -187,6 +187,70 @@ impl BrainFile {
         Ok(edge)
     }
 
+    /// Mutate a node in-place by slot index. WAL-protected.
+    pub fn update_node_field<F>(&mut self, slot: u64, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut Node),
+    {
+        let header = self.mmap.read_header();
+        if slot >= header.node_count {
+            return Err(StorageError::NodeNotFound { id: slot });
+        }
+
+        // Read current node, apply mutation to a copy
+        let offset = header.node_region_offset + slot * NODE_SIZE as u64;
+        let mut node_copy = unsafe { *(self.mmap.ptr_at(offset) as *const Node) };
+        f(&mut node_copy);
+
+        // WAL first: slot(8) + node_bytes(NODE_SIZE)
+        let mut wal_data = Vec::with_capacity(8 + NODE_SIZE);
+        wal_data.extend_from_slice(&slot.to_le_bytes());
+        let node_bytes = unsafe {
+            std::slice::from_raw_parts(&node_copy as *const Node as *const u8, NODE_SIZE)
+        };
+        wal_data.extend_from_slice(node_bytes);
+        self.wal.append(WalOp::NodeUpdate, &wal_data)?;
+
+        // Write to mmap
+        unsafe {
+            let dest = self.mmap.ptr_at_mut(offset);
+            std::ptr::copy_nonoverlapping(node_bytes.as_ptr(), dest, NODE_SIZE);
+        }
+        Ok(())
+    }
+
+    /// Mutate an edge in-place by slot index. WAL-protected.
+    pub fn update_edge_field<F>(&mut self, slot: u64, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut Edge),
+    {
+        let header = self.mmap.read_header();
+        if slot >= header.edge_count {
+            return Err(StorageError::NodeNotFound { id: slot });
+        }
+
+        // Read current edge, apply mutation to a copy
+        let offset = header.edge_region_offset + slot * EDGE_SIZE as u64;
+        let mut edge_copy = unsafe { *(self.mmap.ptr_at(offset) as *const Edge) };
+        f(&mut edge_copy);
+
+        // WAL first: slot(8) + edge_bytes(EDGE_SIZE)
+        let mut wal_data = Vec::with_capacity(8 + EDGE_SIZE);
+        wal_data.extend_from_slice(&slot.to_le_bytes());
+        let edge_bytes = unsafe {
+            std::slice::from_raw_parts(&edge_copy as *const Edge as *const u8, EDGE_SIZE)
+        };
+        wal_data.extend_from_slice(edge_bytes);
+        self.wal.append(WalOp::EdgeUpdate, &wal_data)?;
+
+        // Write to mmap
+        unsafe {
+            let dest = self.mmap.ptr_at_mut(offset);
+            std::ptr::copy_nonoverlapping(edge_bytes.as_ptr(), dest, EDGE_SIZE);
+        }
+        Ok(())
+    }
+
     /// Get current stats.
     pub fn stats(&self) -> (u64, u64) {
         let header = self.mmap.read_header();
@@ -290,6 +354,40 @@ impl BrainFile {
                             let h = self.mmap.header_mut();
                             h.edge_count += 1;
                             h.next_edge_id = edge.id + 1;
+                        }
+                    }
+                }
+                WalOp::NodeUpdate => {
+                    if entry.data.len() == 8 + NODE_SIZE {
+                        let slot = u64::from_le_bytes(entry.data[..8].try_into().unwrap());
+                        let header = self.mmap.read_header();
+                        if slot < header.node_count {
+                            let offset = header.node_region_offset + slot * NODE_SIZE as u64;
+                            unsafe {
+                                let dest = self.mmap.ptr_at_mut(offset);
+                                std::ptr::copy_nonoverlapping(
+                                    entry.data[8..].as_ptr(),
+                                    dest,
+                                    NODE_SIZE,
+                                );
+                            }
+                        }
+                    }
+                }
+                WalOp::EdgeUpdate => {
+                    if entry.data.len() == 8 + EDGE_SIZE {
+                        let slot = u64::from_le_bytes(entry.data[..8].try_into().unwrap());
+                        let header = self.mmap.read_header();
+                        if slot < header.edge_count {
+                            let offset = header.edge_region_offset + slot * EDGE_SIZE as u64;
+                            unsafe {
+                                let dest = self.mmap.ptr_at_mut(offset);
+                                std::ptr::copy_nonoverlapping(
+                                    entry.data[8..].as_ptr(),
+                                    dest,
+                                    EDGE_SIZE,
+                                );
+                            }
                         }
                     }
                 }
@@ -447,6 +545,26 @@ mod tests {
 
         let result = brain.store_node("c");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn wal_recovery_of_update() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        {
+            let mut brain = BrainFile::create(&path).unwrap();
+            brain.store_node("updatable").unwrap();
+            brain.update_node_field(0, |n| n.confidence = 0.95).unwrap();
+            // No checkpoint — simulates crash
+        }
+
+        {
+            let brain = BrainFile::open(&path).unwrap();
+            let node = brain.read_node(0).unwrap();
+            assert_eq!(node.label(), "updatable");
+            assert_eq!(node.confidence, 0.95);
+        }
     }
 
     #[test]

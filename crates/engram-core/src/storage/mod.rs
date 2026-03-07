@@ -4,4 +4,6 @@ pub mod error;
 pub mod header;
 pub mod mmap;
 pub mod node;
+pub mod props;
+pub mod type_registry;
 pub mod wal;

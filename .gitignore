@@ -2,3 +2,5 @@
 .claude/
 *.brain
 *.brain.wal
+*.brain.props
+*.brain.types
