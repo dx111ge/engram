@@ -4,3 +4,4 @@
 *.brain.wal
 *.brain.props
 *.brain.types
+*.brain.vectors

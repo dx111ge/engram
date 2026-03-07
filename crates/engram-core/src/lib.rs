@@ -7,3 +7,5 @@ pub use storage::edge::Edge;
 pub use storage::node::Node;
 pub use storage::error::StorageError;
 pub use graph::Graph;
+pub use index::embedding::{Embedder, EmbedError};
+pub use index::hnsw::HnswIndex;

@@ -18,6 +18,7 @@ fn main() {
         Some("set") => cmd_set_property(&args),
         Some("relate") => cmd_relate(&args),
         Some("query") => cmd_query(&args),
+        Some("search") => cmd_search(&args),
         Some("delete") => cmd_delete(&args),
         _ => {
             print_usage();
@@ -156,6 +157,25 @@ fn cmd_set_property(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // engram search <query> [path]
+    let query = args.get(2).ok_or("Usage: engram search <query> [path]")?;
+    let path = default_path(args, 3);
+
+    let g = Graph::open(&path)?;
+    let results = g.search(query, 20).map_err(|e| e)?;
+
+    if results.is_empty() {
+        println!("No results");
+    } else {
+        println!("Results ({}):", results.len());
+        for r in &results {
+            println!("  {r}");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_delete(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let label = args.get(2).ok_or("Usage: engram delete <label> [path]")?;
     let path = default_path(args, 3);
@@ -181,5 +201,13 @@ fn print_usage() {
     println!("  engram set <label> <key> <value> [path]       Set a property");
     println!("  engram relate <from> <rel> <to> [path]        Create a relationship");
     println!("  engram query <label> [depth] [path]           Query a node and its edges");
+    println!("  engram search <query> [path]                  Search (BM25, filters, boolean)");
     println!("  engram delete <label> [path]                  Soft-delete a node");
+    println!();
+    println!("Search syntax:");
+    println!("  engram search \"postgresql\"                    Full-text search");
+    println!("  engram search \"confidence>0.8\"                Filter by confidence");
+    println!("  engram search \"prop:role=database\"            Filter by property");
+    println!("  engram search \"tier:active\"                   Filter by memory tier");
+    println!("  engram search \"type:server AND confidence>0.5\" Boolean queries");
 }

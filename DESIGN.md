@@ -1614,7 +1614,7 @@ This is the project's viability test. If the custom storage engine doesn't deliv
 Simplifications for Phase 0 (deferred complexity):
 - Append-only node allocation (no free-list recycling — compact offline later)
 - No concurrent writes (single writer)
-- No embedding region yet
+- Embedding vectors stored in sidecar file (not in main mmap region)
 
 **EXIT CRITERIA**: PASSED — benchmark exceeds targets by orders of magnitude, crash recovery works.
 
@@ -1632,15 +1632,22 @@ Simplifications for Phase 0 (deferred complexity):
 - [x] Edge type registry persistence (`.brain.types` sidecar file)
 - [x] In-memory hash index for O(1) node lookup by label
 
-### Phase 2: Search & Indexing
-- [ ] HNSW embedding index (CPU, using user-provided ONNX model)
-- [ ] ONNX Runtime integration for embedding generation
-- [ ] Full-text inverted index (BM25 keyword search)
-- [ ] Hybrid search (semantic + keyword, combined ranking)
-- [ ] B+tree temporal index (bi-temporal: event_time + created_at)
-- [ ] Type bitmap index
-- [ ] Query language parser
-- [ ] Benchmark suite
+### Phase 2: Search & Indexing — COMPLETE
+
+- [x] HNSW embedding index (pure Rust, M=16, EF=200, cosine distance)
+- [x] Embedder trait (pluggable backends — ONNX, API, or custom)
+- [x] Auto-embed on node store (when embedder configured)
+- [x] Vector persistence (`.brain.vectors` sidecar file)
+- [x] Vector search (nearest-neighbor via HNSW)
+- [x] Hybrid search (BM25 + vector, Reciprocal Rank Fusion with k=60)
+- [x] Full-text inverted index (BM25 keyword search)
+- [x] Temporal index (bi-temporal: sorted vec + binary search for range queries)
+- [x] Type/tier/sensitivity bitmap indexes
+- [x] Query language parser (fulltext, label, type, tier, sensitivity, confidence, temporal, property, AND/OR)
+- [x] Query execution engine integrated into Graph
+- [x] Benchmark suite (storage + fulltext + confidence filter)
+- [x] CLI `search` command with query language
+- [ ] ONNX Runtime integration (`ort` crate, optional feature for real models)
 
 ### Phase 3: Intelligence & Learning
 - [ ] Confidence model (source-based initial scoring)
@@ -1962,7 +1969,7 @@ Milestones map to phases:
 
   v0.1.0  — Phase 0: Storage POC passes GO/NO-GO gate              [DONE]
   v0.2.0  — Phase 1: Core graph engine (store, relate, traverse)   [DONE]
-  v0.3.0  — Phase 2: Search & indexing (HNSW, BM25, temporal)
+  v0.3.0  — Phase 2: Search & indexing (HNSW, BM25, temporal)      [DONE]
   v0.4.0  — Phase 3: Intelligence & learning (rules, confidence, evidence)
   v0.5.0  — Phase 4: API & integration (HTTP, MCP, gRPC)
   v0.6.0  — Phase 5: Compute acceleration (SIMD, Vulkan, NPU)
