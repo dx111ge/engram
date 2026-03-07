@@ -2,6 +2,7 @@
 ///
 /// Provides cosine similarity/distance with:
 ///   - AVX2 (x86_64, 8-wide f32)
+///   - NEON (aarch64, 4-wide f32)
 ///   - Scalar fallback (all architectures)
 ///
 /// The public API auto-selects the best implementation at runtime.
@@ -21,6 +22,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
             return unsafe { cosine_similarity_avx2(a, b) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        return unsafe { cosine_similarity_neon(a, b) };
+    }
+    #[allow(unreachable_code)]
     cosine_similarity_scalar(a, b)
 }
 
@@ -47,6 +53,11 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
             return unsafe { dot_product_avx2(a, b) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        return unsafe { dot_product_neon(a, b) };
+    }
+    #[allow(unreachable_code)]
     dot_product_scalar(a, b)
 }
 
@@ -59,6 +70,11 @@ pub fn l2_distance_sq(a: &[f32], b: &[f32]) -> f32 {
             return unsafe { l2_distance_sq_avx2(a, b) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        return unsafe { l2_distance_sq_neon(a, b) };
+    }
+    #[allow(unreachable_code)]
     l2_distance_sq_scalar(a, b)
 }
 
@@ -231,6 +247,105 @@ unsafe fn hsum_avx2(v: std::arch::x86_64::__m256) -> f32 {
     _mm_cvtss_f32(result)
 }
 
+// ── NEON implementations (aarch64) ──
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn cosine_similarity_neon(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+
+    let len = a.len().min(b.len());
+    let chunks = len / 4;
+    let remainder = len % 4;
+
+    let mut dot = vdupq_n_f32(0.0);
+    let mut norm_a = vdupq_n_f32(0.0);
+    let mut norm_b = vdupq_n_f32(0.0);
+
+    for i in 0..chunks {
+        let offset = i * 4;
+        let va = vld1q_f32(a.as_ptr().add(offset));
+        let vb = vld1q_f32(b.as_ptr().add(offset));
+        dot = vfmaq_f32(dot, va, vb);
+        norm_a = vfmaq_f32(norm_a, va, va);
+        norm_b = vfmaq_f32(norm_b, vb, vb);
+    }
+
+    let mut dot_sum = vaddvq_f32(dot);
+    let mut na_sum = vaddvq_f32(norm_a);
+    let mut nb_sum = vaddvq_f32(norm_b);
+
+    // Handle remainder
+    let start = chunks * 4;
+    for i in 0..remainder {
+        let ai = a[start + i];
+        let bi = b[start + i];
+        dot_sum += ai * bi;
+        na_sum += ai * ai;
+        nb_sum += bi * bi;
+    }
+
+    let denom = (na_sum * nb_sum).sqrt();
+    if denom < f32::EPSILON {
+        return 0.0;
+    }
+    dot_sum / denom
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_product_neon(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+
+    let len = a.len().min(b.len());
+    let chunks = len / 4;
+    let remainder = len % 4;
+
+    let mut acc = vdupq_n_f32(0.0);
+
+    for i in 0..chunks {
+        let offset = i * 4;
+        let va = vld1q_f32(a.as_ptr().add(offset));
+        let vb = vld1q_f32(b.as_ptr().add(offset));
+        acc = vfmaq_f32(acc, va, vb);
+    }
+
+    let mut sum = vaddvq_f32(acc);
+    let start = chunks * 4;
+    for i in 0..remainder {
+        sum += a[start + i] * b[start + i];
+    }
+    sum
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn l2_distance_sq_neon(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+
+    let len = a.len().min(b.len());
+    let chunks = len / 4;
+    let remainder = len % 4;
+
+    let mut acc = vdupq_n_f32(0.0);
+
+    for i in 0..chunks {
+        let offset = i * 4;
+        let va = vld1q_f32(a.as_ptr().add(offset));
+        let vb = vld1q_f32(b.as_ptr().add(offset));
+        let diff = vsubq_f32(va, vb);
+        acc = vfmaq_f32(acc, diff, diff);
+    }
+
+    let mut sum = vaddvq_f32(acc);
+    let start = chunks * 4;
+    for i in 0..remainder {
+        let d = a[start + i] - b[start + i];
+        sum += d * d;
+    }
+    sum
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +460,51 @@ mod tests {
         assert!(
             (d - d_scalar).abs() < 0.01,
             "SIMD {d} != scalar {d_scalar}"
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_cosine_matches_scalar() {
+        let dim = 384;
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.01).collect();
+        let b: Vec<f32> = (0..dim).map(|i| ((dim - i) as f32) * 0.01).collect();
+
+        let neon_result = unsafe { cosine_similarity_neon(&a, &b) };
+        let scalar_result = cosine_similarity_scalar(&a, &b);
+        assert!(
+            (neon_result - scalar_result).abs() < 0.0001,
+            "NEON {neon_result} != scalar {scalar_result}"
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_dot_product_matches_scalar() {
+        let dim = 384;
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.01).collect();
+        let b: Vec<f32> = (0..dim).map(|i| ((dim - i) as f32) * 0.01).collect();
+
+        let neon_result = unsafe { dot_product_neon(&a, &b) };
+        let scalar_result = dot_product_scalar(&a, &b);
+        assert!(
+            (neon_result - scalar_result).abs() < 0.01,
+            "NEON {neon_result} != scalar {scalar_result}"
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_l2_matches_scalar() {
+        let dim = 384;
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.01).collect();
+        let b: Vec<f32> = (0..dim).map(|i| ((dim - i) as f32) * 0.01).collect();
+
+        let neon_result = unsafe { l2_distance_sq_neon(&a, &b) };
+        let scalar_result = l2_distance_sq_scalar(&a, &b);
+        assert!(
+            (neon_result - scalar_result).abs() < 0.01,
+            "NEON {neon_result} != scalar {scalar_result}"
         );
     }
 }

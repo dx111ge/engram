@@ -3,10 +3,11 @@
 ///
 /// Compute backends:
 ///   - CPU scalar (always available)
-///   - CPU SIMD (AVX2 on x86_64, NEON on aarch64)
-///   - GPU (Vulkan compute shaders — future)
-///   - NPU (ONNX Runtime with OpenVINO EP — future)
+///   - CPU SIMD (AVX2+FMA on x86_64, NEON on aarch64)
+///   - GPU (wgpu compute shaders — DX12/Vulkan/Metal)
+///   - NPU (low-power adapter via wgpu + platform-specific detection)
 
+pub mod gpu;
+pub mod npu;
 pub mod planner;
 pub mod simd;
-pub mod vulkan;

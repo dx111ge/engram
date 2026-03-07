@@ -147,14 +147,26 @@ impl Node {
     }
 }
 
-/// FNV-1a hash for label lookup
+/// FNV-1a hash for label lookup (case-insensitive).
+///
+/// Labels are conceptually case-insensitive: "PostgreSQL", "postgresql", and
+/// "Postgresql" all refer to the same entity. The hash folds ASCII uppercase
+/// to lowercase so they land in the same bucket.
 pub fn hash_label(label: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in label.as_bytes() {
-        hash ^= *byte as u64;
+        // Fold ASCII uppercase to lowercase for case-insensitive hashing
+        let b = byte.to_ascii_lowercase();
+        hash ^= b as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+/// Case-insensitive label comparison.
+#[inline]
+pub fn labels_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 #[cfg(test)]
@@ -196,6 +208,22 @@ mod tests {
     fn label_hash_is_deterministic() {
         assert_eq!(hash_label("server-01"), hash_label("server-01"));
         assert_ne!(hash_label("server-01"), hash_label("server-02"));
+    }
+
+    #[test]
+    fn label_hash_is_case_insensitive() {
+        assert_eq!(hash_label("PostgreSQL"), hash_label("postgresql"));
+        assert_eq!(hash_label("PostgreSQL"), hash_label("Postgresql"));
+        assert_eq!(hash_label("Redis"), hash_label("redis"));
+        assert_eq!(hash_label("REDIS"), hash_label("redis"));
+    }
+
+    #[test]
+    fn labels_eq_is_case_insensitive() {
+        assert!(labels_eq("PostgreSQL", "postgresql"));
+        assert!(labels_eq("PostgreSQL", "Postgresql"));
+        assert!(labels_eq("Redis", "REDIS"));
+        assert!(!labels_eq("Redis", "Memcached"));
     }
 
     #[test]

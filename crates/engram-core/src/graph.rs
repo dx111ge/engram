@@ -26,7 +26,7 @@ use crate::learning::rules::{Action, ConfidenceExpr, Condition, ConditionOp, Rul
 use crate::learning::tier::{self, TierSweepResult};
 use crate::storage::brain_file::BrainFile;
 use crate::storage::error::{Result, StorageError};
-use crate::storage::node::{hash_label, Node};
+use crate::storage::node::{hash_label, labels_eq, Node};
 use crate::storage::props::PropertyStore;
 use crate::storage::type_registry::TypeRegistry;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -340,7 +340,7 @@ impl Graph {
 
         for slot in slots {
             let node = self.brain.read_node(slot)?;
-            if node.is_active() && node.label() == label {
+            if node.is_active() && labels_eq(node.label(), label) {
                 let now = current_timestamp();
                 self.brain.update_node_field(slot, |n| {
                     n.soft_delete(now);
@@ -396,7 +396,7 @@ impl Graph {
         let target_hash = hash_label(label);
         for &slot in self.label_index.get(target_hash) {
             let node = self.brain.read_node(slot)?;
-            if node.is_active() && node.label() == label {
+            if node.is_active() && labels_eq(node.label(), label) {
                 return Ok(Some(node.id));
             }
         }
@@ -408,7 +408,7 @@ impl Graph {
         let target_hash = hash_label(label);
         for &slot in self.label_index.get(target_hash) {
             let node = self.brain.read_node(slot)?;
-            if node.is_active() && node.label() == label {
+            if node.is_active() && labels_eq(node.label(), label) {
                 return Ok(Some(node));
             }
         }
@@ -1546,7 +1546,7 @@ impl Graph {
         let target_hash = hash_label(label);
         for &slot in self.label_index.get(target_hash) {
             let node = self.brain.read_node(slot)?;
-            if node.is_active() && node.label() == label {
+            if node.is_active() && labels_eq(node.label(), label) {
                 return Ok(Some(slot));
             }
         }

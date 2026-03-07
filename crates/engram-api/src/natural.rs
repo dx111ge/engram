@@ -115,6 +115,10 @@ pub fn handle_ask(graph: &Graph, question: &str) -> AskResponse {
 }
 
 /// Parse a natural language statement and execute it against the graph.
+///
+/// Entity names preserve their original casing from the input. Graph lookups
+/// are case-insensitive, so "PostgreSQL", "postgresql", and "Postgresql"
+/// all resolve to the same node.
 pub fn handle_tell(graph: &mut Graph, statement: &str, source: Option<&str>) -> TellResponse {
     let s = statement.trim().trim_end_matches('.').trim();
     let lower = s.to_lowercase();
@@ -122,26 +126,19 @@ pub fn handle_tell(graph: &mut Graph, statement: &str, source: Option<&str>) -> 
     let mut actions = Vec::new();
 
     // "X is a Y" / "X is Y" — store + type or relationship
-    if let Some((subject, predicate)) = split_is_a(&lower) {
-        // Store subject if not exists
-        let _ = graph.store(&capitalize_first(subject), &prov);
-        actions.push(format!("stored entity: {subject}"));
+    // Match on lowered string, but extract entities from original to preserve casing
+    if let Some((subj_orig, pred_orig)) = split_is_a_preserve_case(s, &lower) {
+        let _ = graph.store(&subj_orig, &prov);
+        actions.push(format!("stored entity: {subj_orig}"));
 
-        // Store object if not exists
-        let _ = graph.store(&capitalize_first(predicate), &prov);
-        actions.push(format!("stored entity: {predicate}"));
+        let _ = graph.store(&pred_orig, &prov);
+        actions.push(format!("stored entity: {pred_orig}"));
 
-        // Create is_a relationship
-        let _ = graph.relate(
-            &capitalize_first(subject),
-            &capitalize_first(predicate),
-            "is_a",
-            &prov,
-        );
-        actions.push(format!("{subject} -[is_a]-> {predicate}"));
+        let _ = graph.relate(&subj_orig, &pred_orig, "is_a", &prov);
+        actions.push(format!("{subj_orig} -[is_a]-> {pred_orig}"));
 
         return TellResponse {
-            interpretation: format!("{subject} is a type of {predicate}"),
+            interpretation: format!("{subj_orig} is a type of {pred_orig}"),
             actions,
         };
     }
@@ -165,34 +162,32 @@ pub fn handle_tell(graph: &mut Graph, statement: &str, source: Option<&str>) -> 
     ];
 
     for (pattern, rel_type) in &relationship_patterns {
-        if let Some((subject, object)) = lower.split_once(pattern) {
-            let subject = subject.trim();
-            let object = object.trim();
-            if !subject.is_empty() && !object.is_empty() {
-                let subj = capitalize_first(subject);
-                let obj = capitalize_first(object);
-
-                let _ = graph.store(&subj, &prov);
-                let _ = graph.store(&obj, &prov);
-                let _ = graph.relate(&subj, &obj, rel_type, &prov);
+        if let Some(pos) = lower.find(pattern) {
+            let subj = s[..pos].trim();
+            let obj = s[pos + pattern.len()..].trim();
+            if !subj.is_empty() && !obj.is_empty() {
+                let _ = graph.store(subj, &prov);
+                let _ = graph.store(obj, &prov);
+                let _ = graph.relate(subj, obj, rel_type, &prov);
                 actions.push(format!("stored: {subj}"));
                 actions.push(format!("stored: {obj}"));
                 actions.push(format!("{subj} -[{rel_type}]-> {obj}"));
 
                 return TellResponse {
-                    interpretation: format!("{subject} {pattern} {object}"),
+                    interpretation: format!("{subj} {pattern} {obj}"),
                     actions,
                 };
             }
         }
     }
 
-    // "X has property Y = Z" / "X.Y = Z" — property setting
-    if let Some((entity, rest)) = lower.split_once(" has ") {
+    // "X has property Y = Z" — property setting
+    if let Some(has_pos) = lower.find(" has ") {
+        let entity = s[..has_pos].trim();
+        let rest = &lower[has_pos + 5..];
         if let Some((key, value)) = rest.split_once(" = ") {
-            let entity = capitalize_first(entity.trim());
-            let _ = graph.store(&entity, &prov);
-            let _ = graph.set_property(&entity, key.trim(), value.trim());
+            let _ = graph.store(entity, &prov);
+            let _ = graph.set_property(entity, key.trim(), value.trim());
             actions.push(format!("set {entity}.{} = {}", key.trim(), value.trim()));
 
             return TellResponse {
@@ -300,15 +295,12 @@ fn ask_edges_to(graph: &Graph, entity: &str) -> AskResponse {
 }
 
 fn ask_path(graph: &Graph, a: &str, b: &str) -> AskResponse {
-    // Try to prove a connection in either direction
-    let a_cap = capitalize_first(a);
-    let b_cap = capitalize_first(b);
-
+    // Graph lookups are case-insensitive, pass names directly
     // Check outgoing from a
     let mut results = Vec::new();
-    if let Ok(edges) = graph.edges_from(&a_cap) {
+    if let Ok(edges) = graph.edges_from(a) {
         for e in &edges {
-            if e.to.to_lowercase() == b.to_lowercase() {
+            if e.to.eq_ignore_ascii_case(b) {
                 results.push(AskResult {
                     label: format!("{} -[{}]-> {}", e.from, e.relationship, e.to),
                     confidence: e.confidence,
@@ -320,9 +312,9 @@ fn ask_path(graph: &Graph, a: &str, b: &str) -> AskResponse {
     }
 
     // Check outgoing from b
-    if let Ok(edges) = graph.edges_from(&b_cap) {
+    if let Ok(edges) = graph.edges_from(b) {
         for e in &edges {
-            if e.to.to_lowercase() == a.to_lowercase() {
+            if e.to.eq_ignore_ascii_case(a) {
                 results.push(AskResult {
                     label: format!("{} -[{}]-> {}", e.from, e.relationship, e.to),
                     confidence: e.confidence,
@@ -335,8 +327,8 @@ fn ask_path(graph: &Graph, a: &str, b: &str) -> AskResponse {
 
     if results.is_empty() {
         // Try traversal from a to see if b is reachable
-        if let Ok(traversal) = graph.traverse(&a_cap, 3, 0.0) {
-            if let Ok(Some(b_id)) = graph.find_node_id(&b_cap) {
+        if let Ok(traversal) = graph.traverse(a, 3, 0.0) {
+            if let Ok(Some(b_id)) = graph.find_node_id(b) {
                 if traversal.nodes.contains(&b_id) {
                     let depth = traversal.depths.get(&b_id).copied().unwrap_or(0);
                     results.push(AskResult {
@@ -408,25 +400,19 @@ fn extract_between_preserve_case(original: &str, prefix: &str, suffix: &str) -> 
     Some(original[start..end].trim().to_string())
 }
 
-fn split_is_a(s: &str) -> Option<(&str, &str)> {
-    // "X is a Y" or "X is an Y"
-    if let Some((subj, rest)) = s.split_once(" is a ") {
-        return Some((subj.trim(), rest.trim()));
-    }
-    if let Some((subj, rest)) = s.split_once(" is an ") {
-        return Some((subj.trim(), rest.trim()));
+/// Split "X is a Y" pattern, matching on `lower` but extracting from `original`.
+/// Returns (subject, predicate) with original casing preserved.
+fn split_is_a_preserve_case<'a>(original: &'a str, lower: &str) -> Option<(String, String)> {
+    for pattern in [" is a ", " is an "] {
+        if let Some(pos) = lower.find(pattern) {
+            let subj = original[..pos].trim();
+            let pred = original[pos + pattern.len()..].trim();
+            if !subj.is_empty() && !pred.is_empty() {
+                return Some((subj.to_string(), pred.to_string()));
+            }
+        }
     }
     None
-}
-
-fn capitalize_first(s: &str) -> String {
-    let s = s.trim();
-    if s.is_empty() {
-        return String::new();
-    }
-    let mut chars = s.chars();
-    let first = chars.next().unwrap().to_uppercase().to_string();
-    first + chars.as_str()
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use crate::storage::edge::{Edge, EDGE_SIZE};
 use crate::storage::error::{Result, StorageError};
 use crate::storage::header::Header;
 use crate::storage::mmap::MmapFile;
-use crate::storage::node::{hash_label, Node, NODE_SIZE};
+use crate::storage::node::{hash_label, labels_eq, Node, NODE_SIZE};
 use crate::storage::wal::{Wal, WalOp};
 use std::path::{Path, PathBuf};
 
@@ -136,7 +136,7 @@ impl BrainFile {
 
         for slot in 0..header.node_count {
             let node = self.read_node(slot)?;
-            if node.is_active() && node.label_hash == target_hash && node.label() == label {
+            if node.is_active() && node.label_hash == target_hash && labels_eq(node.label(), label) {
                 return Ok(Some((slot, node)));
             }
         }

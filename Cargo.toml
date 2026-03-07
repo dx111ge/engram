@@ -41,6 +41,15 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 
+[dev-dependencies]
+tempfile = "3"
+engram-core = { path = "crates/engram-core" }
+engram-api = { path = "crates/engram-api" }
+engram-compute = { path = "crates/engram-compute" }
+engram-mesh = { path = "crates/engram-mesh" }
+engram-a2a = { path = "crates/engram-a2a" }
+serde_json = { workspace = true }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
