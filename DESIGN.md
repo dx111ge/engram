@@ -1685,16 +1685,16 @@ Simplifications for Phase 0 (deferred complexity):
 - [ ] NPU compute path (ONNX Runtime with OpenVINO EP — requires ort crate)
 
 ### Phase 6: Knowledge Mesh
-- [ ] ed25519 identity generation on first start
-- [ ] Peer registration (mutual approval by public key + endpoint)
-- [ ] Topic-level ACLs and fact sensitivity enforcement
-- [ ] mTLS transport derived from ed25519 keypair
-- [ ] Gossip protocol with bloom filter knowledge digests
-- [ ] Delta sync (push/pull)
-- [ ] Query broadcast with TTL and loop prevention
-- [ ] Trust model and confidence propagation across peers
-- [ ] Conflict resolution across peers
-- [ ] Audit trail for all received facts
+- [x] ed25519 identity generation on first start
+- [x] Peer registration (mutual approval by public key + endpoint)
+- [x] Topic-level ACLs and fact sensitivity enforcement
+- [ ] mTLS transport derived from ed25519 keypair (requires rustls — runtime integration)
+- [x] Gossip protocol with bloom filter knowledge digests
+- [x] Delta sync (push/pull)
+- [x] Query broadcast with TTL and loop prevention
+- [x] Trust model and confidence propagation across peers
+- [x] Conflict resolution across peers
+- [x] Audit trail for all received facts
 
 ### Phase 7: A2A Protocol
 - [ ] Agent Card serving (/.well-known/agent.json)
