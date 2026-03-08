@@ -987,3 +987,134 @@ fn strip_prefix(s: &str) -> String {
         s.to_string()
     }
 }
+
+// ── GET /proxy/gdelt ── CORS proxy for GDELT API ──
+
+/// Proxy GDELT requests to avoid CORS restrictions in browser.
+/// Forwards query params to api.gdeltproject.org and returns the response.
+pub async fn proxy_gdelt(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
+    use axum::response::IntoResponse;
+
+    let mut url = "https://api.gdeltproject.org/api/v2/doc/doc?".to_string();
+    let query_string: Vec<String> = params
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
+        .collect();
+    url.push_str(&query_string.join("&"));
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "engram-intel/0.1")
+        .send()
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("GDELT request failed: {e}")))?;
+
+    let status = StatusCode::from_u16(resp.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    Ok((
+        status,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        body,
+    ).into_response())
+}
+
+/// Proxy for Google News RSS -- fetches RSS XML and converts to JSON for the dashboard.
+pub async fn proxy_news_rss(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
+    use axum::response::IntoResponse;
+
+    let query = params.get("q").cloned().unwrap_or_default();
+    if query.is_empty() {
+        return Err(api_err(StatusCode::BAD_REQUEST, "missing 'q' parameter".to_string()));
+    }
+
+    let rss_url = format!(
+        "https://news.google.com/rss/search?q={}&hl=en&gl=US&ceid=US:en",
+        urlencoding::encode(&query)
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let resp = client
+        .get(&rss_url)
+        .header("User-Agent", "engram-intel/0.1")
+        .send()
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("RSS fetch failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(api_err(StatusCode::BAD_GATEWAY, "RSS feed returned error".to_string()));
+    }
+
+    let xml = resp.text().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    // Parse RSS XML into simple JSON array of {title, link, pubDate, domain}
+    let mut items = Vec::new();
+    for item_block in xml.split("<item>").skip(1) {
+        let title = extract_xml_tag(item_block, "title").unwrap_or_default();
+        let link = extract_xml_tag(item_block, "link").unwrap_or_default();
+        let pub_date = extract_xml_tag(item_block, "pubDate").unwrap_or_default();
+        let source = extract_xml_tag(item_block, "source").unwrap_or_default();
+
+        if !title.is_empty() && !link.is_empty() {
+            let domain = link.split('/').nth(2).unwrap_or("").to_string();
+            items.push(serde_json::json!({
+                "title": title,
+                "link": link,
+                "pubDate": pub_date,
+                "source": source,
+                "domain": domain,
+            }));
+        }
+    }
+
+    let body = serde_json::json!({ "items": items }).to_string();
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        body,
+    ).into_response())
+}
+
+fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}", tag);
+    let close = format!("</{}>", tag);
+    let start = xml.find(&open)?;
+    let after_open = &xml[start..];
+    let content_start = after_open.find('>')? + 1;
+    let content = &after_open[content_start..];
+    let end = content.find(&close)?;
+    let val = &content[..end];
+    // Handle CDATA
+    let val = val.trim();
+    let val = if val.starts_with("<![CDATA[") && val.ends_with("]]>") {
+        &val[9..val.len()-3]
+    } else {
+        val
+    };
+    Some(val.to_string())
+}

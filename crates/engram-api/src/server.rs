@@ -1,6 +1,6 @@
 /// HTTP server setup — routes, middleware, startup.
 
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -50,6 +50,9 @@ pub fn router(state: AppState) -> Router {
         .route("/mesh/peers/{key}", delete(mesh_remove_peer_handler))
         .route("/mesh/audit", get(mesh_audit_handler))
         .route("/mesh/identity", get(mesh_identity_handler))
+        // Proxy (CORS bypass for browser-based intel dashboard)
+        .route("/proxy/gdelt", get(handlers::proxy_gdelt))
+        .route("/proxy/rss", get(handlers::proxy_news_rss))
         // System
         .route("/health", get(handlers::health))
         .route("/stats", get(handlers::stats))

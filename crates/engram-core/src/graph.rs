@@ -32,6 +32,17 @@ use crate::storage::type_registry::TypeRegistry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
+/// Resolve a rule variable or literal to a label string.
+/// Quoted strings like `"Russia"` are literals -- return the unquoted value.
+/// Unquoted strings like `Country` are variables -- look up in bindings.
+fn resolve_var(var: &str, bindings: &Bindings) -> Option<String> {
+    if var.starts_with('"') && var.ends_with('"') && var.len() >= 2 {
+        Some(var[1..var.len()-1].to_string())
+    } else {
+        bindings.get(var).cloned()
+    }
+}
+
 /// Source type for provenance tracking
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u32)]
@@ -1297,12 +1308,12 @@ impl Graph {
                             to_var,
                             confidence_expr,
                         } => {
-                            let from_label = match bindings.get(from_var.as_str()) {
-                                Some(l) => l.clone(),
+                            let from_label = match resolve_var(from_var, &bindings) {
+                                Some(l) => l,
                                 None => continue,
                             };
-                            let to_label = match bindings.get(to_var.as_str()) {
-                                Some(l) => l.clone(),
+                            let to_label = match resolve_var(to_var, &bindings) {
+                                Some(l) => l,
                                 None => continue,
                             };
 
@@ -1330,24 +1341,24 @@ impl Graph {
                             key,
                             value,
                         } => {
-                            if let Some(label) = bindings.get(node_var.as_str()) {
+                            if let Some(label) = resolve_var(node_var, &bindings) {
                                 // Skip if property already has this value
-                                let existing = self.get_property(label, key).ok().flatten();
+                                let existing = self.get_property(&label, key).ok().flatten();
                                 if existing.as_deref() == Some(value.as_str()) {
                                     continue;
                                 }
-                                self.set_property(label, key, value)?;
+                                self.set_property(&label, key, value)?;
                                 actions_taken.push(format!("prop({label}, {key}={value})"));
                             }
                         }
                         Action::Flag { node_var, reason } => {
-                            if let Some(label) = bindings.get(node_var.as_str()) {
+                            if let Some(label) = resolve_var(node_var, &bindings) {
                                 // Skip if already flagged with the same reason
-                                let existing = self.get_property(label, "_flag").ok().flatten();
+                                let existing = self.get_property(&label, "_flag").ok().flatten();
                                 if existing.as_deref() == Some(reason.as_str()) {
                                     continue;
                                 }
-                                self.set_property(label, "_flag", reason)?;
+                                self.set_property(&label, "_flag", reason)?;
                                 actions_taken.push(format!("flag({label}: {reason})"));
                                 result.flags_raised += 1;
                             }
@@ -1483,6 +1494,22 @@ impl Graph {
                 let mut next_candidates = Vec::new();
                 let (_, edge_count) = self.brain.stats();
 
+                // Determine if from/to are quoted literals or variables.
+                // Quoted literal: "Russia" means must match label "Russia" exactly.
+                // Unquoted variable: Country means bind to whatever matches.
+                let from_is_literal = from_var.starts_with('"') && from_var.ends_with('"');
+                let to_is_literal = to_var.starts_with('"') && to_var.ends_with('"');
+                let from_literal = if from_is_literal {
+                    Some(from_var[1..from_var.len()-1].to_string())
+                } else {
+                    None
+                };
+                let to_literal = if to_is_literal {
+                    Some(to_var[1..to_var.len()-1].to_string())
+                } else {
+                    None
+                };
+
                 for bindings in &candidates {
                     for edge_slot in 0..edge_count {
                         let edge = self.brain.read_edge(edge_slot)?;
@@ -1494,22 +1521,42 @@ impl Graph {
                         let from_label = self.label_for_id(edge.from_node)?;
                         let to_label = self.label_for_id(edge.to_node)?;
 
-                        // Check if from_var is already bound
-                        if let Some(bound) = bindings.get(from_var.as_str()) {
-                            if *bound != from_label {
+                        // For literals: must match exactly
+                        if let Some(ref lit) = from_literal {
+                            if from_label != *lit {
                                 continue;
                             }
                         }
-                        // Check if to_var is already bound
-                        if let Some(bound) = bindings.get(to_var.as_str()) {
-                            if *bound != to_label {
+                        if let Some(ref lit) = to_literal {
+                            if to_label != *lit {
                                 continue;
                             }
                         }
 
+                        // For variables: check if already bound in current candidate
+                        if !from_is_literal {
+                            if let Some(bound) = bindings.get(from_var.as_str()) {
+                                if *bound != from_label {
+                                    continue;
+                                }
+                            }
+                        }
+                        if !to_is_literal {
+                            if let Some(bound) = bindings.get(to_var.as_str()) {
+                                if *bound != to_label {
+                                    continue;
+                                }
+                            }
+                        }
+
                         let mut new_bindings = bindings.clone();
-                        new_bindings.insert(from_var.clone(), from_label);
-                        new_bindings.insert(to_var.clone(), to_label);
+                        // Only bind variables, not literals
+                        if !from_is_literal {
+                            new_bindings.insert(from_var.clone(), from_label);
+                        }
+                        if !to_is_literal {
+                            new_bindings.insert(to_var.clone(), to_label);
+                        }
                         next_candidates.push(new_bindings);
                     }
                 }
@@ -1586,16 +1633,31 @@ impl Graph {
                 relationship,
                 to_var,
             } => {
-                let from_label = match bindings.get(from_var.as_str()) {
-                    Some(l) => l,
-                    None => return Ok(false),
+                // Resolve from: literal "Foo" -> "Foo", variable -> lookup in bindings
+                let from_is_literal = from_var.starts_with('"') && from_var.ends_with('"');
+                let from_label_owned;
+                let from_label: &str = if from_is_literal {
+                    from_label_owned = from_var[1..from_var.len()-1].to_string();
+                    &from_label_owned
+                } else {
+                    match bindings.get(from_var.as_str()) {
+                        Some(l) => l,
+                        None => return Ok(false),
+                    }
                 };
-                let to_label = match bindings.get(to_var.as_str()) {
-                    Some(l) => l,
-                    None => {
-                        // to_var not bound — check if ANY edge of this type exists
-                        // (This is for pattern matching where we don't know the target yet)
-                        return Ok(true); // optimistic — full binding check happens later
+                // Resolve to: literal "Foo" -> "Foo", variable -> lookup in bindings
+                let to_is_literal = to_var.starts_with('"') && to_var.ends_with('"');
+                let to_label_owned;
+                let to_label: &str = if to_is_literal {
+                    to_label_owned = to_var[1..to_var.len()-1].to_string();
+                    &to_label_owned
+                } else {
+                    match bindings.get(to_var.as_str()) {
+                        Some(l) => l,
+                        None => {
+                            // to_var not bound — check if ANY edge of this type exists
+                            return Ok(true); // optimistic — full binding check happens later
+                        }
                     }
                 };
                 self.edge_exists(from_label, to_label, relationship)
