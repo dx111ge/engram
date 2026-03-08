@@ -2,345 +2,171 @@
 
 ### Overview
 
-IT support teams accumulate knowledge about infrastructure problems — which error messages mean what, which servers are affected, what the root causes are, and which fixes worked. Engram is well suited for this pattern: it stores structured knowledge as a graph, lets you score solutions by confidence, reinforces working fixes, penalizes wrong diagnoses, and applies decay so stale runbooks fade unless refreshed.
+IT support teams accumulate knowledge about infrastructure problems -- which error messages mean what, which servers are affected, what the root causes are, and which fixes worked. Engram stores this as a graph: errors link to root causes, root causes link to solutions, and confidence scores reflect which fixes are proven versus guesses.
 
 This walkthrough builds a support knowledge base for a fictional e-commerce platform. It shows the full lifecycle from "we see an error" to "we have a confirmed fix" to "old fixes lose confidence over time."
 
-**What this demonstrates today (v0.1.0):**
+**What this demonstrates:**
 
-- Storing servers, services, and error patterns as nodes
-- Relating errors to root causes, root causes to solutions
+- Storing servers, services, error patterns, root causes, and solutions as typed nodes
+- Error -> root cause -> solution graph traversal (depth-2 from any error)
 - Property-based filtering (`prop:severity=critical`, `prop:status=open`)
-- Confidence scoring: confirmed solutions get higher confidence than guesses
-- Learning endpoints: `/learn/reinforce`, `/learn/correct`, `/learn/decay`
-- Inference rules via `/learn/derive` to propagate impact across the graph
-- Memory tier transitions: active knowledge versus archival
+- Confidence lifecycle: reinforce working fixes, correct wrong diagnoses, decay stale knowledge
+- Inference rules to propagate impact across the infrastructure graph
+- Full explainability via `/explain`
 
 **What requires external tools:**
 
-- Alert ingestion from monitoring systems (PagerDuty, Alertmanager, etc.) requires external tooling to call engram's HTTP API when alerts fire
-- Automated ticket resolution detection (marking a ticket as resolved and triggering reinforcement) requires your ticketing system to call engram
+- Python script to orchestrate the demo (calls the HTTP API)
 
 ### Prerequisites
 
-- `engram` binary on your PATH
-- `curl` for HTTP API calls
+- `engram` binary on your PATH (or `./target/release/engram`)
+- Python 3.9+ with `requests` installed
 
-### Step-by-Step Implementation
+### Files
 
-#### Step 1: Create and populate the infrastructure knowledge
+```
+04-support-knowledge-base/
+  README.md                # This file
+  support_kb_demo.py       # Full demo script
+```
+
+### Step-by-Step
+
+#### Step 1: Start the engram server
 
 ```bash
 engram serve support.brain 127.0.0.1:3030
 ```
 
-#### Step 2: Store servers and services
+#### Step 2: Run the demo
 
 ```bash
-# Store servers
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{"entity":"web-server-01","type":"server","properties":{"env":"production","region":"us-east-1"},"confidence":0.95}'
-
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{"entity":"db-primary-01","type":"server","properties":{"env":"production","role":"database"},"confidence":0.95}'
-
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{"entity":"cache-01","type":"server","properties":{"env":"production","role":"cache"},"confidence":0.95}'
-
-# Store services
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{"entity":"checkout-api","type":"service","properties":{"owner":"payments-team","tier":"1"},"confidence":0.95}'
-
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{"entity":"postgresql","type":"service","properties":{"version":"16","port":"5432"},"confidence":0.95}'
-
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{"entity":"redis","type":"service","properties":{"port":"6379","maxmemory":"4gb"},"confidence":0.95}'
+python support_kb_demo.py
 ```
 
-#### Step 3: Relate servers to services they run
+### What Happens
 
-```bash
-curl -s -X POST http://127.0.0.1:3030/tell \
-  -H "Content-Type: application/json" \
-  -d '{"statement":"web-server-01 runs on checkout-api","source":"cmdb"}'
+#### Phase 1: Infrastructure & Services
 
-curl -s -X POST http://127.0.0.1:3030/tell \
-  -H "Content-Type: application/json" \
-  -d '{"statement":"db-primary-01 runs on postgresql","source":"cmdb"}'
+The script stores 12 nodes: 6 servers and 6 services (checkout-api, user-api, search-api, postgresql, redis, rabbitmq). Servers are linked to the services they run, and services are linked by dependency edges.
 
-curl -s -X POST http://127.0.0.1:3030/tell \
-  -H "Content-Type: application/json" \
-  -d '{"statement":"cache-01 runs on redis","source":"cmdb"}'
+#### Phase 2: Error Patterns, Root Causes, Solutions
 
-curl -s -X POST http://127.0.0.1:3030/relate \
-  -H "Content-Type: application/json" \
-  -d '{"from":"checkout-api","relationship":"depends_on","to":"postgresql","confidence":0.95}'
+Three error patterns are stored, each with a structured chain:
 
-curl -s -X POST http://127.0.0.1:3030/relate \
-  -H "Content-Type: application/json" \
-  -d '{"from":"checkout-api","relationship":"depends_on","to":"redis","confidence":0.95}'
+```
+ERR:connection_pool_exhausted (conf=0.90, severity=critical)
+  -[caused_by]-> CAUSE:pg_max_connections (conf=0.75)
+    -[resolved_by]-> FIX:increase_max_connections (conf=0.60)
+    -[resolved_by]-> FIX:add_pgbouncer (conf=0.55)
+  -[affects]-> postgresql
+
+ERR:redis_oom (conf=0.90, severity=high)
+  -[caused_by]-> CAUSE:redis_memory_full (conf=0.80)
+    -[resolved_by]-> FIX:redis_eviction_policy (conf=0.85, verified=true)
+    -[resolved_by]-> FIX:redis_scale_memory (conf=0.50)
+  -[affects]-> redis
+
+ERR:slow_queries (conf=0.85, severity=medium)
+  -[caused_by]-> CAUSE:missing_index (conf=0.70)
+    -[resolved_by]-> FIX:add_session_index (conf=0.65)
+  -[affects]-> postgresql, checkout-api
 ```
 
-#### Step 4: Store known error patterns
+After phase 2: **23 nodes, 24 edges**.
 
-```bash
-# Error: connection pool exhaustion
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{
-    "entity": "ERR:connection_pool_exhausted",
-    "type": "error_pattern",
-    "properties": {
-      "severity": "critical",
-      "symptom": "FATAL: remaining connection slots are reserved",
-      "status": "open"
-    },
-    "confidence": 0.90
-  }'
+#### Phase 3: Incident Response
 
-# Root cause node
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{
-    "entity": "CAUSE:pg_max_connections_exceeded",
-    "type": "root_cause",
-    "properties": {"component": "postgresql", "category": "resource_exhaustion"},
-    "confidence": 0.75
-  }'
-
-# Solution node
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{
-    "entity": "FIX:increase_pg_max_connections",
-    "type": "solution",
-    "properties": {
-      "action": "ALTER SYSTEM SET max_connections = 500; SELECT pg_reload_conf();",
-      "risk": "low",
-      "verified": "false"
-    },
-    "confidence": 0.60
-  }'
-
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{
-    "entity": "FIX:add_pgbouncer",
-    "type": "solution",
-    "properties": {
-      "action": "Deploy PgBouncer connection pooler in front of PostgreSQL",
-      "risk": "medium",
-      "verified": "false"
-    },
-    "confidence": 0.55
-  }'
-
-# Link error -> root cause -> solutions
-curl -s -X POST http://127.0.0.1:3030/relate \
-  -H "Content-Type: application/json" \
-  -d '{"from":"ERR:connection_pool_exhausted","relationship":"caused_by","to":"CAUSE:pg_max_connections_exceeded","confidence":0.75}'
-
-curl -s -X POST http://127.0.0.1:3030/relate \
-  -H "Content-Type: application/json" \
-  -d '{"from":"CAUSE:pg_max_connections_exceeded","relationship":"resolved_by","to":"FIX:increase_pg_max_connections","confidence":0.60}'
-
-curl -s -X POST http://127.0.0.1:3030/relate \
-  -H "Content-Type: application/json" \
-  -d '{"from":"CAUSE:pg_max_connections_exceeded","relationship":"resolved_by","to":"FIX:add_pgbouncer","confidence":0.55}'
-
-# Link error to the affected service
-curl -s -X POST http://127.0.0.1:3030/relate \
-  -H "Content-Type: application/json" \
-  -d '{"from":"ERR:connection_pool_exhausted","relationship":"affects","to":"postgresql","confidence":0.90}'
-```
-
-#### Step 5: Search for the error during an incident
-
-An on-call engineer sees the error message and searches for it:
+**Search**: An on-call engineer sees a PostgreSQL error and searches:
 
 ```bash
 curl -s -X POST http://127.0.0.1:3030/search \
   -H "Content-Type: application/json" \
-  -d '{"query":"connection pool exhausted","limit":5}'
+  -d '{"query": "connection pool exhausted", "limit": 5}'
 ```
 
-Expected output:
+Returns `ERR:connection_pool_exhausted`.
 
-```json
-{
-  "results": [
-    {
-      "node_id": 7,
-      "label": "ERR:connection_pool_exhausted",
-      "confidence": 0.9,
-      "score": 2.847,
-      "depth": null
-    }
-  ],
-  "total": 1
-}
-```
+**Traverse**: Depth-2 traversal from the error surfaces 11 nodes including the root cause, both solutions, affected servers, and dependent services.
 
-#### Step 6: Traverse from the error to find solutions
+**Filter**: `prop:severity=critical` returns only the connection pool error. `prop:status=open` returns both open errors.
+
+#### Phase 4: Learning Lifecycle
+
+**Reinforce** -- the fix worked, two engineers confirm:
 
 ```bash
-curl -s -X POST http://127.0.0.1:3030/query \
-  -H "Content-Type: application/json" \
-  -d '{"start":"ERR:connection_pool_exhausted","depth":2,"min_confidence":0.0}'
-```
-
-Expected output — the traversal reaches the root cause and both solutions:
-
-```json
-{
-  "nodes": [
-    {"label": "ERR:connection_pool_exhausted",     "confidence": 0.9,  "depth": 0},
-    {"label": "CAUSE:pg_max_connections_exceeded", "confidence": 0.75, "depth": 1},
-    {"label": "postgresql",                        "confidence": 0.95, "depth": 1},
-    {"label": "FIX:increase_pg_max_connections",   "confidence": 0.60, "depth": 2},
-    {"label": "FIX:add_pgbouncer",                 "confidence": 0.55, "depth": 2}
-  ],
-  "edges": [...]
-}
-```
-
-#### Step 7: Apply the fix — reinforce what worked
-
-The engineer increases `max_connections`. The error clears. They confirm the fix worked:
-
-```bash
-# Reinforce with confirmation (source present = confirmation boost of +0.10)
+# Confirmation boost: +0.10 each (requires source)
 curl -s -X POST http://127.0.0.1:3030/learn/reinforce \
   -H "Content-Type: application/json" \
-  -d '{"entity":"FIX:increase_pg_max_connections","source":"on-call-alice"}'
+  -d '{"entity": "FIX:increase_max_connections", "source": "on-call-alice"}'
 ```
 
-Expected output:
+Confidence progression: **0.60 -> 0.70 -> 0.80 -> 0.82** (two confirmations + one access boost).
 
-```json
-{"entity":"FIX:increase_pg_max_connections","new_confidence":0.7}
-```
-
-Confidence went from 0.60 to 0.70 (confirmation boost of +0.10). Reinforce again when the second engineer validates the runbook:
+**Correct** -- wrong diagnosis discarded:
 
 ```bash
-curl -s -X POST http://127.0.0.1:3030/learn/reinforce \
-  -H "Content-Type: application/json" \
-  -d '{"entity":"FIX:increase_pg_max_connections","source":"on-call-bob"}'
-```
-
-Expected output:
-
-```json
-{"entity":"FIX:increase_pg_max_connections","new_confidence":0.8}
-```
-
-#### Step 8: Mark a wrong diagnosis — correct it
-
-Suppose someone initially guessed the problem was a network issue. That diagnosis was stored at low confidence and needs to be corrected:
-
-```bash
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{"entity":"CAUSE:network_partition","type":"root_cause","confidence":0.40}'
-
-curl -s -X POST http://127.0.0.1:3030/relate \
-  -H "Content-Type: application/json" \
-  -d '{"from":"ERR:connection_pool_exhausted","relationship":"caused_by","to":"CAUSE:network_partition","confidence":0.40}'
-
-# Now correct the wrong diagnosis
 curl -s -X POST http://127.0.0.1:3030/learn/correct \
   -H "Content-Type: application/json" \
-  -d '{"entity":"CAUSE:network_partition","reason":"post-mortem confirmed resource exhaustion, not network","source":"post-mortem"}'
+  -d '{"entity": "CAUSE:network_partition", "reason": "postmortem confirmed resource exhaustion"}'
 ```
 
-Expected output — correction propagates to neighbors:
+Confidence: **0.40 -> 0.00**. The correction zeroes the node's confidence.
 
-```json
-{
-  "corrected": "CAUSE:network_partition",
-  "propagated_to": ["ERR:connection_pool_exhausted"]
-}
-```
-
-The `CAUSE:network_partition` node receives a contradiction penalty (-0.20), dropping from 0.40 to 0.20. The error node that pointed to it also gets a reduced confidence signal propagated.
-
-#### Step 9: Search critical open issues
+**Decay** -- call periodically to let stale knowledge fade:
 
 ```bash
-curl -s -X POST http://127.0.0.1:3030/search \
-  -H "Content-Type: application/json" \
-  -d '{"query":"prop:severity=critical","limit":10}'
+curl -s -X POST http://127.0.0.1:3030/learn/decay
 ```
 
-Expected output:
+Confidence multiplied by 0.999 per elapsed day. Nodes below 0.10 become archival candidates.
 
-```json
-{
-  "results": [
-    {"label": "ERR:connection_pool_exhausted", "confidence": 0.9, "score": 1.0, "depth": null}
-  ],
-  "total": 1
-}
+#### Phase 5: Inference -- Impact Propagation
+
+Two rules derive new `affects` edges:
+
+```
+rule server_affected
+when edge(server, "runs", service)
+when edge(err, "affects", service)
+then edge(err, "affects", server, min(e1, e2))
 ```
 
-#### Step 10: Use inference to propagate impact
+```
+rule dependency_impact
+when edge(svc, "depends_on", dep)
+when edge(err, "affects", dep)
+then edge(err, "affects", svc, min(e1, e2))
+```
 
-Define a rule that says: if a server runs a service, and that service has an error, then the server is affected. Submit it via `/learn/derive`:
+After inference: **24 nodes, 38 edges** (+13 derived).
+
+**Blast radius** of `ERR:connection_pool_exhausted`:
+```
+postgresql, db-primary-01, db-replica-01, checkout-api, user-api, search-api
+```
+
+**Blast radius** of `ERR:redis_oom`:
+```
+redis, cache-01, checkout-api, user-api
+```
+
+#### Phase 6: Explainability
 
 ```bash
-curl -s -X POST http://127.0.0.1:3030/learn/derive \
-  -H "Content-Type: application/json" \
-  -d '{
-    "rules": [
-      "rule server_affected_by_service_error\nwhen edge(S, \"runs_on\", SVC)\nwhen edge(ERR, \"affects\", SVC)\nthen edge(ERR, \"affects\", S, min(e1, e2))"
-    ]
-  }'
+curl -s http://127.0.0.1:3030/explain/FIX:increase_max_connections
 ```
 
-Expected output:
-
-```json
-{
-  "rules_evaluated": 1,
-  "rules_fired": 1,
-  "edges_created": 1,
-  "flags_raised": 0
-}
-```
-
-One new edge was created: `ERR:connection_pool_exhausted -[affects]-> db-primary-01`. The confidence of that edge is `min(runs_on confidence, affects confidence)` — the weakest link in the chain.
-
-#### Step 11: Simulate decay for old issues
-
-After 90 days of inactivity, apply decay to show stale knowledge fading:
-
-```bash
-# In production this would run on a scheduled basis
-curl -s -X POST http://127.0.0.1:3030/learn/decay \
-  -H "Content-Type: application/json" \
-  -d '{}'
-```
-
-Expected output:
-
-```json
-{"nodes_decayed": 12}
-```
-
-All 12 nodes in the graph had their confidence multiplied by the time-elapsed decay factor. Nodes not accessed recently lose confidence faster. At confidence below 0.20 they are flagged for archival; below 0.10 they are candidates for garbage collection.
+Returns confidence (0.82 after two confirmations), properties (action, risk, verified status), and provenance.
 
 ### Key Takeaways
 
-- The error -> root cause -> solution chain is a natural graph pattern. Depth-2 traversal from any error node immediately surfaces candidate fixes.
-- Confirmation reinforcement (+0.10) versus access reinforcement (+0.02) means engineer-confirmed fixes rise faster than passively accessed ones.
-- The correction endpoint propagates a confidence penalty to graph neighbors, so wrong diagnoses do not silently remain at their original confidence.
-- Inference rules let you derive "server is affected" edges without storing them manually for every combination of server and service.
-- Decay is a scheduled operation — call it daily via a cron job or scheduled task to keep confidence scores reflecting recency.
+- **Error -> root cause -> solution** is a natural graph pattern. Depth-2 traversal from any error node immediately surfaces candidate fixes, ranked by confidence.
+- **Confirmation reinforcement** (+0.10) versus **access reinforcement** (+0.02) means engineer-confirmed fixes rise faster than passively accessed ones.
+- **Correction** zeroes the confidence of wrong diagnoses and can propagate penalties to connected nodes.
+- **Property filters** (`prop:severity=critical`, `prop:status=open`) let on-call engineers quickly find relevant issues without traversing the full graph.
+- **Inference rules** propagate impact automatically: "if a server runs a service with an error, the server is affected." One rule, zero manual work per incident.
+- **Decay** keeps the knowledge base fresh. Solutions that haven't been confirmed recently fade, making room for newer approaches.
