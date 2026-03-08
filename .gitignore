@@ -6,3 +6,8 @@
 *.brain.types
 *.brain.vectors
 *.brain.cooccur
+*.brain.model.onnx
+*.brain.tokenizer.json
+__pycache__/
+*.log
+e5-small-onnx/
