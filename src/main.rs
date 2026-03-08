@@ -94,7 +94,8 @@ fn cmd_query(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // Show node details
     if let Some(node) = g.get_node(label)? {
-        println!("Node: {}", node.label());
+        let display_label = g.label_for_id(node.id).unwrap_or_else(|_| node.label().to_string());
+        println!("Node: {}", display_label);
         println!("  id: {}", node.id);
         println!("  confidence: {:.2}", node.confidence);
         println!("  memory_tier: {}", node.memory_tier);

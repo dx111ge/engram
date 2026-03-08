@@ -11,6 +11,7 @@ Building a knowledge base from web search results lets you progressively accumul
 - Fact extraction from snippets via regex + `/tell` NL interface
 - Confidence grows with corroboration from multiple sources
 - Source provenance tracks which web domain provided each fact
+- Label overflow: document titles longer than 47 bytes stored via property region
 - Graph traversal from central entities
 - Decay for freshness maintenance
 
@@ -59,17 +60,15 @@ Rust is a systems programming language
 Rust is a compiled language (reinforced -- seen in multiple results)
 ```
 
-After pass 1: **10 nodes, 5 edges** (3 doc nodes, 1 topic, extracted entities + relationships).
+After pass 1: **7 nodes, 5 edges** (3 doc nodes, 1 topic, extracted entities + relationships).
 
 #### Phase 2: Iterative Deepening
 
 Two more search passes for related topics:
 - "Rust ownership model" -- 2 results, extracts "Ownership is a set of rules", "Rust is a systems language"
-- "Rust cargo package manager" -- 2 results
+- "Rust cargo package manager" -- 2 results (no simple "X is a Y" facts extracted)
 
-Each pass adds document nodes and extracted facts. Entities mentioned across multiple results get reinforced automatically.
-
-After 3 passes: **22 nodes, 11 edges**.
+After 3 passes: **16 nodes, 11 edges**.
 
 #### Phase 3: Case-Insensitive Deduplication
 
@@ -91,7 +90,17 @@ Entities mentioned by many sources accumulate higher confidence:
 Rust: 0.90 (mentioned across many results)
 ```
 
-Text search for "programming language" returns related entities ranked by confidence.
+Text search for "programming language" returns related entities ranked by confidence:
+
+```
+Rust-programming-language: conf=0.80
+programming language: conf=0.80
+systems programming language: conf=0.80
+doc:Rust (programming language) - Wikipedia: conf=0.60
+doc:The Rust Programming Language - rust-lang.org: conf=0.60
+```
+
+Document labels now use full titles (e.g. `doc:The Rust Programming Language - rust-lang.org`, 49 bytes) -- labels longer than 47 bytes overflow to the property region automatically.
 
 #### Phase 5: Graph Traversal
 
@@ -111,13 +120,19 @@ Decay returns 0 (just stored). In production, run `/learn/decay` daily via cron 
 
 #### Phase 7: Explainability
 
-```bash
-curl -s http://127.0.0.1:3030/explain/Rust
+```
+Confidence: 0.90
+Outgoing edges (6):
+  -[is_a]-> systems programming language (conf=0.8)
+  -[is_a]-> compiled language (conf=0.8)
+  -[is_a]-> systems language (conf=0.8)
+  -[is_a]-> programming language (conf=0.8)
+  -[is_a]-> systems language (conf=0.8)
+  ... and 1 more
+Incoming edges (0)
 ```
 
-Shows confidence (0.90), all outgoing `is_a` edges from extracted facts, and no incoming edges (Rust is a root entity in this demo).
-
-Final graph: **28 nodes, 14 edges**.
+Final graph: **17 nodes, 14 edges**.
 
 ### Adapting for Real Search APIs
 
@@ -147,7 +162,8 @@ def search_web(query, num_results=10):
 
 - **Progressive knowledge building** works naturally. Each search pass adds entities, and entities mentioned across multiple results get reinforced automatically.
 - **Case-insensitive deduplication** prevents duplicate nodes when different sources capitalize differently.
-- **Labels are limited to 48 bytes** in engram's storage. Keep document labels short (e.g., `doc:` prefix + truncated title).
+- **Store deduplicates automatically**: calling `/store` with an existing label returns the existing node ID instead of creating a duplicate.
+- **Label overflow**: labels longer than 47 bytes are stored in the property region under `_label`. The inline buffer holds a prefix for display, but all lookups, traversals, and searches use the full label.
 - **Source provenance** via the `source` parameter tracks which web domain provided each fact, enabling trust assessment.
 - **Confidence as corroboration**: entities mentioned by many sources accumulate higher confidence than one-off mentions.
 - **Decay keeps knowledge fresh**: running `/learn/decay` periodically ensures that knowledge not reinforced by recent searches gradually fades.

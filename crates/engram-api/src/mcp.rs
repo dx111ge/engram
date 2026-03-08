@@ -234,7 +234,7 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
                 let node = g.get_node_by_id(nid).ok()??;
                 if node.confidence >= min_conf {
                     Some(serde_json::json!({
-                        "label": node.label(),
+                        "label": g.label_for_id(nid).unwrap_or_else(|_| node.label().to_string()),
                         "confidence": node.confidence,
                         "depth": result.depths.get(&nid)
                     }))

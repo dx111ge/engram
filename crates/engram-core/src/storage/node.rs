@@ -9,6 +9,13 @@ pub const NODE_SIZE: usize = 256;
 pub const FLAG_ACTIVE: u32 = 1 << 0;
 pub const FLAG_DELETED: u32 = 1 << 1;
 pub const FLAG_LOCKED: u32 = 1 << 2;
+pub const FLAG_LABEL_OVERFLOW: u32 = 1 << 3;
+
+/// Maximum inline label length (47 usable bytes + null terminator)
+pub const LABEL_INLINE_MAX: usize = 47;
+
+/// Property key used to store overflow labels
+pub const LABEL_OVERFLOW_KEY: &str = "_label";
 
 /// Memory tiers
 pub const TIER_CORE: u8 = 0; // Always in LLM context
@@ -86,10 +93,17 @@ const _: () = assert!(std::mem::size_of::<Node>() == NODE_SIZE);
 
 impl Node {
     pub fn new(id: u64, label: &str, now: i64) -> Self {
+        let label_bytes = label.as_bytes();
+        let overflow = label_bytes.len() > LABEL_INLINE_MAX;
+        let flags = if overflow {
+            FLAG_ACTIVE | FLAG_LABEL_OVERFLOW
+        } else {
+            FLAG_ACTIVE
+        };
         let mut node = Node {
             id,
             node_type: 0,
-            flags: FLAG_ACTIVE,
+            flags,
             created_at: now,
             updated_at: now,
             event_time: now,
@@ -116,8 +130,7 @@ impl Node {
             label_inline: [0u8; 48],
             _reserved: [0u8; 16],
         };
-        let label_bytes = label.as_bytes();
-        let copy_len = label_bytes.len().min(47); // leave room for null terminator
+        let copy_len = label_bytes.len().min(LABEL_INLINE_MAX);
         node.label_inline[..copy_len].copy_from_slice(&label_bytes[..copy_len]);
         node
     }
@@ -128,6 +141,10 @@ impl Node {
 
     pub fn is_deleted(&self) -> bool {
         self.flags & FLAG_DELETED != 0
+    }
+
+    pub fn has_label_overflow(&self) -> bool {
+        self.flags & FLAG_LABEL_OVERFLOW != 0
     }
 
     pub fn label(&self) -> &str {
@@ -202,6 +219,29 @@ mod tests {
         let long_label = "a".repeat(100);
         let node = Node::new(1, &long_label, 1000);
         assert_eq!(node.label().len(), 47);
+    }
+
+    #[test]
+    fn overflow_flag_set_for_long_label() {
+        let short = Node::new(1, "short", 1000);
+        assert!(!short.has_label_overflow());
+
+        let exact = Node::new(2, &"x".repeat(47), 1000);
+        assert!(!exact.has_label_overflow());
+
+        let overflow = Node::new(3, &"y".repeat(48), 1000);
+        assert!(overflow.has_label_overflow());
+        assert!(overflow.is_active());
+    }
+
+    #[test]
+    fn overflow_hash_uses_full_label() {
+        let full = "this-label-is-longer-than-47-bytes-and-will-overflow-the-inline-buffer";
+        let node = Node::new(1, full, 1000);
+        // Hash is computed on the full label, not the truncated inline
+        assert_eq!(node.label_hash, hash_label(full));
+        // Inline is truncated but hash is for full label
+        assert_ne!(node.label_hash, hash_label(node.label()));
     }
 
     #[test]

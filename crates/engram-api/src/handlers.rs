@@ -187,7 +187,7 @@ pub async fn query(
         if let Ok(Some(node)) = g.get_node_by_id(nid) {
             nodes.push(NodeHit {
                 node_id: nid,
-                label: node.label().to_string(),
+                label: g.label_for_id(nid).unwrap_or_else(|_| node.label().to_string()),
                 confidence: node.confidence,
                 score: None,
                 depth: result.depths.get(&nid).copied(),

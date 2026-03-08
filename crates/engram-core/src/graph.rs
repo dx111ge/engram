@@ -26,7 +26,7 @@ use crate::learning::rules::{Action, ConfidenceExpr, Condition, ConditionOp, Rul
 use crate::learning::tier::{self, TierSweepResult};
 use crate::storage::brain_file::BrainFile;
 use crate::storage::error::{Result, StorageError};
-use crate::storage::node::{hash_label, labels_eq, Node};
+use crate::storage::node::{hash_label, labels_eq, Node, LABEL_OVERFLOW_KEY};
 use crate::storage::props::PropertyStore;
 use crate::storage::type_registry::TypeRegistry;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -205,10 +205,23 @@ impl Graph {
 
     /// Store a new node with a label. Returns node ID.
     /// Confidence is automatically set based on the provenance source type.
+    /// Labels longer than 47 bytes are stored in the property region
+    /// with the inline buffer holding a prefix for display.
     pub fn store(&mut self, label: &str, provenance: &Provenance) -> Result<u64> {
+        // Dedup: if a node with this label already exists, return its ID
+        if let Some(existing_id) = self.find_node_id(label)? {
+            return Ok(existing_id);
+        }
+
         let node_id = self.brain.store_node(label)?;
         let (node_count, _) = self.brain.stats();
         let slot = node_count - 1;
+
+        // Store overflow label in property region if needed
+        let node = self.brain.read_node(slot)?;
+        if node.has_label_overflow() {
+            self.props.set(slot, LABEL_OVERFLOW_KEY, label);
+        }
 
         // Set source-based initial confidence and source_id
         let init_conf = initial_confidence(provenance.source_type);
@@ -220,15 +233,15 @@ impl Graph {
 
         self.label_index.insert(hash_label(label), slot);
 
-        // Update search indexes
-        let node = self.brain.read_node(slot)?;
+        // Update search indexes (use full label, not truncated inline)
         self.fulltext.add_document(slot, label);
+        let node = self.brain.read_node(slot)?;
         self.temporal.insert(slot, node.created_at, node.event_time);
         self.type_bitmap.insert(node.node_type, slot);
         self.tier_bitmap.insert(node.memory_tier as u32, slot);
         self.sensitivity_bitmap.insert(node.sensitivity as u32, slot);
 
-        // Auto-embed if an embedder is configured
+        // Auto-embed if an embedder is configured (use full label)
         if let Some(ref embedder) = self.embedder {
             if let Ok(vec) = embedder.embed(label) {
                 self.hnsw.insert(slot, vec);
@@ -246,11 +259,11 @@ impl Graph {
         provenance: &Provenance,
     ) -> Result<u64> {
         let node_id = self.store(label, provenance)?;
-        let (node_count, _) = self.brain.stats();
-        let slot = node_count - 1;
-        self.brain.update_node_field(slot, |n| {
-            n.confidence = confidence.clamp(0.0, 1.0);
-        })?;
+        if let Some(slot) = self.find_slot_by_label(label)? {
+            self.brain.update_node_field(slot, |n| {
+                n.confidence = confidence.clamp(0.0, 1.0);
+            })?;
+        }
         Ok(node_id)
     }
 
@@ -417,7 +430,7 @@ impl Graph {
 
         for slot in slots {
             let node = self.brain.read_node(slot)?;
-            if node.is_active() && labels_eq(node.label(), label) {
+            if node.is_active() && self.slot_label_eq(slot, label)? {
                 let now = current_timestamp();
                 self.brain.update_node_field(slot, |n| {
                     n.soft_delete(now);
@@ -468,12 +481,37 @@ impl Graph {
 
     // --- Query helpers ---
 
+    /// Get the full label for a node slot. Returns the overflow label from
+    /// properties if the label was too long for inline storage (>47 bytes),
+    /// otherwise returns the inline label.
+    pub fn full_label(&self, slot: u64) -> Result<String> {
+        let node = self.brain.read_node(slot)?;
+        if node.has_label_overflow() {
+            if let Some(label) = self.props.get(slot, LABEL_OVERFLOW_KEY) {
+                return Ok(label.to_string());
+            }
+        }
+        Ok(node.label().to_string())
+    }
+
+    /// Check if a node at the given slot matches the given label (case-insensitive).
+    /// Handles overflow labels transparently.
+    fn slot_label_eq(&self, slot: u64, label: &str) -> Result<bool> {
+        let node = self.brain.read_node(slot)?;
+        if node.has_label_overflow() {
+            if let Some(full) = self.props.get(slot, LABEL_OVERFLOW_KEY) {
+                return Ok(labels_eq(full, label));
+            }
+        }
+        Ok(labels_eq(node.label(), label))
+    }
+
     /// Find a node by label, return its ID.
     pub fn find_node_id(&self, label: &str) -> Result<Option<u64>> {
         let target_hash = hash_label(label);
         for &slot in self.label_index.get(target_hash) {
             let node = self.brain.read_node(slot)?;
-            if node.is_active() && labels_eq(node.label(), label) {
+            if node.is_active() && self.slot_label_eq(slot, label)? {
                 return Ok(Some(node.id));
             }
         }
@@ -485,7 +523,7 @@ impl Graph {
         let target_hash = hash_label(label);
         for &slot in self.label_index.get(target_hash) {
             let node = self.brain.read_node(slot)?;
-            if node.is_active() && labels_eq(node.label(), label) {
+            if node.is_active() && self.slot_label_eq(slot, label)? {
                 return Ok(Some(node));
             }
         }
@@ -567,8 +605,7 @@ impl Graph {
         };
 
         // Build text: label + all property values
-        let node = self.brain.read_node(slot)?;
-        let mut text = node.label().to_string();
+        let mut text = self.full_label(slot)?;
         if let Some(props) = self.props.get_all(slot) {
             for (k, v) in props {
                 text.push(' ');
@@ -601,7 +638,7 @@ impl Graph {
                             results.push(NodeSearchResult {
                                 slot,
                                 node_id: node.id,
-                                label: node.label().to_string(),
+                                label: self.full_label(slot)?,
                                 confidence: node.confidence,
                                 score: 1.0 - distance as f64,
                             });
@@ -621,7 +658,7 @@ impl Graph {
                 results.push(NodeSearchResult {
                     slot: hit.slot,
                     node_id: node.id,
-                    label: node.label().to_string(),
+                    label: self.full_label(hit.slot)?,
                     confidence: node.confidence,
                     score: 1.0 - hit.distance as f64, // convert distance to similarity
                 });
@@ -651,7 +688,7 @@ impl Graph {
                 results.push(NodeSearchResult {
                     slot: hit.slot,
                     node_id: node.id,
-                    label: node.label().to_string(),
+                    label: self.full_label(hit.slot)?,
                     confidence: node.confidence,
                     score: hit.score,
                 });
@@ -695,7 +732,7 @@ impl Graph {
                     results.push(NodeSearchResult {
                         slot,
                         node_id: node.id,
-                        label: node.label().to_string(),
+                        label: self.full_label(slot).map_err(|e| e.to_string())?,
                         confidence: node.confidence,
                         score: 0.0, // filters don't produce scores
                     });
@@ -716,7 +753,7 @@ impl Graph {
                 results.push(NodeSearchResult {
                     slot,
                     node_id: node.id,
-                    label: node.label().to_string(),
+                    label: self.full_label(slot)?,
                     confidence: node.confidence,
                     score: 0.0,
                 });
@@ -772,7 +809,7 @@ impl Graph {
         for slot in 0..node_count {
             let node = self.brain.read_node(slot)?;
             if node.is_active() {
-                let label = node.label().to_string();
+                let label = self.full_label(slot)?;
                 let node_type_name = self.node_type_names.get(node.node_type as usize).cloned();
                 let properties = self.props.get_all(slot).cloned().unwrap_or_default();
                 result.push(NodeSnapshot {
@@ -1077,7 +1114,7 @@ impl Graph {
                         let rel_name = self.type_registry.name_or_default(edge.edge_type);
                         evidence.supporting.push(SupportingFact {
                             slot: target_slot,
-                            label: target.label().to_string(),
+                            label: self.full_label(target_slot)?,
                             confidence: target.confidence,
                             relationship: rel_name,
                         });
@@ -1100,7 +1137,7 @@ impl Graph {
                                     let target = self.brain.read_node(target_slot)?;
                                     evidence.contradictions.push(ContradictingFact {
                                         slot: target_slot,
-                                        label: target.label().to_string(),
+                                        label: self.full_label(target_slot)?,
                                         confidence: target.confidence,
                                         reason: format!(
                                             "property '{key}': '{value}' vs '{target_val}'"
@@ -1187,7 +1224,7 @@ impl Graph {
                 results.push(NodeSearchResult {
                     slot,
                     node_id: node.id,
-                    label: node.label().to_string(),
+                    label: self.full_label(slot)?,
                     confidence: node.confidence,
                     score: 0.0,
                 });
@@ -1524,7 +1561,7 @@ impl Graph {
             };
 
             let mut bindings = Bindings::new();
-            bindings.insert(var_name, node.label().to_string());
+            bindings.insert(var_name, self.full_label(slot)?);
 
             let mut all_match = true;
             for cond in &rule.conditions {
@@ -1687,7 +1724,7 @@ impl Graph {
                 continue;
             }
 
-            let mut text = node.label().to_string();
+            let mut text = self.full_label(slot)?;
             if let Some(props) = self.props.get_all(slot) {
                 for (k, v) in props {
                     text.push(' ');
@@ -1724,7 +1761,7 @@ impl Graph {
 
     /// Get a node's label by its storage slot.
     pub fn get_node_label_by_slot(&self, slot: u64) -> Option<String> {
-        self.brain.read_node(slot).ok().map(|n| n.label().to_string())
+        self.full_label(slot).ok()
     }
 
     /// Flush and checkpoint everything: mmap, WAL, types, properties, vectors, co-occurrence.
@@ -1747,7 +1784,7 @@ impl Graph {
         let target_hash = hash_label(label);
         for &slot in self.label_index.get(target_hash) {
             let node = self.brain.read_node(slot)?;
-            if node.is_active() && labels_eq(node.label(), label) {
+            if node.is_active() && self.slot_label_eq(slot, label)? {
                 return Ok(Some(slot));
             }
         }
@@ -1765,10 +1802,9 @@ impl Graph {
         }
     }
 
-    fn label_for_id(&self, node_id: u64) -> Result<String> {
+    pub fn label_for_id(&self, node_id: u64) -> Result<String> {
         if let Some(slot) = self.find_slot_by_id(node_id) {
-            let node = self.brain.read_node(slot)?;
-            Ok(node.label().to_string())
+            self.full_label(slot)
         } else {
             Ok(format!("node_{node_id}"))
         }
@@ -1790,8 +1826,7 @@ impl Graph {
 
     fn reindex_fulltext(&mut self, slot: u64) -> Result<()> {
         self.fulltext.remove_document(slot);
-        let node = self.brain.read_node(slot)?;
-        let mut text = node.label().to_string();
+        let mut text = self.full_label(slot)?;
         if let Some(props) = self.props.get_all(slot) {
             for (k, v) in props {
                 text.push(' ');
@@ -1812,7 +1847,7 @@ impl Graph {
                 results.push(NodeSearchResult {
                     slot: hit.slot,
                     node_id: node.id,
-                    label: node.label().to_string(),
+                    label: self.full_label(hit.slot)?,
                     confidence: node.confidence,
                     score: hit.score,
                 });
@@ -1942,7 +1977,7 @@ impl Graph {
                 self.sensitivity_bitmap.insert(node.sensitivity as u32, slot);
 
                 // Fulltext: label + properties
-                let mut text = node.label().to_string();
+                let mut text = self.full_label(slot)?;
                 if let Some(props) = self.props.get_all(slot) {
                     for (k, v) in props {
                         text.push(' ');
@@ -2898,5 +2933,203 @@ then flag(node, "low confidence")
 
         let results = g.search_vector(&[1.0, 0.0, 0.0], 5).unwrap();
         assert!(results.is_empty() || results.iter().all(|r| r.label != "ephemeral"));
+    }
+
+    // ── Label overflow tests ──────────────────────────────────────────
+
+    #[test]
+    fn short_label_no_overflow() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let id = g.store("short-label", &prov).unwrap();
+        let label = g.label_for_id(id).unwrap();
+        assert_eq!(label, "short-label");
+
+        // No overflow flag
+        let node = g.get_node("short-label").unwrap().unwrap();
+        assert!(!node.has_label_overflow());
+    }
+
+    #[test]
+    fn label_exactly_47_bytes_no_overflow() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let label_47 = "a".repeat(47); // exactly at limit
+        let id = g.store(&label_47, &prov).unwrap();
+        let full = g.label_for_id(id).unwrap();
+        assert_eq!(full, label_47);
+
+        let node = g.get_node(&label_47).unwrap().unwrap();
+        assert!(!node.has_label_overflow());
+    }
+
+    #[test]
+    fn label_overflow_stores_full_label_in_props() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let long_label = "this-is-a-very-long-label-that-exceeds-the-48-byte-inline-limit-by-quite-a-lot";
+        assert!(long_label.len() > 47);
+
+        let id = g.store(long_label, &prov).unwrap();
+
+        // Full label retrieved correctly
+        let full = g.label_for_id(id).unwrap();
+        assert_eq!(full, long_label);
+
+        // Overflow flag set
+        let node = g.get_node_by_id(id).unwrap().unwrap();
+        assert!(node.has_label_overflow());
+
+        // Inline label is truncated prefix
+        assert_eq!(node.label().len(), 47);
+        assert!(long_label.starts_with(node.label()));
+    }
+
+    #[test]
+    fn find_node_by_overflow_label() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let long_label = "overflow-label-that-is-definitely-longer-than-forty-seven-bytes-total";
+        let id = g.store(long_label, &prov).unwrap();
+
+        // Find by full label
+        let found = g.find_node_id(long_label).unwrap();
+        assert_eq!(found, Some(id));
+
+        // get_node by full label
+        let node = g.get_node(long_label).unwrap();
+        assert!(node.is_some());
+    }
+
+    #[test]
+    fn overflow_label_dedup_on_re_store() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let long_label = "a-label-that-overflows-the-inline-storage-area-which-is-only-47-bytes";
+        let id1 = g.store(long_label, &prov).unwrap();
+        let id2 = g.store(long_label, &prov).unwrap();
+        assert_eq!(id1, id2); // same node, not duplicated
+    }
+
+    #[test]
+    fn overflow_label_case_insensitive_dedup() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let label_lower = "this-is-a-very-long-case-insensitive-label-that-overflows-inline";
+        let label_upper = "THIS-IS-A-VERY-LONG-CASE-INSENSITIVE-LABEL-THAT-OVERFLOWS-INLINE";
+        let id1 = g.store(label_lower, &prov).unwrap();
+        let id2 = g.store(label_upper, &prov).unwrap();
+        assert_eq!(id1, id2); // case-insensitive dedup
+    }
+
+    #[test]
+    fn short_label_dedup_on_re_store() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let id1 = g.store("short-label", &prov).unwrap();
+        let id2 = g.store("short-label", &prov).unwrap();
+        assert_eq!(id1, id2);
+
+        // Case-insensitive dedup for short labels too
+        let id3 = g.store("SHORT-LABEL", &prov).unwrap();
+        assert_eq!(id1, id3);
+    }
+
+    #[test]
+    fn relate_with_overflow_labels() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let long_from = "source-node-with-a-label-exceeding-the-forty-seven-byte-limit";
+        let long_to = "target-node-with-a-label-also-exceeding-the-forty-seven-byte-limit";
+        g.store(long_from, &prov).unwrap();
+        g.store(long_to, &prov).unwrap();
+        g.relate(long_from, long_to, "connects_to", &prov).unwrap();
+
+        let edges = g.edges_from(long_from).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].to, long_to);
+        assert_eq!(edges[0].relationship, "connects_to");
+
+        let edges_in = g.edges_to(long_to).unwrap();
+        assert_eq!(edges_in.len(), 1);
+        assert_eq!(edges_in[0].from, long_from);
+    }
+
+    #[test]
+    fn delete_node_with_overflow_label() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let long_label = "deletable-node-with-overflow-label-exceeding-forty-seven-bytes";
+        g.store(long_label, &prov).unwrap();
+        assert!(g.find_node_id(long_label).unwrap().is_some());
+
+        g.delete(long_label, &prov).unwrap();
+        assert!(g.find_node_id(long_label).unwrap().is_none());
+    }
+
+    #[test]
+    fn traverse_with_overflow_labels() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let long_a = "start-node-with-an-overflow-label-longer-than-47-bytes-for-testing";
+        let short_b = "short-target";
+        g.store(long_a, &prov).unwrap();
+        g.store(short_b, &prov).unwrap();
+        g.relate(long_a, short_b, "links_to", &prov).unwrap();
+
+        let result = g.traverse(long_a, 1, 0.0).unwrap();
+        assert!(result.nodes.len() >= 2);
+
+        // Verify the long label appears in the labels
+        let labels: Vec<String> = result.nodes.iter()
+            .filter_map(|&nid| g.label_for_id(nid).ok())
+            .collect();
+        assert!(labels.contains(&long_a.to_string()));
+        assert!(labels.contains(&short_b.to_string()));
+    }
+
+    #[test]
+    fn fulltext_search_overflow_label() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let long_label = "unique-searchable-entity-with-overflow-label-longer-than-47-bytes";
+        g.store(long_label, &prov).unwrap();
+
+        let results = g.search_text("unique-searchable-entity", 5).unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].label, long_label);
     }
 }

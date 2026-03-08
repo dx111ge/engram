@@ -147,8 +147,8 @@ def import_search_results(query):
         print(f"\n  [{i+1}] {title}")
         print(f"      {domain}")
 
-        # Store as document node (labels max 48 bytes)
-        doc_label = f"doc:{title[:43]}"
+        # Store as document node (overflow labels stored in property region)
+        doc_label = f"doc:{title}"
         store(doc_label, "search_result", {
             "url": url,
             "source_domain": domain,
