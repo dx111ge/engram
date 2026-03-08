@@ -115,8 +115,9 @@ mod service {
 
             let depth = if req.depth > 0 { req.depth } else { 2 };
             let min_conf = req.min_confidence;
+            let direction = if req.direction.is_empty() { "both" } else { &req.direction };
 
-            let result = g.traverse(&req.start, depth, min_conf).map_err(|e| not_found(e.to_string()))?;
+            let result = g.traverse_directed(&req.start, depth, min_conf, direction).map_err(|e| not_found(e.to_string()))?;
 
             let mut nodes = Vec::new();
             for &nid in &result.nodes {

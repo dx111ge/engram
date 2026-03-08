@@ -28,6 +28,8 @@ pub struct QueryRequest {
     pub relationship: Option<String>,
     pub depth: Option<u32>,
     pub min_confidence: Option<f32>,
+    /// Traversal direction: "out", "in", or "both" (default: "both")
+    pub direction: Option<String>,
 }
 
 #[derive(Deserialize)]

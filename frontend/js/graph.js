@@ -40,6 +40,14 @@ router.register('/graph', () => {
             <input type="range" id="graph-conf" min="0" max="100" value="0">
           </div>
           <div class="form-group">
+            <label>Direction</label>
+            <select id="graph-direction">
+              <option value="both">Both (default)</option>
+              <option value="out">Outgoing only</option>
+              <option value="in">Incoming only</option>
+            </select>
+          </div>
+          <div class="form-group">
             <label>Layout</label>
             <select id="graph-layout">
               <option value="forceAtlas2Based">Force Atlas</option>
@@ -169,9 +177,10 @@ function setupGraphEvents() {
 async function expandNode(label) {
   const depth = parseInt(document.getElementById('graph-depth').value);
   const minConf = parseInt(document.getElementById('graph-conf').value) / 100;
+  const direction = document.getElementById('graph-direction').value;
 
   try {
-    const result = await engram.query({ start: label, depth, min_confidence: minConf });
+    const result = await engram.query({ start: label, depth, min_confidence: minConf, direction });
     const emptyEl = document.getElementById('graph-empty');
     if (emptyEl) emptyEl.style.display = 'none';
 

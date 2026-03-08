@@ -50,6 +50,7 @@ message QueryRequest {
   string start = 1;
   uint32 depth = 2;
   float min_confidence = 3;
+  string direction = 4; // "out", "in", or "both" (default: "both")
 }
 
 message QueryResponse {

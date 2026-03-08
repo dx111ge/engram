@@ -57,7 +57,8 @@ pub fn tool_definitions() -> Value {
                         "properties": {
                             "start": { "type": "string", "description": "Starting entity" },
                             "depth": { "type": "integer", "description": "Max traversal depth (default: 2)" },
-                            "min_confidence": { "type": "number", "description": "Minimum confidence threshold" }
+                            "min_confidence": { "type": "number", "description": "Minimum confidence threshold" },
+                            "direction": { "type": "string", "description": "Traversal direction: out, in, or both (default: both)" }
                         },
                         "required": ["start"]
                     }

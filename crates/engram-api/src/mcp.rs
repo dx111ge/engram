@@ -101,7 +101,8 @@ fn tool_definitions() -> Value {
                         "start": { "type": "string", "description": "Starting entity" },
                         "relationship": { "type": "string", "description": "Filter by relationship type" },
                         "depth": { "type": "integer", "description": "Max traversal depth" },
-                        "min_confidence": { "type": "number", "description": "Minimum confidence threshold" }
+                        "min_confidence": { "type": "number", "description": "Minimum confidence threshold" },
+                        "direction": { "type": "string", "description": "Traversal direction: out, in, or both (default: both)" }
                     },
                     "required": ["start"]
                 }
@@ -225,8 +226,9 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
             let start = args["start"].as_str().ok_or("missing start")?;
             let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
             let min_conf = args.get("min_confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("both");
 
-            let result = g.traverse(start, depth, min_conf).map_err(|e| e.to_string())?;
+            let result = g.traverse_directed(start, depth, min_conf, direction).map_err(|e| e.to_string())?;
 
             let nodes: Vec<Value> = result.nodes.iter().filter_map(|&nid| {
                 let node = g.get_node_by_id(nid).ok()??;

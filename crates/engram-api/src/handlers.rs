@@ -176,9 +176,10 @@ pub async fn query(
 
     let depth = req.depth.unwrap_or(2);
     let min_conf = req.min_confidence.unwrap_or(0.0);
+    let direction = req.direction.as_deref().unwrap_or("both");
 
     let result = g
-        .traverse(&req.start, depth, min_conf)
+        .traverse_directed(&req.start, depth, min_conf, direction)
         .map_err(|e| api_err(StatusCode::NOT_FOUND, e.to_string()))?;
 
     let mut nodes = Vec::new();

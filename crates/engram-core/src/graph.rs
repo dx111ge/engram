@@ -302,14 +302,33 @@ impl Graph {
     }
 
     /// BFS traversal from a starting node, up to max_depth hops.
+    /// Traverse the graph from a start node using BFS.
+    ///
+    /// `direction` controls which edges to follow:
+    /// - `"out"` -- outgoing edges only (traditional BFS)
+    /// - `"in"` -- incoming edges only (reverse traversal)
+    /// - `"both"` -- both directions (default, full neighborhood)
     pub fn traverse(
         &self,
         start_label: &str,
         max_depth: u32,
         min_confidence: f32,
     ) -> Result<TraversalResult> {
+        self.traverse_directed(start_label, max_depth, min_confidence, "both")
+    }
+
+    pub fn traverse_directed(
+        &self,
+        start_label: &str,
+        max_depth: u32,
+        min_confidence: f32,
+        direction: &str,
+    ) -> Result<TraversalResult> {
         let start_id = self.find_node_id(start_label)?
             .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
+
+        let follow_out = direction == "out" || direction == "both";
+        let follow_in = direction == "in" || direction == "both";
 
         let mut visited: HashSet<u64> = HashSet::new();
         let mut queue: VecDeque<(u64, u32)> = VecDeque::new();
@@ -329,29 +348,60 @@ impl Graph {
                 continue;
             }
 
-            if let Some(edge_slots) = self.adj_out.get(&node_id) {
-                for &edge_slot in edge_slots {
-                    let edge = self.brain.read_edge(edge_slot)?;
-                    if edge.confidence < min_confidence {
-                        continue;
-                    }
-
-                    let target = edge.to_node;
-
-                    // Check target node is still active
-                    if let Some(target_slot) = self.find_slot_by_id(target) {
-                        let target_node = self.brain.read_node(target_slot)?;
-                        if !target_node.is_active() || target_node.confidence < min_confidence {
+            // Follow outgoing edges
+            if follow_out {
+                if let Some(edge_slots) = self.adj_out.get(&node_id) {
+                    for &edge_slot in edge_slots {
+                        let edge = self.brain.read_edge(edge_slot)?;
+                        if edge.confidence < min_confidence {
                             continue;
                         }
+
+                        let target = edge.to_node;
+
+                        if let Some(target_slot) = self.find_slot_by_id(target) {
+                            let target_node = self.brain.read_node(target_slot)?;
+                            if !target_node.is_active() || target_node.confidence < min_confidence {
+                                continue;
+                            }
+                        }
+
+                        result.edges.push((node_id, target, edge_slot));
+
+                        if visited.insert(target) {
+                            queue.push_back((target, depth + 1));
+                            result.nodes.push(target);
+                            result.depths.insert(target, depth + 1);
+                        }
                     }
+                }
+            }
 
-                    result.edges.push((node_id, target, edge_slot));
+            // Follow incoming edges
+            if follow_in {
+                if let Some(edge_slots) = self.adj_in.get(&node_id) {
+                    for &edge_slot in edge_slots {
+                        let edge = self.brain.read_edge(edge_slot)?;
+                        if edge.confidence < min_confidence {
+                            continue;
+                        }
 
-                    if visited.insert(target) {
-                        queue.push_back((target, depth + 1));
-                        result.nodes.push(target);
-                        result.depths.insert(target, depth + 1);
+                        let source = edge.from_node;
+
+                        if let Some(source_slot) = self.find_slot_by_id(source) {
+                            let source_node = self.brain.read_node(source_slot)?;
+                            if !source_node.is_active() || source_node.confidence < min_confidence {
+                                continue;
+                            }
+                        }
+
+                        result.edges.push((source, node_id, edge_slot));
+
+                        if visited.insert(source) {
+                            queue.push_back((source, depth + 1));
+                            result.nodes.push(source);
+                            result.depths.insert(source, depth + 1);
+                        }
                     }
                 }
             }

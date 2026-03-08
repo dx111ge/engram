@@ -103,7 +103,8 @@ curl -X POST http://localhost:3030/query \
   -d '{
     "start": "postgresql",
     "depth": 2,
-    "min_confidence": 0.5
+    "min_confidence": 0.5,
+    "direction": "both"
   }'
 ```
 
@@ -117,6 +118,11 @@ Response:
   "edges": [...]
 }
 ```
+
+The `direction` parameter controls which edges to follow during traversal:
+- `"both"` (default) -- follow both incoming and outgoing edges (full neighborhood)
+- `"out"` -- outgoing edges only (traditional forward BFS)
+- `"in"` -- incoming edges only (reverse traversal)
 
 #### POST /search — Full-text keyword search
 
