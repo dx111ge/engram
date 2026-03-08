@@ -4,268 +4,167 @@
 
 Fact-checking requires tracking claims, their sources, corroborating evidence, and contradictions. Engram's confidence model maps naturally to this domain: claims start with confidence based on source reliability, get reinforced when corroborated, and get corrected when debunked. The graph structure captures the web of evidence behind each claim.
 
-This walkthrough builds a fact-checking knowledge base that rates claims by source reliability, cross-references evidence, and propagates trust/distrust through the evidence chain.
+This walkthrough builds a fact-checking knowledge base with 13 nodes covering sources, claims, and evidence. It demonstrates source reliability tiers, claim corroboration, contradiction handling, correction propagation, and inference rules for automated flagging.
 
 **What this demonstrates:**
-- Source reliability tracking via confidence levels
-- Claim corroboration (reinforcement from independent sources)
-- Contradiction handling (correction propagation)
+
+- Source reliability tiers (tier-1: peer-reviewed 0.95, tier-2: news 0.85, tier-3: blogs/social 0.30-0.40)
+- Claim corroboration via reinforcement from independent sources
+- Contradiction handling with evidence chains
+- Correction: debunking claims and discrediting sources
 - Evidence chain traversal
-- Automated credibility rules via inference engine
+- Inference rules for automated credibility assessment
+- Property search for claim categories and source tiers
+
+**What requires external tools:**
+
+- Python script to orchestrate the demo (calls the HTTP API)
 
 ### Prerequisites
 
-- engram binary
-- Python 3.8+ with `requests`
+- `engram` binary on your PATH (or `./target/release/engram`)
+- Python 3.9+ with `requests` installed
 
-### Step 1: Create the Fact-Checking Knowledge Base
+### Files
+
+```
+08-fact-checker/
+  README.md                  # This file
+  fact_checker_demo.py       # Full demo script
+```
+
+### Step-by-Step
+
+#### Step 1: Start the engram server
 
 ```bash
-engram create factcheck.brain
 engram serve factcheck.brain 127.0.0.1:3030
 ```
 
-### Step 2: Define Source Reliability Tiers
-
-Full script: [fact_checker.py](fact_checker.py)
-
-```python
-import requests
-
-API = "http://127.0.0.1:3030"
-
-def store(entity, entity_type=None, props=None, source="factchecker", confidence=None):
-    body = {"entity": entity, "source": source}
-    if entity_type:
-        body["type"] = entity_type
-    if props:
-        body["properties"] = props
-    if confidence:
-        body["confidence"] = confidence
-    return requests.post(f"{API}/store", json=body).json()
-
-def relate(from_e, to_e, rel, confidence=None):
-    body = {"from": from_e, "to": to_e, "relationship": rel}
-    if confidence:
-        body["confidence"] = confidence
-    return requests.post(f"{API}/relate", json=body).json()
-
-# -- Register Sources with Reliability Ratings --
-
-# Tier 1: High-reliability sources (peer-reviewed, official records)
-store("Source:WHO", "source", {
-    "type": "international_organization",
-    "reliability_tier": "1",
-    "track_record": "high"
-}, confidence=0.95)
-
-store("Source:Nature", "source", {
-    "type": "peer_reviewed_journal",
-    "reliability_tier": "1",
-    "track_record": "high"
-}, confidence=0.95)
-
-# Tier 2: Moderate-reliability sources (major news outlets)
-store("Source:Reuters", "source", {
-    "type": "news_agency",
-    "reliability_tier": "2",
-    "track_record": "high"
-}, confidence=0.85)
-
-store("Source:BBC", "source", {
-    "type": "news_outlet",
-    "reliability_tier": "2",
-    "track_record": "moderate-high"
-}, confidence=0.82)
-
-# Tier 3: Low-reliability sources (blogs, social media)
-store("Source:RandomBlog", "source", {
-    "type": "blog",
-    "reliability_tier": "3",
-    "track_record": "unknown"
-}, confidence=0.40)
-
-store("Source:SocialMediaPost", "source", {
-    "type": "social_media",
-    "reliability_tier": "3",
-    "track_record": "low"
-}, confidence=0.30)
-```
-
-### Step 3: Store Claims with Source Attribution
-
-```python
-# -- Claim 1: A factual claim from a reliable source --
-
-store("Claim:EarthAge", "claim", {
-    "text": "The Earth is approximately 4.54 billion years old",
-    "category": "science",
-    "date_first_seen": "2024-01-10"
-}, source="factchecker", confidence=0.95)
-
-relate("Claim:EarthAge", "Source:Nature", "sourced_from", confidence=0.95)
-
-# Corroborated by another reliable source
-relate("Claim:EarthAge", "Source:WHO", "corroborated_by", confidence=0.90)
-
-# Reinforce via independent confirmation
-requests.post(f"{API}/learn/reinforce", json={
-    "entity": "Claim:EarthAge",
-    "source": "Source:Nature"
-})
-
-# -- Claim 2: A disputed claim --
-
-store("Claim:VitaminCCuresCold", "claim", {
-    "text": "Vitamin C cures the common cold",
-    "category": "health",
-    "date_first_seen": "2024-02-15"
-}, source="factchecker", confidence=0.50)
-
-# Sourced from a blog (low reliability)
-relate("Claim:VitaminCCuresCold", "Source:RandomBlog",
-       "sourced_from", confidence=0.40)
-
-# Contradicted by a high-reliability source
-store("Evidence:CochraneMeta2024", "evidence", {
-    "text": "Meta-analysis: Vitamin C does not prevent or cure colds",
-    "study_type": "meta-analysis",
-    "sample_size": "11306",
-    "year": "2024"
-}, source="factchecker", confidence=0.92)
-
-relate("Evidence:CochraneMeta2024", "Source:Nature",
-       "published_in", confidence=0.95)
-relate("Evidence:CochraneMeta2024", "Claim:VitaminCCuresCold",
-       "contradicts", confidence=0.90)
-
-# -- Claim 3: A claim gaining credibility --
-
-store("Claim:MicroplasticsInBlood", "claim", {
-    "text": "Microplastics have been found in human blood",
-    "category": "health",
-    "date_first_seen": "2024-03-01"
-}, source="factchecker", confidence=0.60)
-
-relate("Claim:MicroplasticsInBlood", "Source:Reuters",
-       "sourced_from", confidence=0.85)
-
-# Second source confirms
-relate("Claim:MicroplasticsInBlood", "Source:BBC",
-       "corroborated_by", confidence=0.82)
-requests.post(f"{API}/learn/reinforce", json={
-    "entity": "Claim:MicroplasticsInBlood",
-    "source": "Source:BBC"
-})
-
-# Third source: peer-reviewed study
-store("Evidence:VUAmsterdam2022", "evidence", {
-    "text": "Plasticenta study: microplastics detected in 17 of 22 blood samples",
-    "study_type": "peer-reviewed",
-    "year": "2022"
-}, source="factchecker", confidence=0.90)
-
-relate("Evidence:VUAmsterdam2022", "Claim:MicroplasticsInBlood",
-       "supports", confidence=0.90)
-requests.post(f"{API}/learn/reinforce", json={
-    "entity": "Claim:MicroplasticsInBlood",
-    "source": "Source:Nature"
-})
-```
-
-### Step 4: Query Claim Credibility
+#### Step 2: Run the demo
 
 ```bash
-# Check confidence of each claim
-curl -s http://127.0.0.1:3030/node/Claim:EarthAge | python -m json.tool
-# confidence should be high (>0.90) -- well-sourced, corroborated
-
-curl -s http://127.0.0.1:3030/node/Claim:VitaminCCuresCold | python -m json.tool
-# confidence should be low (~0.50) -- single low-reliability source
-
-curl -s http://127.0.0.1:3030/node/Claim:MicroplasticsInBlood | python -m json.tool
-# confidence should be moderate-high (~0.80) -- multiple sources + study
+python fact_checker_demo.py
 ```
 
-### Step 5: Debunk a Claim via Correction Propagation
+### What Happens
 
-```python
-# The meta-analysis definitively debunks the Vitamin C claim
-result = requests.post(f"{API}/learn/correct", json={
-    "entity": "Claim:VitaminCCuresCold",
-    "source": "factchecker",
-    "reason": "Debunked by Cochrane meta-analysis (11,306 participants)"
-}).json()
+#### Phase 1: Source Reliability Tiers
 
-print(f"Corrected: Claim:VitaminCCuresCold")
-print(f"Propagated to: {result['propagated_to']}")
-# Correction propagates to Source:RandomBlog (0.5 damping),
-# reducing the blog's perceived reliability for other claims too
+7 sources registered across 3 reliability tiers:
+
+| Tier | Sources | Confidence |
+|------|---------|------------|
+| 1 (peer-reviewed, official) | Source:WHO, Source:Nature, Source:Cochrane | 0.95 |
+| 2 (major news) | Source:Reuters, Source:BBC | 0.82-0.85 |
+| 3 (blogs, social) | Source:HealthBlog, Source:SocialPost | 0.30-0.40 |
+
+#### Phase 2: Claims and Evidence
+
+Four claims stored with different credibility profiles:
+
+**Claim:EarthAge** (verified, conf=0.95)
+- Sourced from Nature, corroborated by WHO
+- Reinforced by independent confirmation
+
+**Claim:VitaminCCuresCold** (disputed, conf=0.50)
+- Sourced from HealthBlog (tier-3)
+- Contradicted by Cochrane meta-analysis (11,306 participants)
+
+**Claim:MicroplasticsInBlood** (emerging, conf=0.80)
+- Sourced from Reuters, corroborated by BBC
+- Supported by VU Amsterdam peer-reviewed study
+- 2 confirmations boosted from 0.60 to 0.80
+
+**Claim:5GCausesCovid** (fabricated, conf=0.30)
+- Sourced from SocialPost (tier-3)
+
+After phase 2: **13 nodes, 9 edges**.
+
+#### Phase 3: Credibility Assessment
+
+| Claim | Confidence | Status |
+|-------|------------|--------|
+| Claim:EarthAge | 0.95 | verified |
+| Claim:VitaminCCuresCold | 0.50 | disputed |
+| Claim:MicroplasticsInBlood | 0.80 | emerging |
+| Claim:5GCausesCovid | 0.30 | fabricated |
+
+Property search for health claims returns: VitaminCCuresCold, MicroplasticsInBlood, 5GCausesCovid.
+
+#### Phase 4: Evidence Chain Traversal
+
+Traversing from Claim:MicroplasticsInBlood (depth=2):
+
+```
+Claim:MicroplasticsInBlood (depth=0, conf=0.80)
+  Source:Reuters (depth=1, conf=0.85)
+  Source:BBC (depth=1, conf=0.82)
+  Evidence:VUAmsterdam (depth=1, conf=0.90)
 ```
 
-### Step 6: Discredit a Source
+NL query "What connects to Claim:VitaminCCuresCold?" returns: Evidence:CochraneMeta (contradicts).
 
-When a source is found to be systematically unreliable:
+#### Phase 5: Debunk via Correction
 
-```python
-# RandomBlog is found to publish fabricated health claims
-result = requests.post(f"{API}/learn/correct", json={
-    "entity": "Source:RandomBlog",
-    "source": "factchecker",
-    "reason": "Source publishes fabricated health claims"
-}).json()
-
-print(f"Source discredited. Propagated to: {result['propagated_to']}")
-# All claims sourced from RandomBlog have their confidence reduced
-# through propagation (0.5 damping per hop, up to 3 hops)
+**Debunk VitaminCCuresCold**:
+```
+Confidence: 0.50 -> 0.00
+Distrust propagated to: Source:HealthBlog
 ```
 
-### Step 7: Inference Rules for Automated Fact-Checking
-
-```python
-rules = [
-    # If a claim is contradicted by peer-reviewed evidence, flag it
-    """rule peer_reviewed_contradiction
-when edge(A, "contradicts", B)
-when edge(A, "published_in", C)
-when prop(C, "reliability_tier", "1")
-then flag(B, "contradicted by tier-1 evidence")""",
-
-    # If a claim has multiple corroborations, it gains credibility
-    """rule multi_source_corroboration
-when edge(A, "corroborated_by", B)
-when edge(A, "corroborated_by", C)
-then flag(A, "multi-source corroboration detected")"""
-]
-
-result = requests.post(f"{API}/learn/derive", json={"rules": rules}).json()
-print(f"Rules fired: {result['rules_fired']}, Flags: {result['flags_raised']}")
+**Debunk 5GCausesCovid**:
+```
+Confidence: 0.30 -> 0.00
+Distrust propagated to: Source:SocialPost
 ```
 
-### Step 8: Search the Fact-Check Database
-
-```bash
-# Find all claims
-engram search "type:claim" factcheck.brain
-
-# Find debunked claims (low confidence)
-engram search "type:claim AND confidence<0.3" factcheck.brain
-
-# Find well-supported claims
-engram search "type:claim AND confidence>0.8" factcheck.brain
-
-# Find all evidence
-engram search "type:evidence" factcheck.brain
-
-# Search by category
-engram search "prop:category=health" factcheck.brain
+**Discredit Source:SocialPost** (systematically unreliable):
 ```
+Source:SocialPost confidence: 0.30 -> 0.00
+```
+
+#### Phase 6: Inference Rules
+
+**Rule 1**: Flag claims contradicted by meta-analysis evidence:
+
+```
+rule contradicted_by_evidence
+when edge(evidence, "contradicts", claim)
+when prop(evidence, "study_type", "meta-analysis")
+then flag(claim, "contradicted by meta-analysis")
+```
+
+**Rule 2**: Flag claims from low-reliability sources:
+
+```
+rule discredited_source
+when edge(claim, "sourced_from", source)
+when prop(source, "reliability_tier", "3")
+then flag(claim, "sourced from low-reliability tier")
+```
+
+Result: Claims VitaminCCuresCold and 5GCausesCovid flagged as "sourced from low-reliability tier".
+
+#### Phase 7: Final Credibility Report
+
+| Claim | Confidence | Status | Flag |
+|-------|------------|--------|------|
+| Claim:EarthAge | 0.95 | verified | none |
+| Claim:VitaminCCuresCold | 0.00 | disputed | sourced from low-reliability tier |
+| Claim:MicroplasticsInBlood | 0.80 | emerging | none |
+| Claim:5GCausesCovid | 0.00 | fabricated | sourced from low-reliability tier |
+
+Explainability for Claim:MicroplasticsInBlood shows full evidence chain:
+- Outgoing: sourced_from Reuters (0.85), corroborated_by BBC (0.82)
+- Incoming: Evidence:VUAmsterdam supports (0.90)
 
 ### Key Takeaways
 
-- **Source reliability tiers** map to engram's confidence model. Tier-1 sources (peer-reviewed, official) start at 0.90+, tier-3 sources (blogs, social media) start at 0.30-0.50.
-- **Corroboration = reinforcement.** Each independent source that confirms a claim triggers `learn/reinforce`, boosting confidence by +0.10 per independent source.
-- **Contradiction = correction.** When authoritative evidence contradicts a claim, `learn/correct` zeroes the claim's confidence and propagates distrust to its sources.
-- **Source discrediting cascades.** Correcting a source reduces confidence on all claims linked to that source, up to 3 hops with 0.5 damping.
-- **Inference rules automate patterns** that fact-checkers apply manually: "if tier-1 evidence contradicts, flag the claim."
-- The confidence value on each claim becomes a quantitative credibility score that updates as new evidence arrives.
+- **Source reliability tiers** map to confidence levels. Tier-1 sources start at 0.95, tier-3 at 0.30-0.40. This creates a natural credibility gradient.
+- **Corroboration = reinforcement.** Each independent source that confirms a claim triggers `learn/reinforce`, boosting confidence by +0.10 per source.
+- **Contradiction = correction.** Debunking a claim zeroes its confidence and propagates distrust to its sources.
+- **Source discrediting cascades.** Correcting a source reduces confidence on all claims linked to that source.
+- **Inference rules automate patterns** that fact-checkers apply manually: "if evidence contradicts a claim, flag it" and "if a claim comes from a tier-3 source, flag it."
+- **Evidence chains are traversable.** Starting from any claim, depth-2 traversal surfaces all sources, corroborations, and contradicting evidence.
+- **Confidence is a quantitative credibility score** that updates as new evidence arrives. It is not a binary true/false but a continuous measure of trust.
