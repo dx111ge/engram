@@ -251,7 +251,7 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
             let query = args["query"].as_str().ok_or("missing query")?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
-            let results = g.search_text(query, limit).map_err(|e| e.to_string())?;
+            let results = g.search(query, limit).map_err(|e| e.to_string())?;
 
             let hits: Vec<Value> = results.into_iter().map(|r| {
                 serde_json::json!({

@@ -253,7 +253,7 @@ pub async fn search(
     let limit = req.limit.unwrap_or(10);
 
     let results = g
-        .search_text(&req.query, limit)
+        .search(&req.query, limit)
         .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let total = results.len();

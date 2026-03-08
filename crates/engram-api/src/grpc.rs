@@ -155,7 +155,7 @@ mod service {
             let g = self.state.graph.read().map_err(|_| internal("lock"))?;
             let limit = if req.limit > 0 { req.limit as usize } else { 10 };
 
-            let results = g.search_text(&req.query, limit).map_err(internal)?;
+            let results = g.search(&req.query, limit).map_err(|e| internal(e))?;
             let total = results.len() as u32;
 
             let hits = results.into_iter().map(|r| proto::NodeHit {
