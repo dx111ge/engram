@@ -11,7 +11,7 @@ This directory contains eleven end-to-end walkthroughs showing how to use engram
 |---|----------|-------------|---------------------------|
 | 1 | [Wikipedia Import](01-wikipedia-import/) | Build a knowledge graph from Wikipedia article summaries | `/tell`, `/store`, `/relate`, BM25 search, graph traversal, `/ask` |
 | 2 | [Document Import](02-document-import/) | Ingest local markdown/text files with metadata and entity extraction | Document nodes, `prop:key=value` filters, `mentions` relationships |
-| 3 | [Multi-Language](03-multi-language/) | Multilingual knowledge graphs with UTF-8 labels and translation edges | UTF-8 support, case-insensitive matching, CJK limitations |
+| 3 | [Inference & Reasoning](03-inference-reasoning/) | Vulnerability propagation and SLA mismatch detection in a service graph | `/learn/derive`, rule engine, transitive closure, `flag`, backward chaining, `/explain` |
 | 4 | [Support Knowledge Base](04-support-knowledge-base/) | IT support error/cause/solution graphs with confidence lifecycle | `/learn/reinforce`, `/learn/correct`, `/learn/decay`, `/learn/derive`, memory tiers |
 | 5 | [Threat Intelligence](05-threat-intelligence/) | Threat actor, malware, CVE, and TTP relationship graphs | Typed nodes, IOC properties, confidence-scored attribution, correction propagation |
 | 6 | [Learning Lifecycle](06-learning-lifecycle/) | Full lifecycle of knowledge: store, reinforce, correct, decay, archive | Confidence evolution, memory tier transitions, inference rules, decay mechanics |
