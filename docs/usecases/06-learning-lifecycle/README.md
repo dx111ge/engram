@@ -2,389 +2,216 @@
 
 ### Overview
 
-Engram's learning model is distinct from a traditional database. Facts are not simply "stored" — they have a confidence score that evolves over time based on access, confirmation, contradiction, and elapsed time. This walkthrough demonstrates the full lifecycle of a piece of knowledge from first storage to potential archival.
+Engram's learning model is distinct from a traditional database. Facts are not simply "stored" -- they have a confidence score that evolves over time based on access, confirmation, contradiction, and elapsed time. This walkthrough demonstrates the full lifecycle of a piece of knowledge from first storage through reinforcement, correction, recovery, and decay.
 
-Understanding this lifecycle is important for building applications on engram: a fact you store today at low confidence will decay if unused. A fact you store and repeatedly confirm will rise toward its source-type cap. A wrong fact that gets corrected penalizes its neighbors, discouraging over-confident wrong conclusions.
+Understanding this lifecycle is important for building applications on engram: a fact you store today at low confidence will decay if unused. A fact you store and repeatedly confirm will rise toward its cap. A wrong fact that gets corrected penalizes its neighbors, discouraging over-confident wrong conclusions.
 
-**Learning mechanics in v0.1.0 (exact values from the source):**
+**Learning mechanics (exact values from the source):**
 
 | Event | Effect |
 |---|---|
-| Initial store (user source) | confidence = 0.80 |
-| Initial store (API source) | confidence = 0.90 |
-| Initial store (LLM source) | confidence = 0.30 |
-| Access reinforcement | +0.02, capped at source max |
-| Confirmation reinforcement (source present) | +0.10, capped at source max |
-| Contradiction penalty | -0.20, floored at 0.0 |
+| Access reinforcement (no source) | +0.02, capped at 0.95 |
+| Confirmation reinforcement (with source) | +0.10, capped at 0.95 |
+| Correction | zeroes confidence, propagates distrust at 0.5 damping/hop |
 | Decay per day inactive | x 0.999 per day |
 | Decay threshold (archival candidate) | < 0.10 |
-| Tier: core | confidence >= 0.90, access_count >= 10 |
-| Tier: archival | confidence < 0.20, or inactive > 90 days |
+
+**What this demonstrates:**
+
+- Storing facts with different initial confidence levels
+- Access reinforcement: +0.02 per read
+- Confirmation reinforcement: +0.10 per independent source
+- Property updates without confidence changes
+- Correction with cascading distrust propagation
+- Time-based decay
+- Inference rules for automated flagging
+- Recovery via reinforcement after damage
+- Full explainability via `/explain`
+
+**What requires external tools:**
+
+- Python script to orchestrate the demo (calls the HTTP API)
 
 ### Prerequisites
 
-- `engram` binary on your PATH
-- `curl` for HTTP API calls
+- `engram` binary on your PATH (or `./target/release/engram`)
+- Python 3.9+ with `requests` installed
 
-### Step-by-Step Implementation
+### Files
 
-#### Step 1: Start the server
+```
+06-learning-lifecycle/
+  README.md              # This file
+  learning_demo.py       # Full demo script
+```
+
+### Step-by-Step
+
+#### Step 1: Start the engram server
 
 ```bash
 engram serve learning.brain 127.0.0.1:3030
 ```
 
-#### Step 2: Store a fact with low initial confidence (LLM source)
-
-An AI assistant suggests that "Jupiter has 79 moons." You do not fully trust the LLM, so you store it with a low confidence source:
+#### Step 2: Run the demo
 
 ```bash
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{
-    "entity": "Jupiter",
-    "type": "planet",
-    "properties": {"moon_count": "79", "system": "Solar System"},
-    "source": "llm",
-    "confidence": 0.30
-  }'
+python learning_demo.py
 ```
 
-Expected output:
+### What Happens
 
-```json
-{"node_id": 1, "label": "Jupiter", "confidence": 0.3}
+#### Phase 1: Initial Storage
+
+Three facts stored with different confidence levels reflecting source trustworthiness:
+
+| Entity | Source | Confidence |
+|--------|--------|------------|
+| Jupiter | LLM assistant | 0.30 |
+| Sun | astronomy textbook | 0.95 |
+| Mars | NASA database | 0.90 |
+
+Two relationships: Jupiter -[orbits]-> Sun, Mars -[orbits]-> Sun.
+
+After phase 1: **3 nodes, 2 edges**.
+
+#### Phase 2: Access Reinforcement (+0.02)
+
+Each access boost adds +0.02 to confidence. Simulating 5 accesses to Jupiter:
+
+```
+Access 1: 0.32
+Access 2: 0.34
+Access 3: 0.36
+Access 4: 0.38
+Access 5: 0.40
 ```
 
-> Note: The `source` field in the HTTP API currently maps to the provenance source ID string, not the source type enum. The confidence value you supply explicitly overrides the default. In v0.1.0, to get the LLM initial confidence of 0.30 automatically, pass `"confidence": 0.30` directly.
+Jupiter: **0.30 -> 0.40** after 5 accesses.
 
-#### Step 3: Check initial state
+#### Phase 3: Confirmation Reinforcement (+0.10)
+
+Independent source confirmations add +0.10 each:
+
+```
+After NASA confirmation:  0.50
+After ESO confirmation:   0.60
+```
+
+Jupiter: **0.40 -> 0.60** after 2 confirmations. Confirmations are 5x stronger than access boosts.
+
+#### Phase 4: Property Update
+
+Updating Jupiter's moon count from 79 to 95 via `/store`:
+
+```
+Updated Jupiter properties
+Jupiter confidence unchanged: 0.60
+moon_count property: 95
+```
+
+Store updates properties but does **not** change confidence. Confidence is managed exclusively by the learning endpoints (`/learn/reinforce`, `/learn/correct`, `/learn/decay`).
+
+#### Phase 5: Wrong Fact and Correction
+
+A wrong claim is stored with an outgoing edge to Jupiter:
+
+```
+Jupiter-has-solid-surface (conf=0.70)
+  -[about]-> Jupiter
+```
+
+Before correction: Jupiter confidence = 0.60.
+
+**Correction** (`/learn/correct`) zeroes the claim and propagates distrust:
+
+```
+Claim confidence: 0.70 -> 0.00
+Distrust propagated to: Jupiter, Sun
+
+Jupiter: 0.60 -> 0.25 (direct neighbor, 0.5 damping)
+Sun:     0.95 -> 0.78 (2-hop, 0.5 x 0.5 damping)
+Mars:    0.90 -> 0.90 (not connected to claim)
+```
+
+This is intentional: wrong facts should damage confidence in connected knowledge. The cascading distrust reflects reality -- if an analyst's claim about Jupiter is wrong, other things they asserted about Jupiter become less certain too.
+
+#### Phase 6: Decay
+
+```
+Nodes decayed: 0
+```
+
+Decay returns 0 because all nodes were accessed within the current session (0 days elapsed). In production, decay is called periodically (e.g., daily cron) and multiplies confidence by `0.999^days_since_last_access`.
+
+Decay projections for an untouched node at 0.50:
+- After 30 days: 0.485
+- After 90 days: 0.457
+- After 365 days: 0.347
+- Reaches archival threshold (0.10) after ~1600 days
+
+#### Phase 7: Inference Rules
+
+**Flag unverified claims**:
+
+```
+rule flag_unverified
+when prop(node, "status", "unverified")
+then flag(node, "unverified claim -- needs review")
+```
+
+Result: **2 rules fired, 1 flag raised**. Jupiter-has-solid-surface is flagged for review.
+
+#### Phase 8: Recovery via Reinforcement
+
+Jupiter was damaged by distrust propagation (0.25). Recovery through confirmations and accesses:
+
+```
+Jupiter before recovery:       0.25
+After 3 confirmations (+0.30): 0.55
+After 10 accesses (+0.20):     0.75
+```
+
+Sun recovery:
+
+```
+Sun before recovery:            0.78
+After 3 confirmations + 10 accesses: 0.95
+```
+
+The system self-heals: wrong facts are corrected, distrust propagates, then good facts are reinforced back to healthy confidence levels by continued use and independent confirmation.
+
+#### Phase 9: Explainability
 
 ```bash
-engram query Jupiter 0 learning.brain
+curl -s http://127.0.0.1:3030/explain/Jupiter
 ```
 
-Expected output:
-
-```
-Node: Jupiter
-  id: 1
-  confidence: 0.30
-  memory_tier: active
-Properties:
-  moon_count: 79
-  system: Solar System
-```
-
-#### Step 4: Reinforce via access (reading the fact)
-
-Each time your application reads and uses this fact, call `reinforce` without a source (access reinforcement = +0.02):
-
-```bash
-# Simulate 3 accesses
-for i in 1 2 3; do
-  curl -s -X POST http://127.0.0.1:3030/learn/reinforce \
-    -H "Content-Type: application/json" \
-    -d '{"entity":"Jupiter"}'
-done
-```
-
-Check after 3 accesses:
-
-```bash
-curl -s http://127.0.0.1:3030/node/Jupiter | python3 -m json.tool
-```
-
-Expected confidence (0.30 + 3 x 0.02 = 0.36):
-
-```json
-{
-  "node_id": 1,
-  "label": "Jupiter",
-  "confidence": 0.36,
-  ...
-}
-```
-
-#### Step 5: Confirm from an independent source (confirmation reinforcement)
-
-You look it up in a NASA database. The count is actually 95 (as of 2023 — the LLM was outdated). First, correct the property:
-
-```bash
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{
-    "entity": "Jupiter",
-    "properties": {"moon_count": "95"},
-    "confidence": 0.90
-  }'
-```
-
-Now reinforce with the NASA source (confirmation boost = +0.10):
-
-```bash
-curl -s -X POST http://127.0.0.1:3030/learn/reinforce \
-  -H "Content-Type: application/json" \
-  -d '{"entity":"Jupiter","source":"nasa-jpl-database"}'
-```
-
-Expected output (0.36 + 0.10 = 0.46, but we also set confidence to 0.90 above — the explicit store with confidence=0.90 takes effect):
-
-```json
-{"entity":"Jupiter","new_confidence":0.95}
-```
-
-> The store with `confidence: 0.90` replaces the stored confidence, then reinforce adds +0.10, capped at the user source cap of 0.95.
-
-#### Step 6: Store a related fact and demonstrate graph learning
-
-```bash
-curl -s -X POST http://127.0.0.1:3030/tell \
-  -H "Content-Type: application/json" \
-  -d '{"statement":"Jupiter is a gas giant","source":"astronomy-textbook"}'
-
-curl -s -X POST http://127.0.0.1:3030/tell \
-  -H "Content-Type: application/json" \
-  -d '{"statement":"Jupiter is a planet","source":"astronomy-textbook"}'
-
-curl -s -X POST http://127.0.0.1:3030/relate \
-  -H "Content-Type: application/json" \
-  -d '{"from":"Jupiter","relationship":"orbits","to":"Sun","confidence":0.99}'
-
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{"entity":"Sun","type":"star","confidence":0.99}'
-```
-
-#### Step 7: Introduce a wrong fact, then correct it
-
-Suppose someone asserts "Jupiter has a solid core you can stand on" — confidently wrong:
-
-```bash
-curl -s -X POST http://127.0.0.1:3030/store \
-  -H "Content-Type: application/json" \
-  -d '{
-    "entity": "Jupiter has solid surface",
-    "type": "claim",
-    "confidence": 0.70
-  }'
-
-curl -s -X POST http://127.0.0.1:3030/relate \
-  -H "Content-Type: application/json" \
-  -d '{"from":"Jupiter","relationship":"has_property","to":"Jupiter has solid surface","confidence":0.70}'
-```
-
-Now the scientific consensus is confirmed: Jupiter has no solid surface. Correct the wrong fact:
-
-```bash
-curl -s -X POST http://127.0.0.1:3030/learn/correct \
-  -H "Content-Type: application/json" \
-  -d '{
-    "entity": "Jupiter has solid surface",
-    "reason": "Jupiter is a gas giant with no defined solid surface",
-    "source": "peer-reviewed-astrophysics"
-  }'
-```
-
-Expected output:
-
-```json
-{
-  "corrected": "Jupiter has solid surface",
-  "propagated_to": ["Jupiter"]
-}
-```
-
-The claim drops from 0.70 to 0.50 (-0.20 penalty). Jupiter's confidence also receives a penalty signal propagation. Check Jupiter:
-
-```bash
-curl -s http://127.0.0.1:3030/node/Jupiter | python3 -c "import sys,json; d=json.load(sys.stdin); print('confidence:', d['confidence'])"
-```
-
-Expected output (slight drop from the propagated correction):
-
-```
-confidence: 0.87
-```
-
-#### Step 8: Derive new facts using inference rules
-
-Define a rule: if X is a planet and X orbits Y, then X is part of the same system as Y. Use this to derive a "same_system" edge:
-
-```bash
-curl -s -X POST http://127.0.0.1:3030/learn/derive \
-  -H "Content-Type: application/json" \
-  -d '{
-    "rules": [
-      "rule planet_in_system\nwhen edge(PLANET, \"is_a\", \"planet\")\nwhen edge(PLANET, \"orbits\", STAR)\nthen edge(PLANET, \"part_of_system\", STAR, min(e1, e2))"
-    ]
-  }'
-```
-
-Expected output:
-
-```json
-{
-  "rules_evaluated": 1,
-  "rules_fired": 1,
-  "edges_created": 1,
-  "flags_raised": 0
-}
-```
-
-The edge `Jupiter -[part_of_system]-> Sun` is now derived.
-
-#### Step 9: Demonstrate memory tier transitions
-
-After enough access, a node promotes to the `core` tier. The threshold is confidence >= 0.90 AND access_count >= 10. Simulate 7 more accesses to reach 10 total:
-
-```bash
-for i in $(seq 1 7); do
-  curl -s -X POST http://127.0.0.1:3030/learn/reinforce \
-    -H "Content-Type: application/json" \
-    -d '{"entity":"Jupiter"}' > /dev/null
-done
-```
-
-Check the tier via the CLI:
-
-```bash
-engram query Jupiter 0 learning.brain
-```
-
-Expected output after sufficient accesses and confidence:
-
-```
-Node: Jupiter
-  id: 1
-  confidence: 0.95
-  memory_tier: core
-```
-
-The `memory_tier` field transitions from `active` to `core` when the node reaches the promotion threshold.
-
-#### Step 10: Apply decay and observe archival candidates
-
-First verify current stats:
-
-```bash
-curl -s http://127.0.0.1:3030/stats
-```
-
-```json
-{"nodes": 7, "edges": 8}
-```
-
-Apply decay:
-
-```bash
-curl -s -X POST http://127.0.0.1:3030/learn/decay \
-  -H "Content-Type: application/json" \
-  -d '{}'
-```
-
-Expected output:
-
-```json
-{"nodes_decayed": 7}
-```
-
-All nodes have their confidence multiplied by `0.999 ^ days_since_last_access`. Nodes accessed very recently (like Jupiter, which we just queried) decay very little. Nodes that were stored and never touched since experience the full decay.
-
-The `Jupiter has solid surface` node, already at 0.50 after correction, continues to decay. After approximately 90 days of inactivity:
-
-- Confidence after 30 days: `0.50 x 0.999^30 ~ 0.485`
-- Confidence after 90 days: `0.50 x 0.999^90 ~ 0.455`
-- Confidence after 365 days: `0.50 x 0.999^365 ~ 0.347`
-- Confidence reaches archival threshold (0.20) after roughly 916 days without access
-
-Additionally, because that node has been inactive for 90 days, the tier system demotes it to `archival` at the 90-day mark even before confidence reaches the decay floor.
-
-#### Step 11: Use a flag rule to surface low-confidence nodes for review
-
-```bash
-curl -s -X POST http://127.0.0.1:3030/learn/derive \
-  -H "Content-Type: application/json" \
-  -d '{
-    "rules": [
-      "rule flag_stale_claims\nwhen confidence(node, \"<\", 0.3)\nthen flag(node, \"low confidence — review or delete\")"
-    ]
-  }'
-```
-
-Expected output (if any node is currently below 0.30):
-
-```json
-{
-  "rules_evaluated": 1,
-  "rules_fired": 0,
-  "edges_created": 0,
-  "flags_raised": 0
-}
-```
-
-No flags in this case because the claim node is currently at 0.50. In a real system running over months, this rule would catch decayed facts automatically.
-
-#### Step 12: Check the full lifecycle state
-
-```bash
-engram stats learning.brain
-```
-
-```
-Nodes: 7
-Edges: 8
-```
-
-```bash
-curl -s http://127.0.0.1:3030/explain/Jupiter | python3 -m json.tool
-```
-
-The `/explain` endpoint returns the full picture: confidence, properties, cooccurrences, and all edges:
-
-```json
-{
-  "entity": "Jupiter",
-  "confidence": 0.95,
-  "properties": {
-    "moon_count": "95",
-    "system": "Solar System"
-  },
-  "cooccurrences": [
-    {"entity": "Sun",       "count": 3, "probability": 0.0},
-    {"entity": "gas giant", "count": 2, "probability": 0.0}
-  ],
-  "edges_from": [
-    {"from": "Jupiter", "to": "planet",                    "relationship": "is_a",           "confidence": 0.80},
-    {"from": "Jupiter", "to": "gas giant",                 "relationship": "is_a",           "confidence": 0.80},
-    {"from": "Jupiter", "to": "Jupiter has solid surface", "relationship": "has_property",   "confidence": 0.70},
-    {"from": "Jupiter", "to": "Sun",                       "relationship": "orbits",         "confidence": 0.99},
-    {"from": "Jupiter", "to": "Sun",                       "relationship": "part_of_system", "confidence": 0.80}
-  ],
-  "edges_to": []
-}
-```
+Returns:
+- **Confidence**: 0.75 (recovered from 0.25 post-correction)
+- **Properties**: moon_count=95, system=Solar System
+- **Outgoing edges**: orbits Sun (0.99)
+- **Incoming edges**: Jupiter-has-solid-surface about Jupiter (0.70)
 
 ### Full Lifecycle Summary
 
-The following table shows what happened to the Jupiter node across this walkthrough:
-
-| Step | Event | Confidence |
-|---|---|---|
-| 1 | Stored with explicit confidence 0.30 (LLM-quality claim) | 0.30 |
-| 2 | 3 access reinforcements (+0.02 each) | 0.36 |
-| 3 | Re-stored with explicit confidence 0.90 (verified fact) | 0.90 |
-| 4 | Confirmation reinforcement from NASA source (+0.10) | 0.95 (at cap) |
-| 5 | Correction propagation from wrong claim neighbor (-small) | 0.87 |
-| 6 | 7 more access reinforcements | 0.95 (at cap) |
-| 7 | Memory tier promotion | tier: core |
-| 8 | Decay applied (accessed recently, negligible decay) | 0.95 |
+| Step | Event | Jupiter Confidence |
+|------|-------|--------------------|
+| 1 | Stored with LLM confidence | 0.30 |
+| 2 | 5 access reinforcements (+0.02 each) | 0.40 |
+| 3 | 2 confirmation reinforcements (+0.10 each) | 0.60 |
+| 4 | Property update (no confidence change) | 0.60 |
+| 5 | Distrust propagation from corrected neighbor | 0.25 |
+| 6 | Decay (0 days elapsed, no change) | 0.25 |
+| 7 | Flagging rules (no direct effect on Jupiter) | 0.25 |
+| 8 | Recovery: 3 confirmations + 10 accesses | 0.75 |
 
 ### Key Takeaways
 
-- Initial confidence reflects how much you trust the source. LLM assertions start at 0.30; sensor readings start at 0.95. Store data with explicit confidence values to override these defaults.
-- Access reinforcement (+0.02) rewards frequently used facts. Confirmation reinforcement (+0.10) rewards independently verified facts. The difference matters: ten accesses from one application equals one external confirmation.
-- Correction propagates one hop by default (depth=3 in the implementation). Wrong claims penalize their neighbors, which means garbage in the graph gets penalized outward before it is removed.
-- Memory tiers (core / active / archival) give consuming applications a way to prioritize: load only `tier:core` facts for tight context budgets, fall back to `tier:active` for normal queries, and search `tier:archival` only when needed.
-- Decay is not automatic — you must call `/learn/decay` on a schedule. Without periodic decay calls, confidence does not change over time.
-- All learning operations are idempotent in effect and append-only in the WAL. You can call reinforce or decay multiple times safely.
+- **Confidence reflects trust, not truth.** A fact stored at 0.30 from an LLM is not "wrong" -- it is unverified. Reinforcement builds trust over time.
+- **Access vs. confirmation**: 10 accesses from one application (+0.20 total) equals 2 independent confirmations (+0.20 total). Confirmations require a `source` parameter.
+- **Correction cascades**: Wrong facts penalize their neighbors through distrust propagation (0.5 damping per hop). This prevents orphan wrong conclusions from staying high-confidence.
+- **Recovery is natural**: After correction, continued use and confirmation rebuilds confidence. The system self-heals without manual intervention beyond normal usage.
+- **Store and learn are separate**: `/store` manages properties and creates nodes. `/learn/reinforce`, `/learn/correct`, `/learn/decay` manage confidence. This separation prevents accidental confidence resets.
+- **Decay requires explicit calls**: Confidence does not decay automatically. Call `/learn/decay` on a schedule (e.g., daily cron) to let stale knowledge fade.
+- **Inference rules automate review**: Property-matching rules can flag nodes for human review (e.g., all unverified claims, all nodes below a confidence threshold).
