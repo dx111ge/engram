@@ -2,29 +2,54 @@
 
 ### Overview
 
-Wikipedia exposes a public REST API that returns article summaries in plain JSON — no authentication, no rate-limit keys for casual use. Engram's HTTP API accepts JSON over standard HTTP. Together, they let you build a factual knowledge graph from Wikipedia content in under fifty lines of Python.
+Wikipedia exposes a public REST API that returns article summaries in plain JSON -- no authentication, no rate-limit keys for casual use. Engram's HTTP API accepts JSON over standard HTTP. Together, they let you build a factual knowledge graph from Wikipedia content with a short Python script.
 
-This walkthrough imports four programming language articles (Python, Rust, JavaScript, Go), extracts "is a" facts from their summaries, relates the languages to their paradigms, and then traverses the resulting graph. You get a queryable, persistent graph in a single `.brain` file without any database server.
+This use case includes two scripts:
 
-**What this demonstrates today (v0.1.0):**
+1. **`import_wiki.py`** -- Quick start: imports 4 programming languages, their paradigms and creators. Produces ~24 nodes, ~22 edges in seconds. Good for verifying your setup works.
 
-- The `/tell` natural-language endpoint parsing "X is a Y" and "X uses Y" patterns
-- The `/store` and `/relate` HTTP endpoints for bulk ingestion
-- BM25 full-text search across imported entities
+2. **`import_wiki_deep.py`** -- Full demo: imports 14 seed articles across programming languages, CS concepts, and organizations, follows up with 16 related articles, cross-links with natural language, then deeply enriches leaf nodes with creator biographies, paradigm interconnections, type system hierarchies, compiler phases, OS internals, memory safety chains, concurrency models, and more. Produces **638 nodes, 377 edges** from **974 API calls**.
+
+**What this demonstrates:**
+
+- The `/store` and `/relate` HTTP endpoints for structured ingestion
+- The `/tell` natural-language endpoint parsing "X is a Y", "X uses Y", "X was developed at Y" patterns
+- BM25 full-text search with boolean queries, property filters, and confidence filters
+- Semantic vector search (with embedder) for conceptual queries
 - Graph traversal with configurable depth and minimum confidence
 - The `/ask` endpoint for natural-language queries over imported data
+- JSON-LD export of the complete graph
+- The web UI frontend for interactive graph exploration
 
-**What requires external tools:**
+### Performance
 
-- Wikipedia API access requires Python + `requests` (or any HTTP client)
-- Entity extraction from free text requires your own regex or NLP pipeline; engram stores what you give it and does not extract entities from raw paragraphs on its own
+Measured on an Intel i7 + RTX 5070 with Ollama running locally:
+
+| | Without Embedder | With Embedder (nomic-embed-text-v2-moe, 768D) |
+|---|---|---|
+| **Basic import** (4 articles, ~24 nodes) | ~2s | ~4s |
+| **Deep import** (638 nodes, 377 edges) | ~19s | ~81s |
+| **Overhead per node** | ~0ms | ~80ms (Ollama embedding call) |
+
+Most of the time is Wikipedia API latency and Ollama embedding calls, not engram. The graph engine itself processes stores and relates in microseconds.
+
+**Quality difference with embedder:**
+
+| Query | Without Embedder (BM25 only) | With Embedder (BM25 + semantic) |
+|---|---|---|
+| "memory safe programming" | No results | memory safety, memory management |
+| "graph databases and linked data" | graph database | linked data (11.0), graph database (4.9), knowledge graph (4.9) |
+| "artificial intelligence applications" | No results | artificial intelligence (13.3) |
+| "concurrent and parallel execution" | No results | concurrent programming (5.5) |
+
+Graph traversal, `/ask`, `/tell`, property filters, and confidence filters work identically in both modes -- they don't use embeddings.
 
 ### Prerequisites
 
-- `engram` binary on your PATH
+- `engram` binary on your PATH (or `./target/release/engram`)
 - Python 3.9+ with `requests` installed (`pip install requests`)
 - Internet access for the Wikipedia API
-- (Optional) An embedding model for semantic search — see **Embedder Setup** below
+- (Optional) An embedding model for semantic search -- see **Embedder Setup** below
 
 ### Embedder Setup (Optional)
 
@@ -49,401 +74,191 @@ export ENGRAM_EMBED_ENDPOINT=http://localhost:11434/v1
 export ENGRAM_EMBED_MODEL=nomic-embed-text-v2-moe:latest
 ```
 
-That's it. Engram auto-detects the embedding dimension by sending a probe request at startup. You do **not** need to set `ENGRAM_EMBED_DIM` unless you want to override the default dimension (some Matryoshka models like nomic-embed-text-v2-moe support multiple dimensions: 256, 512, 768).
+Engram auto-detects the embedding dimension by sending a probe request at startup. You do **not** need to set `ENGRAM_EMBED_DIM` unless you want to override the default dimension (some Matryoshka models like nomic-embed-text-v2-moe support multiple dimensions: 256, 512, 768).
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ENGRAM_EMBED_ENDPOINT` | Yes | — | Base URL of the embeddings API (must serve `/embeddings`) |
+| `ENGRAM_EMBED_ENDPOINT` | Yes | -- | Base URL of the embeddings API (must serve `/embeddings`) |
 | `ENGRAM_EMBED_MODEL` | No | `multilingual-e5-small` | Model name passed in the API request |
 | `ENGRAM_EMBED_DIM` | No | Auto-detected | Override embedding dimension (auto-probe if not set) |
-| `ENGRAM_EMBED_API_KEY` | No | — | API key for authenticated endpoints (OpenAI, Azure, etc.) |
+| `ENGRAM_EMBED_API_KEY` | No | -- | API key for authenticated endpoints (OpenAI, Azure, etc.) |
 
-**Compatible APIs**: Ollama, OpenAI, vLLM, LiteLLM, text-embeddings-inference, Azure OpenAI — anything that serves the OpenAI `/v1/embeddings` format.
+**Compatible APIs**: Ollama, OpenAI, vLLM, LiteLLM, text-embeddings-inference, Azure OpenAI -- anything that serves the OpenAI `/v1/embeddings` format.
 
-### Step-by-Step Implementation
+---
 
-#### Step 1: Start the engram server
+## Quick Start (Basic Import)
 
-Without embedder (keyword search only):
+### Step 1: Start the engram server
+
+Without embedder:
 ```bash
 engram serve wiki.brain 127.0.0.1:3030
 ```
 
-With embedder (keyword + semantic search):
+With embedder:
 ```bash
 ENGRAM_EMBED_ENDPOINT=http://localhost:11434/v1 \
 ENGRAM_EMBED_MODEL=nomic-embed-text-v2-moe:latest \
 engram serve wiki.brain 127.0.0.1:3030
 ```
 
-Expected output:
-
-```
-engram API listening on 127.0.0.1:3030
-```
-
-Leave this running. Open a second terminal for the following steps.
-
-#### Step 2: Verify the server is healthy
-
-```bash
-curl -s http://127.0.0.1:3030/health
-```
-
-Expected output:
-
-```json
-{"status":"ok","version":"0.1.0"}
-```
-
-#### Step 3: Write the Wikipedia import script
-
-Full script: [import_wiki.py](import_wiki.py)
-
-Save the following as `import_wiki.py`:
-
-```python
-#!/usr/bin/env python3
-"""
-Import Wikipedia article summaries into engram.
-
-Uses the Wikipedia REST API (no auth required):
-  https://en.wikipedia.org/api/rest_v1/page/summary/{title}
-
-For each article:
-  1. Fetch the summary JSON
-  2. Store the article title as a node with properties
-  3. Use /tell to assert "X is a Y" facts found in the extract
-  4. Create explicit relationships to paradigms and creators
-"""
-
-import re
-import requests
-import time
-
-ENGRAM = "http://127.0.0.1:3030"
-WIKI   = "https://en.wikipedia.org/api/rest_v1/page/summary"
-
-# Articles to import with their known relationships
-ARTICLES = [
-    {
-        "title": "Python_(programming_language)",
-        "label": "Python",
-        "paradigms": ["object-oriented programming", "functional programming", "imperative programming"],
-        "creator": "Guido van Rossum",
-        "typing": "dynamic typing",
-    },
-    {
-        "title": "Rust_(programming_language)",
-        "label": "Rust",
-        "paradigms": ["systems programming", "functional programming", "concurrent programming"],
-        "creator": "Graydon Hoare",
-        "typing": "static typing",
-    },
-    {
-        "title": "JavaScript",
-        "label": "JavaScript",
-        "paradigms": ["event-driven programming", "functional programming", "object-oriented programming"],
-        "creator": "Brendan Eich",
-        "typing": "dynamic typing",
-    },
-    {
-        "title": "Go_(programming_language)",
-        "label": "Go",
-        "paradigms": ["concurrent programming", "imperative programming"],
-        "creator": "Rob Pike",
-        "typing": "static typing",
-    },
-]
-
-def store(entity, entity_type=None, properties=None, confidence=None):
-    payload = {"entity": entity}
-    if entity_type:
-        payload["type"] = entity_type
-    if properties:
-        payload["properties"] = properties
-    if confidence is not None:
-        payload["confidence"] = confidence
-    r = requests.post(f"{ENGRAM}/store", json=payload, timeout=5)
-    r.raise_for_status()
-    return r.json()
-
-def relate(from_entity, relationship, to_entity, confidence=None):
-    payload = {"from": from_entity, "relationship": relationship, "to": to_entity}
-    if confidence is not None:
-        payload["confidence"] = confidence
-    r = requests.post(f"{ENGRAM}/relate", json=payload, timeout=5)
-    r.raise_for_status()
-    return r.json()
-
-def tell(statement, source=None):
-    payload = {"statement": statement}
-    if source:
-        payload["source"] = source
-    r = requests.post(f"{ENGRAM}/tell", json=payload, timeout=5)
-    r.raise_for_status()
-    return r.json()
-
-def fetch_wiki_summary(title):
-    url = f"{WIKI}/{title}"
-    r = requests.get(url, headers={"User-Agent": "engram-demo/1.0"}, timeout=10)
-    r.raise_for_status()
-    return r.json()
-
-def extract_is_a_facts(label, extract):
-    """
-    Very simple rule-based extraction: find sentences matching
-    '<label> is a ...' or '<label> is an ...' in the first 200 chars.
-    Returns a list of (subject, predicate) pairs suitable for /tell.
-    """
-    facts = []
-    # Normalize whitespace
-    text = " ".join(extract.split())
-    # Match "Label is a/an <noun phrase ending at period or comma>"
-    pattern = re.compile(
-        rf"{re.escape(label)}\s+is\s+(?:a|an)\s+([^,.;]+)",
-        re.IGNORECASE,
-    )
-    for m in pattern.finditer(text[:300]):
-        predicate = m.group(1).strip().rstrip(".")
-        # Truncate to first two words to avoid over-long predicates
-        short_pred = " ".join(predicate.split()[:3])
-        if short_pred:
-            facts.append((label, short_pred))
-    return facts
-
-def main():
-    print(f"Importing {len(ARTICLES)} programming languages into engram...\n")
-
-    for article in ARTICLES:
-        label = article["label"]
-        print(f"--- {label} ---")
-
-        # Fetch Wikipedia summary
-        try:
-            data = fetch_wiki_summary(article["title"])
-        except Exception as e:
-            print(f"  Wikipedia fetch failed: {e}")
-            continue
-
-        extract = data.get("extract", "")
-        description = data.get("description", "")
-        print(f"  extract: {extract[:100]}...")
-
-        # Store the language as a node with metadata
-        result = store(
-            entity=label,
-            entity_type="programming_language",
-            properties={
-                "description": description,
-                "wikipedia_title": article["title"],
-                "creator": article["creator"],
-                "typing": article["typing"],
-                "source_url": data.get("content_urls", {}).get("desktop", {}).get("page", ""),
-            },
-            confidence=0.90,  # Wikipedia API source
-        )
-        print(f"  stored node id={result['node_id']} confidence={result['confidence']}")
-
-        # Store the creator as a node and relate
-        store(entity=article["creator"], entity_type="person", confidence=0.90)
-        relate(label, "created_by", article["creator"], confidence=0.90)
-        print(f"  related: {label} -[created_by]-> {article['creator']}")
-
-        # Store paradigms and relate
-        for paradigm in article["paradigms"]:
-            store(entity=paradigm, entity_type="programming_paradigm", confidence=0.90)
-            relate(label, "uses", paradigm, confidence=0.90)
-            print(f"  related: {label} -[uses]-> {paradigm}")
-
-        # Store typing discipline
-        store(entity=article["typing"], entity_type="type_system", confidence=0.90)
-        relate(label, "has", article["typing"], confidence=0.90)
-
-        # Use /tell to assert "X is a Y" facts extracted from the summary
-        facts = extract_is_a_facts(label, extract)
-        for subject, predicate in facts:
-            resp = tell(f"{subject} is a {predicate}", source="wikipedia")
-            print(f"  told: {resp['interpretation']}")
-
-        # Polite delay between Wikipedia requests
-        time.sleep(0.5)
-
-    print("\nImport complete.")
-
-    # Show stats
-    r = requests.get(f"{ENGRAM}/stats", timeout=5)
-    stats = r.json()
-    print(f"Graph: {stats['nodes']} nodes, {stats['edges']} edges")
-
-if __name__ == "__main__":
-    main()
-```
-
-#### Step 4: Run the import
+### Step 2: Run the basic import
 
 ```bash
 python import_wiki.py
 ```
 
-Expected output (Wikipedia text varies; node IDs and exact counts depend on which facts are extracted):
+This imports Python, Rust, JavaScript, and Go with their paradigms and creators. ~24 nodes, ~22 edges.
 
-```
-Importing 4 programming languages into engram...
-
---- Python ---
-  extract: Python is a high-level, general-purpose programming language. Its design philos...
-  stored node id=1 confidence=0.9
-  related: Python -[created_by]-> Guido van Rossum
-  related: Python -[uses]-> object-oriented programming
-  related: Python -[uses]-> functional programming
-  related: Python -[uses]-> imperative programming
-  told: Python is a type of high-level general-purpose
-
---- Rust ---
-  extract: Rust is a multi-paradigm, general-purpose programming language that emphasizes ...
-  stored node id=5 confidence=0.9
-  related: Rust -[created_by]-> Graydon Hoare
-  related: Rust -[uses]-> systems programming
-  related: Rust -[uses]-> functional programming
-  related: Rust -[uses]-> concurrent programming
-  told: Rust is a type of multi-paradigm general-purpose
-
---- JavaScript ---
-  extract: JavaScript, often abbreviated as JS, is a programming language and core technol...
-  stored node id=9 confidence=0.9
-  related: JavaScript -[created_by]-> Brendan Eich
-  related: JavaScript -[uses]-> event-driven programming
-  related: JavaScript -[uses]-> functional programming
-  related: JavaScript -[uses]-> object-oriented programming
-
---- Go ---
-  extract: Go is a statically typed, compiled high-level programming language designed at ...
-  stored node id=13 confidence=0.9
-  related: Go -[created_by]-> Rob Pike
-  related: Go -[uses]-> concurrent programming
-  related: Go -[uses]-> imperative programming
-
-Import complete.
-Graph: 24 nodes, 22 edges
-```
-
-### Querying the Results
-
-#### Search by keyword
+### Step 3: Query
 
 ```bash
+# Keyword search
 engram search "functional programming" wiki.brain
-```
 
-Expected output:
-
-```
-Results (4):
-  functional programming
-  Python
-  Rust
-  JavaScript
-```
-
-The BM25 index ranks the `functional programming` node first (exact match on both tokens), then the three languages that use it.
-
-#### Search with a confidence filter
-
-```bash
-engram search "confidence>0.85" wiki.brain
-```
-
-Expected output — only the nodes stored with `confidence=0.90`:
-
-```
-Results (24):
-  Python
-  Rust
-  JavaScript
-  Go
-  Guido van Rossum
-  ...
-```
-
-#### Search with a property filter
-
-```bash
+# Property filter
 engram search "prop:typing=static typing" wiki.brain
-```
 
-Expected output:
+# Graph traversal
+engram query Python 2 wiki.brain
 
-```
-Results (2):
-  Rust
-  Go
-```
-
-#### Query a node and its direct edges
-
-```bash
-engram query Python 1 wiki.brain
-```
-
-Expected output:
-
-```
-Node: Python
-  id: 1
-  confidence: 0.90
-  memory_tier: active
-Properties:
-  creator: Guido van Rossum
-  description: high-level general-purpose programming language
-  typing: dynamic typing
-  wikipedia_title: Python_(programming_language)
-Edges out:
-  Python -[created_by]-> Guido van Rossum (confidence: 0.90)
-  Python -[uses]-> object-oriented programming (confidence: 0.90)
-  Python -[uses]-> functional programming (confidence: 0.90)
-  Python -[uses]-> imperative programming (confidence: 0.90)
-  Python -[has]-> dynamic typing (confidence: 0.90)
-  Python -[is_a]-> high-level general-purpose (confidence: 0.80)
-Reachable (1-hop): 6 nodes
-```
-
-#### Ask a natural language question
-
-```bash
+# Natural language
 curl -s -X POST http://127.0.0.1:3030/ask \
   -H "Content-Type: application/json" \
   -d '{"question": "What does Rust connect to?"}'
 ```
 
-Expected output:
+---
 
-```json
-{
-  "interpretation": "outgoing edges from: Rust",
-  "results": [
-    {"label": "Graydon Hoare",          "confidence": 0.9, "relationship": "created_by", "detail": null},
-    {"label": "systems programming",    "confidence": 0.9, "relationship": "uses",       "detail": null},
-    {"label": "functional programming", "confidence": 0.9, "relationship": "uses",       "detail": null},
-    {"label": "concurrent programming", "confidence": 0.9, "relationship": "uses",       "detail": null},
-    {"label": "static typing",          "confidence": 0.9, "relationship": "has",        "detail": null}
-  ]
-}
+## Deep Import (Recommended)
+
+The deep import script builds a rich, interconnected knowledge graph that demonstrates engram's full capabilities -- especially graph traversal at depth 3-4 where relationships chain through creators, paradigms, institutions, and CS concepts.
+
+### Step 1: Start the engram server
+
+```bash
+# Without embedder (keyword search only, faster ingestion)
+engram serve wiki_deep.brain 127.0.0.1:3030
+
+# With embedder (keyword + semantic search)
+ENGRAM_EMBED_ENDPOINT=http://localhost:11434/v1 \
+ENGRAM_EMBED_MODEL=nomic-embed-text-v2-moe:latest \
+engram serve wiki_deep.brain 127.0.0.1:3030
 ```
 
-#### Traverse two hops to find shared paradigms
+### Step 2: Run the deep import
 
+```bash
+# Without embedder
+python import_wiki_deep.py
+
+# With embedder (also runs semantic search queries at the end)
+python import_wiki_deep.py --with-embedder
+```
+
+The script runs in 4 phases:
+
+**Phase 1: Seed articles** (14 articles) -- Programming languages (Python, Rust, JavaScript, Go, C, Haskell, TypeScript, C++), CS concepts (machine learning, knowledge graph, operating system, compiler), and organizations (Mozilla, Google). Each gets Wikipedia metadata, categories, paradigm links, creator links, influence chains, and extracted facts.
+
+**Phase 2: Follow-up articles** (16 articles) -- Related topics discovered from Phase 1: artificial intelligence, neural network, deep learning, LLVM, Linux, graph database, semantic web, RDF, type system, garbage collection, memory safety, concurrency, lambda calculus, Turing machine, algorithm, data structure.
+
+**Phase 3: Cross-linking** (28 statements) -- Natural language assertions that connect domains: "Rust was developed at Mozilla", "LLVM is used by Rust", "Python is popular for machine learning", "TypeScript is a superset of JavaScript", etc.
+
+**Phase 4: Deep enrichment** (200+ relationships) -- This is what makes the graph interesting at depth 3-4:
+
+- **Creators**: work history (Guido van Rossum -> Google, Dropbox, Microsoft), education (Dennis Ritchie -> Harvard), birthplaces, other creations (Anders Hejlsberg -> TypeScript, Turbo Pascal, C#)
+- **Paradigm interconnections**: functional programming -> lambda calculus, supports immutability/higher-order functions/pattern matching; OOP -> inheritance/polymorphism/encapsulation; concurrent programming -> threads/message passing, challenges deadlock/race conditions
+- **CS concept hierarchies**: machine learning -> deep learning -> neural network -> biological neuron; compiler -> lexical analysis/parsing/semantic analysis/code generation/optimization; LLVM -> Chris Lattner, University of Illinois
+- **Operating system internals**: OS -> process management/memory management/file system; Linux -> Linus Torvalds, kernel, GPL
+- **Type systems**: static typing -> used by Rust/Go/TypeScript/Haskell/C/C++; type inference -> Hindley-Milner
+- **Memory safety chains**: memory safety -> prevents buffer overflow/use after free/null pointer dereference, enforced by borrow checker -> part of Rust
+- **Concurrency models**: concurrency -> actor model (Erlang), CSP (Go, Tony Hoare), shared memory; threads -> managed by OS
+- **Foundational CS**: lambda calculus -> Alonzo Church -> Princeton; Turing machine -> Alan Turing -> Bletchley Park
+- **Organizations**: Google -> Go, TensorFlow, Chromium, Android, Larry Page, Sergey Brin; Microsoft -> TypeScript, Visual Studio Code, Azure, Bill Gates
+
+### Expected output
+
+```
+Final graph: 638 nodes, 377 edges (974 total API calls)
+```
+
+### Step 3: Explore in the web UI
+
+Open `http://127.0.0.1:3030/` in your browser. The Graph tab lets you explore interactively:
+
+- Search for "Python" and set depth to 4 -- you'll see a rich network spanning from Python through Guido van Rossum to Google/Dropbox/Microsoft, through paradigms to lambda calculus and Turing machines, through typing to borrow checkers and garbage collection
+- Search for "compiler" at depth 3 -- see phases (lexical analysis, parsing, code generation), LLVM connections to Rust/C++/Swift, Chris Lattner, University of Illinois
+- Search for "machine learning" at depth 3 -- follow the hierarchy through deep learning, neural networks, down to biological neurons, and up through AI to NLP and computer vision
+- Adjust the Min Confidence slider to filter out lower-confidence relationships
+
+### Step 4: Query the graph
+
+#### Keyword search
+```bash
+curl -s -X POST http://127.0.0.1:3030/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "functional programming", "limit": 5}'
+```
+
+#### Property filter -- find all statically typed languages
+```bash
+curl -s -X POST http://127.0.0.1:3030/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "prop:typing=static typing", "limit": 10}'
+```
+
+#### Boolean search
+```bash
+curl -s -X POST http://127.0.0.1:3030/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "type:programming_language AND confidence>0.85", "limit": 10}'
+```
+
+#### Graph traversal -- 2 hops from Rust with confidence filter
 ```bash
 curl -s -X POST http://127.0.0.1:3030/query \
   -H "Content-Type: application/json" \
-  -d '{"start": "functional programming", "depth": 2, "min_confidence": 0.8}'
+  -d '{"start": "Rust", "depth": 2, "min_confidence": 0.7}'
 ```
 
-This returns all nodes reachable from `functional programming` within 2 hops — which includes Python, Rust, and JavaScript, giving you a language-family view from the paradigm perspective.
+Returns 57 nodes and 70 edges including Graydon Hoare, Mozilla, Apple, systems programming, memory management, concurrent programming, threads, message passing, and more.
+
+#### Natural language questions
+```bash
+# Outgoing edges
+curl -s -X POST http://127.0.0.1:3030/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What does Python connect to?"}'
+
+# Incoming edges (who uses this paradigm?)
+curl -s -X POST http://127.0.0.1:3030/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What connects to functional programming?"}'
+# -> Python, Rust, JavaScript, Haskell, TypeScript
+```
+
+#### Semantic search (requires embedder)
+```bash
+curl -s -X POST http://127.0.0.1:3030/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "memory safe programming", "limit": 5}'
+# -> memory safety, memory management, Memory safety
+```
+
+#### JSON-LD export
+```bash
+curl -s http://127.0.0.1:3030/export/jsonld | python -m json.tool | head -30
+```
+
+Exports all 638 entities as JSON-LD, consumable by any RDF-aware system.
+
+---
 
 ### Key Takeaways
 
-- Engram stores whatever you tell it. Wikipedia article content is not magically parsed; the import script does the entity extraction. Engram handles storage, indexing, and traversal.
-- The `/tell` endpoint handles "X is a Y" patterns reliably. Other patterns in article text require your own extraction logic.
-- Property-based filtering (`prop:typing=static typing`) works at search time without pre-defining schemas.
-- The entire graph — 24 nodes, 22 edges, full-text index — lives in a single `wiki.brain` file.
+- **Engram stores what you tell it.** Wikipedia article content is not magically parsed; the import script does the entity extraction and relationship definition. Engram handles storage, indexing, traversal, and search.
+- **Depth matters.** A flat graph (just languages and paradigms) looks unimpressive at depth 3-4. Adding creator biographies, concept hierarchies, and paradigm interconnections makes traversal genuinely useful.
+- **Embedder is optional but valuable.** Without it, you get fast keyword search. With it, you get conceptual queries ("memory safe programming" finds Rust's memory safety features even without exact word matches). Ingestion takes ~2x longer due to embedding calls.
+- **638 nodes, 377 edges in a single `.brain` file.** No external database, no configuration, no schema definition. The file is fully portable -- copy it to another machine and query it immediately.
+- **Performance.** 974 API calls in 81 seconds with embedder, 19 seconds without. The bottleneck is network I/O (Wikipedia API + Ollama), not engram.
