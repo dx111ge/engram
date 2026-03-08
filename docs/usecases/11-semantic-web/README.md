@@ -1,286 +1,219 @@
-# Use Case 11: Semantic Web -- Linked Data Integration
+# Use Case 11: Semantic Web -- Biomedical Drug Interaction Knowledge Graph
 
-**Version:** 0.1.0
-**Last updated:** 2026-03-08
+### Overview
 
-This walkthrough demonstrates how to use engram as a bridge between AI agent memory and the semantic web ecosystem. We import structured knowledge from Wikidata and schema.org via JSON-LD, enrich it with engram's confidence scoring and inference engine, and export it back as interoperable linked data.
+The semantic web (RDF, JSON-LD, SPARQL) and AI agent memory are converging. Biomedical knowledge -- drugs, enzymes, diseases, interactions -- is one of the strongest domains for structured linked data because **getting it wrong can harm patients**. This walkthrough imports structured biomedical knowledge via JSON-LD from DrugBank, ChEBI, and SNOMED CT vocabularies, enriches it with engram's confidence model and inference engine, detects drug interactions automatically, handles contradictions from unreliable sources, and exports everything as interoperable linked data.
 
----
+**Why semantic web beats web search here:**
 
-## Why This Matters
+Use case 09 extracted 4 facts about Rust from web search via regex. This use case imports 13 structured nodes with typed relationships in a single JSON-LD call -- drugs, enzymes, diseases, all linked with globally unique identifiers. No regex guessing. No deduplication. No extraction errors. Confidence comes from source tiers (FDA label = 0.95) rather than "how many blogs mentioned it."
 
-The semantic web (RDF, JSON-LD, SPARQL) and AI agent memory are converging. Agents need structured knowledge, and the linked data ecosystem (Wikidata, DBpedia, schema.org) already has billions of facts. Engram's JSON-LD import/export bridges these worlds:
+**What this demonstrates:**
 
-- **Import**: Pull structured facts from any JSON-LD source into engram's knowledge graph
-- **Enrich**: Apply confidence scoring, learning, inference rules, and decay
-- **Export**: Push enriched knowledge back as standard JSON-LD consumable by any RDF-aware system
-- **Interoperate**: Share knowledge between engram instances, other agents, and semantic web tools
+- JSON-LD import from biomedical ontologies (DrugBank, ChEBI, SNOMED CT)
+- Source reliability tiers (FDA: 0.95, clinical trial: 0.85, patient blog: 0.25)
+- Drug-enzyme-disease relationship modeling
+- Inference rules detect CYP-mediated drug interactions automatically
+- Contradiction handling: blog claim debunked by FDA contraindication
+- Evidence chain traversal: drug -> enzyme -> interaction -> adverse effect
+- JSON-LD export for interoperability with RDF tools (Jena, RDFLib, GraphDB)
+- Confidence as a patient safety signal
 
----
+**What requires external tools:**
 
-## Prerequisites
+- Python script to orchestrate the demo (calls the HTTP API)
+- No external ontology access needed (uses simulated JSON-LD)
+
+### Prerequisites
+
+- `engram` binary on your PATH (or `./target/release/engram`)
+- Python 3.9+ with `requests` installed
+
+### Files
+
+```
+11-semantic-web/
+  README.md              # This file
+  biomedical_demo.py     # Self-contained demo with simulated biomedical JSON-LD
+```
+
+### Step-by-Step
+
+#### Step 1: Start the engram server
 
 ```bash
-# Start engram server
-engram serve semantic.brain
-
-# Verify it's running
-curl http://localhost:3030/health
+engram serve biomedical.brain 127.0.0.1:3030
 ```
 
-Python with `requests` library for the import scripts.
+#### Step 2: Run the demo
 
----
-
-## Step 1: Import from Schema.org
-
-Schema.org types are the standard vocabulary for structured data on the web. We import a small domain model.
-
-```python
-import requests
-
-ENGRAM = "http://localhost:3030"
-
-# A small schema.org-compatible knowledge graph about programming languages
-data = {
-    "@context": {
-        "schema": "https://schema.org/",
-        "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
-        "engram": "engram://vocab/"
-    },
-    "@graph": [
-        {
-            "@id": "schema:Rust_(programming_language)",
-            "@type": "schema:ComputerLanguage",
-            "rdfs:label": "Rust",
-            "schema:dateCreated": "2010",
-            "schema:creator": {"@id": "engram://node/Graydon%20Hoare"},
-            "schema:operatingSystem": "Cross-platform"
-        },
-        {
-            "@id": "engram://node/Graydon%20Hoare",
-            "@type": "schema:Person",
-            "rdfs:label": "Graydon Hoare"
-        },
-        {
-            "@id": "schema:WebAssembly",
-            "@type": "schema:ComputerLanguage",
-            "rdfs:label": "WebAssembly",
-            "schema:dateCreated": "2015"
-        },
-        {
-            "@id": "schema:Mozilla",
-            "@type": "schema:Organization",
-            "rdfs:label": "Mozilla",
-            "schema:sponsor": {"@id": "engram://node/Graydon%20Hoare"}
-        }
-    ]
-}
-
-resp = requests.post(f"{ENGRAM}/import/jsonld", json={
-    "data": data,
-    "source": "schema.org"
-})
-print(resp.json())
-# {"nodes_imported": 4, "edges_imported": 2, "errors": null}
+```bash
+python biomedical_demo.py
 ```
 
-Engram creates nodes from each `@graph` entry. Object references (values with `@id`) become edges. String values become properties.
+### What Happens
 
----
+#### Phase 1: Import Biomedical JSON-LD
 
-## Step 2: Import from Wikidata
+A single `/import/jsonld` call imports 13 structured nodes:
 
-Wikidata provides structured knowledge about nearly everything. We can import Wikidata entities by converting their JSON-LD representation.
+| Entity | Type | Vocabulary |
+|--------|------|-----------|
+| Simvastatin | Drug | DrugBank DB00641 |
+| Clarithromycin | Drug | DrugBank DB01211 |
+| Aspirin | Drug | DrugBank DB00945 |
+| Ibuprofen | Drug | DrugBank DB01050 |
+| Warfarin | Drug | DrugBank DB00001 |
+| Metformin | Drug | DrugBank DB00563 |
+| CYP3A4 | Enzyme | ChEBI 23924 |
+| CYP2C9 | Enzyme | ChEBI 23924 |
+| COX-1 | Enzyme | ChEBI 23924 |
+| COX-2 | Enzyme | ChEBI 23924 |
+| Hypercholesterolemia | Condition | SNOMED 13644009 |
+| Type 2 Diabetes | Condition | SNOMED 44054006 |
+| Rhabdomyolysis | Condition | SNOMED (life-threatening) |
 
-```python
-import requests
+Plus 6 typed edges: `metabolized_by`, `inhibits` relationships between drugs and enzymes.
 
-ENGRAM = "http://localhost:3030"
+#### Phase 2: Source Reliability Tiers
 
-# Simplified Wikidata-style data about a city
-wikidata = {
-    "@context": {
-        "wd": "http://www.wikidata.org/entity/",
-        "wdt": "http://www.wikidata.org/prop/direct/",
-        "rdfs": "http://www.w3.org/2000/01/rdf-schema#"
-    },
-    "@graph": [
-        {
-            "@id": "wd:Q64",
-            "@type": "wd:Q515",
-            "rdfs:label": "Berlin",
-            "wdt:P17": {"@id": "wd:Q183"},
-            "wdt:P1082": "3645000"
-        },
-        {
-            "@id": "wd:Q183",
-            "rdfs:label": "Germany",
-            "@type": "wd:Q6256"
-        },
-        {
-            "@id": "wd:Q515",
-            "rdfs:label": "city"
-        },
-        {
-            "@id": "wd:Q6256",
-            "rdfs:label": "country"
-        }
-    ]
-}
+| Tier | Sources | Confidence |
+|------|---------|------------|
+| 1 (regulatory, peer-reviewed) | FDA-Label, DrugBank, PubMed-Meta | 0.92-0.95 |
+| 2 (clinical) | ClinicalTrial, UpToDate | 0.85 |
+| 3 (anecdotal) | PatientForum, HealthBlog | 0.25-0.30 |
 
-resp = requests.post(f"{ENGRAM}/import/jsonld", json={
-    "data": wikidata,
-    "source": "wikidata"
-})
-print(resp.json())
-# {"nodes_imported": 4, "edges_imported": 1, "errors": null}
+#### Phase 3: Drug-Disease Relationships + Known Interactions
 
-# Now query the imported data
-resp = requests.post(f"{ENGRAM}/query", json={"start": "Berlin", "depth": 2})
-print(resp.json())
+Drugs linked to conditions via `treats` edges (sourced from FDA labels):
+
+```
+Simvastatin -[treats]-> Hypercholesterolemia (conf=0.95)
+Warfarin -[treats]-> Thromboembolism (conf=0.95)
+Metformin -[treats]-> Type 2 Diabetes (conf=0.95)
+Aspirin -[treats]-> Inflammation (conf=0.85)
 ```
 
-Note: Wikidata property IDs (P17 = country, P1082 = population) become edge and property labels. You can post-process them by adding rules or a mapping table.
+Two known drug interactions stored with full mechanism detail:
 
----
+**Simvastatin + CYP3A4 inhibitor -> Rhabdomyolysis risk** (severity: major)
+- Mechanism: CYP3A4 inhibition increases simvastatin plasma levels
+- Recommendation: avoid combination or reduce statin dose
 
-## Step 3: Enrich with Inference Rules
+**Aspirin + Warfarin -> GI Bleeding risk** (severity: major)
+- Mechanism: additive anticoagulant and antiplatelet effects
 
-Once imported, we can use engram's inference engine to derive new facts.
+After phase 3: **62 nodes, 88 edges**.
 
-```python
-import requests
+#### Phase 4: Inference -- Automatic Drug Interaction Detection
 
-ENGRAM = "http://localhost:3030"
+Two inference rules:
 
-# Load rules that work on the imported data
-rules = {
-    "rules": [
-        # If A is created by B, and B is sponsored by C, then A is related to C
-        'rule creator_org\nwhen edge(A, "creator", B)\nwhen edge(C, "sponsor", B)\nthen edge(A, "associated_with", C, product(e1, e2))',
+**Rule 1** (CYP interaction): If drug A inhibits enzyme X AND drug B is metabolized by enzyme X, flag drug B.
 
-        # Transitive type hierarchy
-        'rule type_transitive\nwhen edge(A, "is_a", B)\nwhen edge(B, "is_a", C)\nthen edge(A, "is_a", C, min(e1, e2))'
-    ]
-}
+**Rule 2** (shared target): If drug A and drug B both inhibit the same enzyme, flag both.
 
-resp = requests.post(f"{ENGRAM}/rules", json=rules)
-print(f"Rules loaded: {resp.json()}")
+Result: **12 rules fired, 4 flags raised:**
 
-# Derive new facts
-resp = requests.post(f"{ENGRAM}/learn/derive", json={})
-print(f"Derivation: {resp.json()}")
+```
+FLAGGED: Simvastatin -- interaction risk: co-prescribed with CYP inhibitor
+FLAGGED: Clarithromycin -- shares enzyme target with another drug
+FLAGGED: Aspirin -- shares enzyme target with another drug
+FLAGGED: Ibuprofen -- shares enzyme target with another drug
+OK: Warfarin -- no flags
+OK: Metformin -- no flags
 ```
 
----
+The inference engine automatically detected that Clarithromycin (CYP3A4 inhibitor) + Simvastatin (CYP3A4-metabolized) is dangerous, and that Aspirin + Ibuprofen share the COX-1 target.
 
-## Step 4: Export as JSON-LD
+#### Phase 5: Contradicting Evidence
 
-Export the enriched graph back as standard JSON-LD. The output is consumable by any RDF tool (Apache Jena, RDFLib, Virtuoso, GraphDB).
+A health blog claims "taking simvastatin with clarithromycin is perfectly safe" (conf=0.30). The FDA label contradicts this (conf=0.95). Correction zeroes the claim:
 
-```python
-import requests
-import json
-
-ENGRAM = "http://localhost:3030"
-
-resp = requests.get(f"{ENGRAM}/export/jsonld")
-doc = resp.json()
-
-# Pretty-print the JSON-LD
-print(json.dumps(doc, indent=2))
-
-# Save to file for use with other tools
-with open("knowledge.jsonld", "w") as f:
-    json.dump(doc, f, indent=2)
+```
+Claim:StatinMacrolideSafe confidence: 0.30 -> 0.00
 ```
 
-The exported JSON-LD includes:
-- `@context` with engram, schema.org, RDF, and RDFS namespaces
-- `@graph` array with one entry per node
-- Each node has `@id` (URI), `rdfs:label`, `engram:confidence`, `engram:memoryTier`
-- Node types as `@type`
-- Properties as namespace-prefixed keys
-- Edges as object references with confidence annotations
+#### Phase 6: Evidence Chain Traversal
 
----
+**From Simvastatin (depth=2):** 10 reachable nodes:
 
-## Step 5: Round-Trip with External Tools
+```
+Simvastatin (depth=0, conf=0.80)
+  CYP3A4 (depth=1, conf=0.80)
+  Hypercholesterolemia (depth=1, conf=0.80)
+  Interaction:Simvastatin-CYP3A4-inhibitor (depth=1, conf=0.93)
+  Source:FDA-Label (depth=1, conf=0.95)
+  Clarithromycin (depth=2, conf=0.80)
+  Rhabdomyolysis (depth=2, conf=0.80)
+  Warfarin (depth=2, conf=0.80)
+  ...
+```
 
-The exported JSON-LD can be loaded into any RDF store or processed with standard tools.
+**From CYP3A4 (depth=2):** 7 nodes -- shows all drugs that interact with this enzyme plus their downstream risks.
 
-### Load into RDFLib (Python)
+#### Phase 7: Export as JSON-LD
 
-```python
-from rdflib import Graph as RDFGraph
+The entire enriched graph exports as standard JSON-LD (64 nodes):
 
-g = RDFGraph()
-g.parse("knowledge.jsonld", format="json-ld")
-
-# SPARQL query over engram data
-results = g.query("""
-    SELECT ?label ?confidence WHERE {
-        ?node <http://www.w3.org/2000/01/rdf-schema#label> ?label .
-        ?node <engram://vocab/confidence> ?confidence .
+```json
+{
+  "@context": {
+    "engram": "engram://vocab/",
+    "schema": "https://schema.org/",
+    "rdfs": "http://www.w3.org/2000/01/rdf-schema#"
+  },
+  "@graph": [
+    {
+      "@id": "engram://node/Simvastatin",
+      "@type": "engram:Drug",
+      "rdfs:label": "Simvastatin",
+      "engram:confidence": 0.80,
+      "engram:drug_class": "statin",
+      "engram:_flag": "interaction risk: co-prescribed with CYP inhibitor"
     }
-    ORDER BY DESC(?confidence)
-""")
-
-for row in results:
-    print(f"{row.label}: confidence={row.confidence}")
+  ]
+}
 ```
 
-### Load into Apache Jena
+This JSON-LD is consumable by any RDF tool: Apache Jena, RDFLib, Virtuoso, GraphDB.
 
-```bash
-# Load into Jena TDB2
-tdb2.tdbloader --loc=jena-db knowledge.jsonld
-
-# Query with SPARQL
-tdb2.tdbquery --loc=jena-db --query=query.rq
-```
-
-### Validate with JSON-LD Playground
-
-Upload `knowledge.jsonld` to the [JSON-LD Playground](https://json-ld.org/playground/) to visualize the graph structure and verify the context resolves correctly.
-
----
-
-## Architecture: Engram as a Semantic Web Bridge
+#### Phase 8: Explainability
 
 ```
-+----------------+     JSON-LD      +----------+     JSON-LD      +----------------+
-|   Wikidata     | ───────────────> |          | ───────────────> |   Apache Jena  |
-|   DBpedia      |                  |  engram  |                  |   RDFLib       |
-|   schema.org   | <─ import ─────  |          |  ── export ───>  |   GraphDB      |
-+----------------+                  +----------+                  +----------------+
-                                         |
-                                    Enrichment:
-                                    - Confidence scoring
-                                    - Inference rules
-                                    - Decay & reinforcement
-                                    - Memory tiers
-                                    - Co-occurrence stats
+Interaction:Simvastatin-CYP3A4-inhibitor (conf=0.93)
+  Outgoing:
+    -[involves]-> Simvastatin (conf=0.95)
+    -[involves]-> CYP3A4 (conf=0.95)
+    -[causes_risk_of]-> Rhabdomyolysis (conf=0.90)
 ```
 
-Engram is not an RDF store. It does not support SPARQL natively, OWL reasoning, or named graphs. What it adds to the linked data ecosystem:
+Final graph: **64 nodes, 91 edges**.
 
-1. **Confidence lifecycle**: Every fact has a confidence score that changes over time through reinforcement, decay, and correction. RDF stores treat all triples as equally true.
+### Architecture: Engram as a Semantic Web Bridge
 
-2. **AI-native protocols**: MCP (for LLM tool-calling), A2A (for agent-to-agent), and natural language interfaces. RDF stores require SPARQL.
+```
++------------------+     JSON-LD     +----------+     JSON-LD     +------------------+
+|  DrugBank        | ──────────────> |          | ──────────────> |  Apache Jena     |
+|  ChEBI           |                 |  engram  |                 |  RDFLib          |
+|  SNOMED CT       |  <── import ──  |          |  ── export ──>  |  GraphDB         |
+|  Wikidata        |                 |          |                 |  SPARQL endpoint |
++------------------+                 +----------+                 +------------------+
+                                          |
+                                     Enrichment:
+                                     - Confidence lifecycle
+                                     - Inference rules
+                                     - Contradiction detection
+                                     - Source reliability tiers
+                                     - Decay & reinforcement
+```
 
-3. **Single-binary deployment**: No JVM, no external database, no configuration. Import JSON-LD, query it, export it.
+### Key Takeaways
 
-4. **Knowledge mesh**: Multiple engram instances can sync knowledge with trust-based confidence propagation. RDF federation exists but is complex.
-
----
-
-## Key Takeaways
-
-- JSON-LD is the bridge between engram and the semantic web
-- Import from Wikidata, DBpedia, schema.org, or any JSON-LD source
-- Engram enriches imported data with confidence, inference, and decay
-- Export back as standard JSON-LD for interoperability
-- Use engram where you need AI-native memory with semantic web compatibility
-- Use a proper RDF store (Jena, Virtuoso) where you need SPARQL, OWL, or standards compliance
+- **JSON-LD is the bridge** between engram and the biomedical semantic web. One import call brings in 13 typed, linked entities.
+- **Source tiers matter for patient safety.** FDA labels (0.95) outweigh health blogs (0.25). Confidence quantifies how much to trust each fact.
+- **Inference detects interactions automatically.** The CYP3A4 rule flagged Simvastatin without anyone manually encoding every drug pair. This scales to thousands of drugs.
+- **Contradiction handling prevents misinformation.** The blog claim about statin+macrolide safety was zeroed by FDA evidence. In healthcare, this distinction saves lives.
+- **Evidence chains are traversable.** Starting from any drug, depth-2 traversal surfaces enzymes, interactions, adverse effects, and source provenance.
+- **Export preserves enrichment.** The JSON-LD output includes engram's confidence scores and inference flags alongside standard biomedical vocabulary. Any RDF tool can consume it.
+- **Structured data >> web scraping.** Regex extraction from search snippets (use case 09) gives you "Rust is a programming language." JSON-LD import gives you typed drug-enzyme-disease relationships with globally unique identifiers and quantified confidence.
