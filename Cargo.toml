@@ -9,6 +9,9 @@ members = [
     "crates/engram-a2a",
     "crates/engram-api",
 ]
+exclude = [
+    "crates/engram-intel",  # WASM crate -- built separately via wasm-pack
+]
 
 [package]
 name = "engram"
@@ -35,10 +38,10 @@ engram-mesh = { path = "crates/engram-mesh", optional = true }
 tokio = { workspace = true }
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
-license = "AGPL-3.0"
-repository = "http://192.168.178.26:3141/admin/engram"
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/dx111ge/engram"
 
 [workspace.dependencies]
 # Shared dependencies across crates

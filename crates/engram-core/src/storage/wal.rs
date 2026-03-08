@@ -51,8 +51,8 @@ pub struct WalEntry {
     pub data: Vec<u8>,
 }
 
-const WAL_ENTRY_HEADER_SIZE: usize = 8 + 1 + 4; // seq + op + data_len
-const WAL_ENTRY_FOOTER_SIZE: usize = 4; // checksum
+const _WAL_ENTRY_HEADER_SIZE: usize = 8 + 1 + 4; // seq + op + data_len
+const _WAL_ENTRY_FOOTER_SIZE: usize = 4; // checksum
 
 pub struct Wal {
     path: PathBuf,

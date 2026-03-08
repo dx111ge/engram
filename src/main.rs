@@ -296,7 +296,7 @@ fn cmd_reindex(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_usage() {
-    println!("engram v0.1.0 -- AI Memory Engine");
+    println!("engram v1.0.0 -- AI Memory Engine");
     println!();
     println!("Usage:");
     println!("  engram create [path]                          Create a new .brain file");

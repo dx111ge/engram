@@ -1,3 +1,11 @@
+//! engram-core: storage engine, knowledge graph, and search indexes.
+//!
+//! Provides the core data structures and operations for engram:
+//! - [`storage`] -- custom binary `.brain` file format with mmap, WAL, crash recovery
+//! - [`graph`] -- knowledge graph with typed nodes, edges, properties, confidence lifecycle
+//! - [`index`] -- BM25 full-text, HNSW vector, bitmap, temporal, and hybrid search
+//! - [`learning`] -- confidence model integration (reinforcement, decay, correction)
+
 pub mod storage;
 pub mod index;
 pub mod graph;

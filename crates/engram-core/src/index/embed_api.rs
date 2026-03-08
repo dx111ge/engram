@@ -44,7 +44,7 @@ impl ApiEmbedder {
             Some(d) => d,
             None => {
                 // Auto-detect: send a probe embedding and measure the dimension
-                let mut embedder = Self::new(endpoint.clone(), model.clone(), 0, api_key.clone());
+                let embedder = Self::new(endpoint.clone(), model.clone(), 0, api_key.clone());
                 match embedder.probe_dimension() {
                     Ok(d) => d,
                     Err(_) => 384, // safe fallback

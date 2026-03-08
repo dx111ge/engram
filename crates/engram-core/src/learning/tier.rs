@@ -10,6 +10,7 @@
 /// - Low confidence or long unaccessed → demote to archival
 /// - Explicit user override always wins
 
+#[allow(unused_imports)]
 use crate::storage::node::{TIER_ACTIVE, TIER_ARCHIVAL, TIER_CORE};
 
 /// Thresholds for automatic tier transitions.

@@ -135,116 +135,125 @@ fn l2_distance_sq_scalar(a: &[f32], b: &[f32]) -> f32 {
 #[target_feature(enable = "avx2,fma")]
 unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
+    // SAFETY: caller guarantees AVX2+FMA via target_feature check
+    unsafe {
+        let len = a.len().min(b.len());
+        let chunks = len / 8;
+        let remainder = len % 8;
 
-    let len = a.len().min(b.len());
-    let chunks = len / 8;
-    let remainder = len % 8;
+        let mut dot = _mm256_setzero_ps();
+        let mut norm_a = _mm256_setzero_ps();
+        let mut norm_b = _mm256_setzero_ps();
 
-    let mut dot = _mm256_setzero_ps();
-    let mut norm_a = _mm256_setzero_ps();
-    let mut norm_b = _mm256_setzero_ps();
+        for i in 0..chunks {
+            let offset = i * 8;
+            let va = _mm256_loadu_ps(a.as_ptr().add(offset));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(offset));
+            dot = _mm256_fmadd_ps(va, vb, dot);
+            norm_a = _mm256_fmadd_ps(va, va, norm_a);
+            norm_b = _mm256_fmadd_ps(vb, vb, norm_b);
+        }
 
-    for i in 0..chunks {
-        let offset = i * 8;
-        let va = _mm256_loadu_ps(a.as_ptr().add(offset));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(offset));
-        dot = _mm256_fmadd_ps(va, vb, dot);
-        norm_a = _mm256_fmadd_ps(va, va, norm_a);
-        norm_b = _mm256_fmadd_ps(vb, vb, norm_b);
+        let mut dot_sum = hsum_avx2(dot);
+        let mut na_sum = hsum_avx2(norm_a);
+        let mut nb_sum = hsum_avx2(norm_b);
+
+        // Handle remainder
+        let start = chunks * 8;
+        for i in 0..remainder {
+            let ai = a[start + i];
+            let bi = b[start + i];
+            dot_sum += ai * bi;
+            na_sum += ai * ai;
+            nb_sum += bi * bi;
+        }
+
+        let denom = (na_sum * nb_sum).sqrt();
+        if denom < f32::EPSILON {
+            return 0.0;
+        }
+        dot_sum / denom
     }
-
-    let mut dot_sum = hsum_avx2(dot);
-    let mut na_sum = hsum_avx2(norm_a);
-    let mut nb_sum = hsum_avx2(norm_b);
-
-    // Handle remainder
-    let start = chunks * 8;
-    for i in 0..remainder {
-        let ai = a[start + i];
-        let bi = b[start + i];
-        dot_sum += ai * bi;
-        na_sum += ai * ai;
-        nb_sum += bi * bi;
-    }
-
-    let denom = (na_sum * nb_sum).sqrt();
-    if denom < f32::EPSILON {
-        return 0.0;
-    }
-    dot_sum / denom
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
+    // SAFETY: caller guarantees AVX2+FMA via target_feature check
+    unsafe {
+        let len = a.len().min(b.len());
+        let chunks = len / 8;
+        let remainder = len % 8;
 
-    let len = a.len().min(b.len());
-    let chunks = len / 8;
-    let remainder = len % 8;
+        let mut acc = _mm256_setzero_ps();
 
-    let mut acc = _mm256_setzero_ps();
+        for i in 0..chunks {
+            let offset = i * 8;
+            let va = _mm256_loadu_ps(a.as_ptr().add(offset));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(offset));
+            acc = _mm256_fmadd_ps(va, vb, acc);
+        }
 
-    for i in 0..chunks {
-        let offset = i * 8;
-        let va = _mm256_loadu_ps(a.as_ptr().add(offset));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(offset));
-        acc = _mm256_fmadd_ps(va, vb, acc);
+        let mut sum = hsum_avx2(acc);
+        let start = chunks * 8;
+        for i in 0..remainder {
+            sum += a[start + i] * b[start + i];
+        }
+        sum
     }
-
-    let mut sum = hsum_avx2(acc);
-    let start = chunks * 8;
-    for i in 0..remainder {
-        sum += a[start + i] * b[start + i];
-    }
-    sum
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn l2_distance_sq_avx2(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
+    // SAFETY: caller guarantees AVX2+FMA via target_feature check
+    unsafe {
+        let len = a.len().min(b.len());
+        let chunks = len / 8;
+        let remainder = len % 8;
 
-    let len = a.len().min(b.len());
-    let chunks = len / 8;
-    let remainder = len % 8;
+        let mut acc = _mm256_setzero_ps();
 
-    let mut acc = _mm256_setzero_ps();
+        for i in 0..chunks {
+            let offset = i * 8;
+            let va = _mm256_loadu_ps(a.as_ptr().add(offset));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(offset));
+            let diff = _mm256_sub_ps(va, vb);
+            acc = _mm256_fmadd_ps(diff, diff, acc);
+        }
 
-    for i in 0..chunks {
-        let offset = i * 8;
-        let va = _mm256_loadu_ps(a.as_ptr().add(offset));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(offset));
-        let diff = _mm256_sub_ps(va, vb);
-        acc = _mm256_fmadd_ps(diff, diff, acc);
+        let mut sum = hsum_avx2(acc);
+        let start = chunks * 8;
+        for i in 0..remainder {
+            let d = a[start + i] - b[start + i];
+            sum += d * d;
+        }
+        sum
     }
-
-    let mut sum = hsum_avx2(acc);
-    let start = chunks * 8;
-    for i in 0..remainder {
-        let d = a[start + i] - b[start + i];
-        sum += d * d;
-    }
-    sum
 }
 
 /// Horizontal sum of an AVX2 256-bit register (8 x f32 → single f32).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(unused_unsafe)]
 unsafe fn hsum_avx2(v: std::arch::x86_64::__m256) -> f32 {
     use std::arch::x86_64::*;
 
-    // Add high 128 to low 128
-    let hi = _mm256_extractf128_ps(v, 1);
-    let lo = _mm256_castps256_ps128(v);
-    let sum128 = _mm_add_ps(lo, hi);
+    unsafe {
+        // Add high 128 to low 128
+        let hi = _mm256_extractf128_ps(v, 1);
+        let lo = _mm256_castps256_ps128(v);
+        let sum128 = _mm_add_ps(lo, hi);
 
-    // Horizontal add within 128-bit lane
-    let shuf = _mm_movehdup_ps(sum128); // [1,1,3,3]
-    let sums = _mm_add_ps(sum128, shuf); // [0+1, _, 2+3, _]
-    let shuf2 = _mm_movehl_ps(sums, sums); // [2+3, _, _, _]
-    let result = _mm_add_ss(sums, shuf2); // [0+1+2+3, _, _, _]
-    _mm_cvtss_f32(result)
+        // Horizontal add within 128-bit lane
+        let shuf = _mm_movehdup_ps(sum128); // [1,1,3,3]
+        let sums = _mm_add_ps(sum128, shuf); // [0+1, _, 2+3, _]
+        let shuf2 = _mm_movehl_ps(sums, sums); // [2+3, _, _, _]
+        let result = _mm_add_ss(sums, shuf2); // [0+1+2+3, _, _, _]
+        _mm_cvtss_f32(result)
+    }
 }
 
 // ── NEON implementations (aarch64) ──

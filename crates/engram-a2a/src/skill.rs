@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock};
 
 use engram_core::graph::{Graph, Provenance};
 
+#[allow(unused_imports)]
 use crate::task::{Artifact, MessagePart, TaskMessage, TaskRequest, TaskResponse};
 
 /// Route a task to the appropriate skill handler.
