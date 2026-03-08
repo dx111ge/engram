@@ -1,6 +1,8 @@
 pub mod bitmap;
 pub mod embed_api;
 pub mod embedding;
+#[cfg(feature = "onnx")]
+pub mod embed_onnx;
 pub mod fulltext;
 pub mod hash;
 pub mod hnsw;

@@ -9,6 +9,10 @@ license.workspace = true
 default = ["gpu"]
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
+[[bench]]
+name = "compute_bench"
+harness = false
+
 [dependencies]
 tracing = { workspace = true }
 wgpu = { version = "24", optional = true }

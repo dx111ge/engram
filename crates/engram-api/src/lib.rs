@@ -7,6 +7,8 @@ pub mod auth;
 pub mod grpc;
 pub mod handlers;
 pub mod mcp;
+#[cfg(feature = "mesh")]
+pub mod mesh;
 pub mod natural;
 pub mod server;
 pub mod state;

@@ -64,6 +64,37 @@ Response:
 {"from": "postgresql", "to": "redis", "relationship": "caches_with", "edge_slot": 1}
 ```
 
+#### POST /batch — Bulk store entities and relationships
+
+```bash
+curl -X POST http://localhost:3030/batch \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "entities": [
+      {"entity": "postgresql", "type": "database", "properties": {"version": "16"}, "confidence": 0.95},
+      {"entity": "redis", "type": "cache", "confidence": 0.90},
+      {"entity": "nginx", "type": "proxy", "confidence": 0.90}
+    ],
+    "relations": [
+      {"from": "postgresql", "to": "redis", "relationship": "caches_with", "confidence": 0.9},
+      {"from": "nginx", "to": "postgresql", "relationship": "proxies", "confidence": 0.85}
+    ],
+    "source": "infrastructure-scan"
+  }'
+```
+
+Response:
+```json
+{"nodes_stored": 3, "edges_created": 2, "errors": null}
+```
+
+All entities and relationships are written under a single write lock with a single deferred checkpoint. This is dramatically faster than individual `/store` + `/relate` calls for bulk ingestion (e.g., mesh delta sync, imports).
+
+If some operations fail, the successful ones are kept and errors are returned:
+```json
+{"nodes_stored": 2, "edges_created": 1, "errors": ["relate foo -> bar: node not found"]}
+```
+
 #### POST /query — Graph traversal
 
 ```bash
@@ -167,6 +198,99 @@ curl -X POST http://localhost:3030/learn/derive \
   }'
 ```
 
+### JSON-LD (Linked Data)
+
+#### GET /export/jsonld -- Export entire graph as JSON-LD
+
+Returns the full knowledge graph as a JSON-LD document with `@context`, `@graph`, and semantic URIs. Nodes are subjects, edges are predicates, properties are datatype assertions.
+
+```bash
+curl http://localhost:3030/export/jsonld
+```
+
+```json
+{
+  "@context": {
+    "engram": "engram://vocab/",
+    "schema": "https://schema.org/",
+    "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+    "rdfs": "http://www.w3.org/2000/01/rdf-schema#"
+  },
+  "@graph": [
+    {
+      "@id": "engram://node/Rust",
+      "@type": "engram:Language",
+      "rdfs:label": "Rust",
+      "engram:confidence": 0.8,
+      "engram:compiles_to": { "@id": "engram://node/WebAssembly", "engram:confidence": 0.8 }
+    }
+  ]
+}
+```
+
+#### POST /import/jsonld -- Import JSON-LD into the graph
+
+Parses a JSON-LD document and creates nodes and edges. Supports `@graph` arrays, `@type`, `rdfs:label`, and `schema:name` for labels. Object references (with `@id`) become edges.
+
+```bash
+curl -X POST http://localhost:3030/import/jsonld \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "data": {
+      "@context": { "schema": "https://schema.org/" },
+      "@graph": [
+        {
+          "@id": "schema:Rust",
+          "@type": "schema:ComputerLanguage",
+          "rdfs:label": "Rust",
+          "schema:dateCreated": "2010",
+          "schema:creator": { "@id": "schema:GraydonHoare" }
+        },
+        {
+          "@id": "schema:GraydonHoare",
+          "rdfs:label": "Graydon Hoare",
+          "@type": "schema:Person"
+        }
+      ]
+    },
+    "source": "schema.org"
+  }'
+```
+
+```json
+{ "nodes_imported": 2, "edges_imported": 1, "errors": null }
+```
+
+### Vector Quantization
+
+#### POST /quantize -- Enable or disable int8 quantization
+
+Int8 scalar quantization reduces vector memory by ~4x with ~1% accuracy loss. When enabled, HNSW graph traversal uses quantized int8 vectors for fast candidate filtering, then reranks final results with full f32 precision.
+
+```bash
+# Enable int8 quantization
+curl -X POST http://localhost:3030/quantize \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true}'
+```
+
+```json
+{"mode": "int8", "vector_memory_bytes": 460800}
+```
+
+```bash
+# Disable quantization
+curl -X POST http://localhost:3030/quantize \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": false}'
+```
+
+```json
+{"mode": "none", "vector_memory_bytes": 153600}
+```
+
+**Memory impact**: A 1M vector collection at 384 dimensions uses ~1.5 GB with f32 only. With int8 enabled, the f32 vectors are kept for reranking accuracy, and int8 copies are added for traversal. For storage-only savings (future), binary quantization (32x) and product quantization are planned.
+
 ### System
 
 #### GET /health
@@ -197,6 +321,29 @@ curl http://localhost:3030/explain/postgresql
 
 Returns confidence, properties, co-occurrences, and all edges.
 
+#### GET /compute — Hardware and embedder info
+
+```bash
+curl http://localhost:3030/compute
+```
+
+```json
+{
+  "cpu_cores": 20,
+  "has_avx2": true,
+  "has_neon": false,
+  "has_gpu": true,
+  "gpu_name": "NVIDIA GeForce RTX 5070",
+  "gpu_backend": "Vulkan",
+  "has_npu": true,
+  "npu_name": "Intel(R) Graphics",
+  "dedicated_npu": [],
+  "embedder_model": "nomic-embed-text-v2-moe:latest",
+  "embedder_dim": 768,
+  "embedder_endpoint": "http://localhost:11434/v1"
+}
+```
+
 #### GET /tools — LLM tool definitions
 
 ```bash
@@ -204,6 +351,15 @@ curl http://localhost:3030/tools
 ```
 
 Returns OpenAI-compatible tool/function definitions for LLM integration.
+
+## Concurrency Model
+
+Engram uses **RwLock** (not Mutex) for graph access:
+
+- **Readers** (`/search`, `/query`, `/similar`, `/ask`, `/node/{label}`, `/explain/{label}`, `/stats`) acquire a **read lock** and can run concurrently with each other.
+- **Writers** (`/store`, `/relate`, `/batch`, `/tell`, `/delete`, `/learn/*`) acquire an **exclusive write lock**.
+- **Deferred checkpoint**: Writes go to WAL + mmap immediately (crash-recoverable), but the expensive disk flush (`msync`/`FlushViewOfFile`) happens on a background timer every 5 seconds. This means writes complete in microseconds instead of milliseconds.
+- **Batch endpoint**: For bulk operations (imports, mesh sync), use `/batch` instead of individual calls. One write lock acquisition, one checkpoint — not N.
 
 ## CORS
 

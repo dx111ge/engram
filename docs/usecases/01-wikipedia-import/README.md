@@ -24,12 +24,55 @@ This walkthrough imports four programming language articles (Python, Rust, JavaS
 - `engram` binary on your PATH
 - Python 3.9+ with `requests` installed (`pip install requests`)
 - Internet access for the Wikipedia API
+- (Optional) An embedding model for semantic search — see **Embedder Setup** below
+
+### Embedder Setup (Optional)
+
+Engram supports semantic search via any OpenAI-compatible embeddings API. The most common local option is **Ollama**.
+
+#### Install Ollama and an embedding model
+
+```bash
+# Install Ollama (https://ollama.com/download)
+# Then pull an embedding model:
+ollama pull nomic-embed-text-v2-moe
+```
+
+Other models that work: `nomic-embed-text`, `mxbai-embed-large`, `all-minilm`, `snowflake-arctic-embed`.
+
+#### Configure engram
+
+Set environment variables before starting the server:
+
+```bash
+export ENGRAM_EMBED_ENDPOINT=http://localhost:11434/v1
+export ENGRAM_EMBED_MODEL=nomic-embed-text-v2-moe:latest
+```
+
+That's it. Engram auto-detects the embedding dimension by sending a probe request at startup. You do **not** need to set `ENGRAM_EMBED_DIM` unless you want to override the default dimension (some Matryoshka models like nomic-embed-text-v2-moe support multiple dimensions: 256, 512, 768).
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `ENGRAM_EMBED_ENDPOINT` | Yes | — | Base URL of the embeddings API (must serve `/embeddings`) |
+| `ENGRAM_EMBED_MODEL` | No | `multilingual-e5-small` | Model name passed in the API request |
+| `ENGRAM_EMBED_DIM` | No | Auto-detected | Override embedding dimension (auto-probe if not set) |
+| `ENGRAM_EMBED_API_KEY` | No | — | API key for authenticated endpoints (OpenAI, Azure, etc.) |
+
+**Compatible APIs**: Ollama, OpenAI, vLLM, LiteLLM, text-embeddings-inference, Azure OpenAI — anything that serves the OpenAI `/v1/embeddings` format.
 
 ### Step-by-Step Implementation
 
 #### Step 1: Start the engram server
 
+Without embedder (keyword search only):
 ```bash
+engram serve wiki.brain 127.0.0.1:3030
+```
+
+With embedder (keyword + semantic search):
+```bash
+ENGRAM_EMBED_ENDPOINT=http://localhost:11434/v1 \
+ENGRAM_EMBED_MODEL=nomic-embed-text-v2-moe:latest \
 engram serve wiki.brain 127.0.0.1:3030
 ```
 

@@ -3,7 +3,7 @@
 **Version:** 0.1.0
 **Last updated:** 2026-03-07
 
-This directory contains ten end-to-end walkthroughs showing how to use engram in real applications. Each walkthrough is reproducible: every command, script, and expected output is shown as it actually runs against engram v0.1.0. Where external tools are required beyond the engram binary, this is called out explicitly.
+This directory contains eleven end-to-end walkthroughs showing how to use engram in real applications. Each walkthrough is reproducible: every command, script, and expected output is shown as it actually runs against engram v0.1.0. Where external tools are required beyond the engram binary, this is called out explicitly.
 
 ## Use Cases
 
@@ -19,6 +19,7 @@ This directory contains ten end-to-end walkthroughs showing how to use engram in
 | 8 | [Fact Checker](08-fact-checker/) | Multi-source claim verification with source reliability tiers | Source reliability, corroboration, contradiction handling, credibility rules |
 | 9 | [Web Search Import](09-web-search-import/) | Progressive knowledge building from web search results | Case-insensitive dedup, iterative deepening, scheduled import, decay |
 | 10 | [NER Entity Extraction](10-ner-entity-extraction/) | spaCy NER pipeline for extracting entities and relationships from text | NER, dependency parsing, co-occurrence, entity resolution, custom patterns |
+| 11 | [Semantic Web](11-semantic-web/) | JSON-LD import/export for linked data interoperability | JSON-LD, Wikidata, schema.org, RDF roundtrip, inference enrichment |
 
 ---
 
@@ -73,6 +74,13 @@ engram search "database NOT mysql"           Boolean NOT
 | POST | /learn/derive | Run inference rules and create derived edges |
 | GET | /health | Health check |
 | GET | /stats | Node and edge counts |
+| POST | /batch | Bulk store entities and relationships |
+| GET | /export/jsonld | Export graph as JSON-LD linked data |
+| POST | /import/jsonld | Import JSON-LD data into the graph |
+| POST | /rules | Load push-based inference rules |
+| GET | /rules | List loaded rules |
+| DELETE | /rules | Clear all loaded rules |
+| GET | /compute | Hardware and embedder info |
 | GET | /tools | MCP tool definitions |
 
 ### Confidence Source Table

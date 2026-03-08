@@ -36,12 +36,14 @@ const engram = {
   // Endpoints
   health()          { return this._fetch('/health'); },
   stats()           { return this._fetch('/stats'); },
+  compute()         { return this._fetch('/compute'); },
   getNode(label)    { return this._fetch(`/node/${encodeURIComponent(label)}`); },
   deleteNode(label) { return this._fetch(`/node/${encodeURIComponent(label)}`, { method: 'DELETE' }); },
   explain(label)    { return this._fetch(`/explain/${encodeURIComponent(label)}`); },
 
   store(data)       { return this._post('/store', data); },
   relate(data)      { return this._post('/relate', data); },
+  batch(data)       { return this._post('/batch', data); },
   query(data)       { return this._post('/query', data); },
   search(data)      { return this._post('/search', data); },
   similar(data)     { return this._post('/similar', data); },
@@ -52,6 +54,15 @@ const engram = {
   correct(data)     { return this._post('/learn/correct', data); },
   decay()           { return this._post('/learn/decay', {}); },
   derive(data)      { return this._post('/learn/derive', data); },
+
+  // JSON-LD
+  exportJsonLd()    { return this._fetch('/export/jsonld'); },
+  importJsonLd(data){ return this._post('/import/jsonld', data); },
+
+  // Rules
+  loadRules(data)   { return this._post('/rules', data); },
+  listRules()       { return this._fetch('/rules'); },
+  clearRules()      { return this._fetch('/rules', { method: 'DELETE' }); },
 };
 
 

@@ -109,6 +109,8 @@ pub struct Graph {
     cooccurrence: CooccurrenceTracker,
     /// Source type per node slot (for confidence cap lookups)
     source_types: HashMap<u64, SourceType>,
+    /// Compute planner for GPU/NPU-accelerated similarity search
+    compute_planner: Option<engram_compute::planner::ComputePlanner>,
 }
 
 impl Graph {
@@ -137,6 +139,7 @@ impl Graph {
             embedder: None,
             cooccurrence: CooccurrenceTracker::new(path),
             source_types: HashMap::new(),
+            compute_planner: None,
         })
     }
 
@@ -166,6 +169,7 @@ impl Graph {
             embedder: None,
             cooccurrence,
             source_types: HashMap::new(),
+            compute_planner: None,
         };
         graph.rebuild_indexes()?;
         Ok(graph)
@@ -174,6 +178,29 @@ impl Graph {
     /// Set the embedding model for automatic vector generation.
     pub fn set_embedder(&mut self, embedder: Box<dyn Embedder>) {
         self.embedder = Some(embedder);
+    }
+
+    /// Set the compute planner for GPU/NPU-accelerated similarity search.
+    pub fn set_compute_planner(&mut self, planner: engram_compute::planner::ComputePlanner) {
+        self.compute_planner = Some(planner);
+    }
+
+    /// Enable or disable int8 vector quantization.
+    /// When enabled, HNSW search uses quantized vectors for traversal
+    /// and reranks final results with full f32 for accuracy.
+    /// Reduces vector memory by ~4x with ~1% accuracy loss.
+    pub fn set_vector_quantization(&mut self, mode: crate::index::hnsw::QuantizationMode) {
+        self.hnsw.set_quantization(mode);
+    }
+
+    /// Get the current vector quantization mode.
+    pub fn vector_quantization_mode(&self) -> crate::index::hnsw::QuantizationMode {
+        self.hnsw.quantization_mode()
+    }
+
+    /// Get approximate vector memory usage in bytes.
+    pub fn vector_memory_bytes(&self) -> usize {
+        self.hnsw.memory_bytes()
     }
 
     /// Store a new node with a label. Returns node ID.
@@ -509,7 +536,33 @@ impl Graph {
     }
 
     /// Search by vector similarity (nearest neighbors).
+    /// Uses GPU/NPU via compute planner when available and vector count is large enough.
     pub fn search_vector(&self, query_vector: &[f32], limit: usize) -> Result<Vec<NodeSearchResult>> {
+        // Try GPU/NPU brute-force for large vector sets when a planner is configured
+        if let Some(ref planner) = self.compute_planner {
+            let vec_count = self.hnsw.vector_count();
+            let backend = planner.select_similarity_backend(vec_count);
+            if backend != engram_compute::planner::Backend::Cpu {
+                if let Some(ranked) = self.hnsw.brute_force_with_planner(query_vector, limit, planner) {
+                    let mut results = Vec::with_capacity(ranked.len());
+                    for (slot, distance) in ranked {
+                        let node = self.brain.read_node(slot)?;
+                        if node.is_active() {
+                            results.push(NodeSearchResult {
+                                slot,
+                                node_id: node.id,
+                                label: node.label().to_string(),
+                                confidence: node.confidence,
+                                score: 1.0 - distance as f64,
+                            });
+                        }
+                    }
+                    return Ok(results);
+                }
+                // Fall through to HNSW if GPU/NPU failed
+            }
+        }
+
         let hits = self.hnsw.search(query_vector, limit);
         let mut results = Vec::with_capacity(hits.len());
         for hit in hits {
@@ -643,9 +696,64 @@ impl Graph {
         self.type_registry.name_or_default(type_id)
     }
 
+    /// Read an edge by slot and resolve labels/relationship into an EdgeView.
+    pub fn read_edge_view(&self, edge_slot: u64) -> Result<EdgeView> {
+        let edge = self.brain.read_edge(edge_slot)?;
+        let from_label = self.label_for_id(edge.from_node)?;
+        let to_label = self.label_for_id(edge.to_node)?;
+        let rel_name = self.type_registry.name_or_default(edge.edge_type);
+        Ok(EdgeView {
+            from: from_label,
+            to: to_label,
+            relationship: rel_name,
+            confidence: edge.confidence,
+        })
+    }
+
     /// Get stats: (node_count, edge_count)
     pub fn stats(&self) -> (u64, u64) {
         self.brain.stats()
+    }
+
+    /// Iterate all active nodes, returning (label, node_type_id, confidence, memory_tier) for each.
+    pub fn all_nodes(&self) -> Result<Vec<NodeSnapshot>> {
+        let (node_count, _) = self.brain.stats();
+        let mut result = Vec::new();
+        for slot in 0..node_count {
+            let node = self.brain.read_node(slot)?;
+            if node.is_active() {
+                let label = node.label().to_string();
+                let node_type_name = self.node_type_names.get(node.node_type as usize).cloned();
+                let properties = self.props.get_all(slot).cloned().unwrap_or_default();
+                result.push(NodeSnapshot {
+                    label,
+                    node_type: node_type_name,
+                    confidence: node.confidence,
+                    memory_tier: node.memory_tier,
+                    properties,
+                });
+            }
+        }
+        Ok(result)
+    }
+
+    /// Iterate all edges, returning (from_label, to_label, relationship, confidence).
+    pub fn all_edges(&self) -> Result<Vec<EdgeView>> {
+        let (_, edge_count) = self.brain.stats();
+        let mut result = Vec::new();
+        for slot in 0..edge_count {
+            let edge = self.brain.read_edge(slot)?;
+            let from_label = self.label_for_id(edge.from_node)?;
+            let to_label = self.label_for_id(edge.to_node)?;
+            let rel_name = self.type_registry.name_or_default(edge.edge_type);
+            result.push(EdgeView {
+                from: from_label,
+                to: to_label,
+                relationship: rel_name,
+                confidence: edge.confidence,
+            });
+        }
+        Ok(result)
     }
 
     // --- Learning operations ---
@@ -1789,6 +1897,16 @@ impl std::fmt::Display for NodeSearchResult {
             write!(f, "{} (id: {}, confidence: {:.2})", self.label, self.node_id, self.confidence)
         }
     }
+}
+
+/// Snapshot of a node for export purposes.
+#[derive(Debug, Clone)]
+pub struct NodeSnapshot {
+    pub label: String,
+    pub node_type: Option<String>,
+    pub confidence: f32,
+    pub memory_tier: u8,
+    pub properties: HashMap<String, String>,
 }
 
 /// A human-readable view of an edge

@@ -199,25 +199,64 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let path = default_path(args, 2);
     let addr = args.get(3).map(|s| s.as_str()).unwrap_or("0.0.0.0:3030");
 
+    // Detect hardware and print compute capabilities
+    let hw = engram_compute::planner::HardwareInfo::detect();
+    println!("Compute backends:");
+    print!("  CPU: {} cores", hw.cpu_cores);
+    if hw.has_avx2 { print!(", AVX2+FMA"); }
+    if hw.has_neon { print!(", NEON"); }
+    println!();
+    if hw.has_gpu {
+        println!("  GPU: {} ({})", hw.gpu_name, hw.gpu_backend);
+    } else {
+        println!("  GPU: none detected");
+    }
+    if hw.has_npu {
+        println!("  NPU: {}", hw.npu_name);
+    } else {
+        println!("  NPU: none detected");
+    }
+    for npu in &hw.dedicated_npu {
+        println!("  NPU hw: {npu}");
+    }
+
     let mut g = if path.exists() {
         Graph::open(&path)?
     } else {
         Graph::create(&path)?
     };
 
+    // Wire the compute planner into the graph for GPU/NPU-accelerated search
+    let planner = engram_compute::planner::ComputePlanner::new();
+    g.set_compute_planner(planner);
+
     // Auto-configure embedder from environment if ENGRAM_EMBED_ENDPOINT is set
+    let mut state = engram_api::state::AppState::new(g);
     if let Some(embedder) = engram_core::ApiEmbedder::from_env() {
-        println!("Embedder: {} ({}D) via {}", embedder.model_id(), embedder.dim(),
-            std::env::var("ENGRAM_EMBED_ENDPOINT").unwrap_or_default());
-        g.set_embedder(Box::new(embedder));
+        let model = embedder.model_id().to_string();
+        let dim = embedder.dim();
+        let endpoint = std::env::var("ENGRAM_EMBED_ENDPOINT").unwrap_or_default();
+        println!("Embedder: {} ({}D, auto-detected) via {}", model, dim, endpoint);
+        state.set_embedder_info(model, dim, endpoint);
+        state.graph.write().unwrap().set_embedder(Box::new(embedder));
     } else {
         println!("Embedder: none (set ENGRAM_EMBED_ENDPOINT for semantic search)");
     }
 
-    let state = engram_api::state::AppState::new(g);
+    let grpc_addr = args.get(4).map(|s| s.as_str()).unwrap_or("0.0.0.0:50051");
+    println!("HTTP: {addr}");
+    println!("gRPC: {grpc_addr}");
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
+        let grpc_state = state.clone();
+        let grpc_addr_owned = grpc_addr.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = engram_api::grpc::serve_grpc(grpc_state, &grpc_addr_owned).await {
+                eprintln!("gRPC server error: {e}");
+            }
+        });
+
         engram_api::server::serve(state, addr).await
     })?;
 
@@ -267,7 +306,7 @@ fn print_usage() {
     println!("  engram query <label> [depth] [path]           Query a node and its edges");
     println!("  engram search <query> [path]                  Search (BM25, filters, boolean)");
     println!("  engram delete <label> [path]                  Soft-delete a node");
-    println!("  engram serve [path] [addr]                    Start HTTP API server (default: 0.0.0.0:3030)");
+    println!("  engram serve [path] [addr] [grpc_addr]         Start HTTP+gRPC server (default: 0.0.0.0:3030, gRPC: 50051)");
     println!("  engram mcp [path]                             Start MCP server (JSON-RPC over stdio)");
     println!("  engram reindex [path]                         Re-embed all nodes (after model change)");
     println!();

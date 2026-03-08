@@ -1,7 +1,7 @@
 # Engram Roadmap
 
 **Version:** 0.1.0
-**Last updated:** 2026-03-07
+**Last updated:** 2026-03-08
 
 This document tracks planned improvements, open design questions, and future directions for engram. Items are grouped by priority and effort estimate.
 
@@ -18,12 +18,12 @@ This document tracks planned improvements, open design questions, and future dir
 | Property filters and tier filters in search | Done |
 | Forward-chaining inference engine | Done |
 | CPU SIMD compute (AVX2+FMA on x86_64, NEON on aarch64) | Done |
-| GPU compute via wgpu (DX12, Vulkan, Metal) | Done |
+| GPU compute via wgpu (DX12, Vulkan, Metal) with chunked dispatch | Done |
 | NPU detection and low-power compute routing | Done |
 | Compute planner with automatic workload routing | Done |
-| HTTP REST API (axum) with 18 endpoints | Done |
+| HTTP REST API (axum) with 20 endpoints (incl. /batch, /compute) | Done |
 | MCP server (JSON-RPC over stdio) | Done |
-| A2A protocol support (agent-to-agent) | Done |
+| A2A protocol support (agent-to-agent skill routing) | Done |
 | Natural language interface (~35 patterns for /tell, ~12 for /ask) | Done |
 | Optional LLM fallback for NL parsing (ENGRAM_LLM_ENDPOINT) | Done |
 | Case-insensitive label matching | Done |
@@ -31,15 +31,27 @@ This document tracks planned improvements, open design questions, and future dir
 | Single-file .brain storage with WAL crash recovery | Done |
 | Cross-platform: Windows, macOS, Linux (x86_64 + aarch64) | Done |
 | Knowledge mesh peer model with trust-based sync | Done |
-| SHA-256 identity for mesh peers | Done |
+| Ed25519 identity for mesh peers | Done |
+| External API embedder (Ollama, OpenAI, vLLM compatible) | Done |
+| Auto-detect embedding dimensions (Matryoshka model support) | Done |
+| Web UI frontend (dashboard, graph, search, NL, import, learning) | Done |
+| RwLock concurrency (concurrent readers, exclusive writers) | Done |
+| Deferred checkpoint (background 5s flush, WAL-protected writes) | Done |
+| Batch API for bulk ingestion (POST /batch) | Done |
+| Push-based rule triggers (async after store/relate/tell) | Done |
+| JSON-LD export/import (GET /export/jsonld, POST /import/jsonld) | Done |
+| Int8 vector quantization (4x memory reduction, POST /quantize) | Done |
+| Mesh HTTP transport (8 endpoints, peer management, sync, audit) | Done |
+| Local ONNX embedder (ort + tokenizers, sidecar model auto-detect) | Done |
+| Real gRPC endpoint (tonic + prost, protobuf binary, port 50051) | Done |
 
 ---
 
-## Near-Term Improvements
+## Open Issues (v0.1.0 scope)
 
 ### 1. Push-Based Rule Triggers
 
-**Status:** Open topic -- low effort
+**Status:** Done
 **Priority:** High
 
 Currently inference rules are pull-based: you call `POST /learn/derive` to evaluate rules. The rule engine already exists and works. The improvement is to auto-trigger matching rules after every `store` or `relate` operation.
@@ -61,7 +73,7 @@ Currently inference rules are pull-based: you call `POST /learn/derive` to evalu
 
 ### 2. JSON-LD Export / Import
 
-**Status:** Planned
+**Status:** Done
 **Priority:** High
 
 Engram's property graph maps naturally to RDF triples:
@@ -83,18 +95,13 @@ Engram's property graph maps naturally to RDF triples:
 - Import from Wikidata, DBpedia, schema.org directly into a .brain file
 - Handle URI-to-label conversion (strip namespace prefixes)
 
-**Phase 3 -- SPARQL Query Adapter (future):**
-- Translate a subset of SPARQL queries to engram's graph traversal
-- Support basic graph patterns (triple patterns, FILTER, OPTIONAL)
-- Not a full SPARQL 1.1 implementation -- focus on the queries agents actually need
-
 **Why this matters:** The agent ecosystem is moving toward semantic interoperability. Agents will need to share structured knowledge across systems. JSON-LD is the bridge between engram's property graph and the linked data ecosystem (Wikidata, DBpedia, schema.org, other agent knowledge stores).
 
 ---
 
 ### 3. Vector Quantization
 
-**Status:** Planned
+**Status:** Done (int8 scalar quantization)
 **Priority:** Medium
 
 Currently all vectors are stored as full f32 (4 bytes per dimension). For large vector collections, this is wasteful.
@@ -108,9 +115,9 @@ Currently all vectors are stored as full f32 (4 bytes per dimension). For large 
 
 ---
 
-### 4. Mesh Federation -- Production Hardening
+### 4. Mesh Federation -- Transport Layer
 
-**Status:** Architecture exists, needs real-world testing
+**Status:** Done (HTTP transport endpoints wired)
 **Priority:** Medium
 
 The `engram-mesh` crate provides the peer model, trust scoring, delta sync, and conflict resolution. What's needed:
@@ -119,160 +126,53 @@ The `engram-mesh` crate provides the peer model, trust scoring, delta sync, and 
 - **Discovery**: how peers find each other (mDNS for LAN, manual config for WAN)
 - **Selective sync**: sync only specific node types or tiers between peers
 - **Conflict UI**: surface merge conflicts to the user when automatic resolution isn't possible
+- Wire `/batch` endpoint as the receiver for incoming delta sync payloads
 
 **Target use case:** A user with multiple machines (laptop, workstation, home server) where each holds knowledge relevant to its role. The laptop has daily work notes, the workstation has project knowledge with GPU compute, the home server has archival memory. Knowledge flows between them via mesh sync with trust-based confidence propagation.
 
 ---
 
-### 5. Multilingual Embedder Integration
+### 5. Local ONNX Embedder
 
-**Status:** Stub exists (dummy embedder), needs real implementation
-**Priority:** Critical -- required for semantic search to work
-
-For semantic similarity search (`POST /similar`), engram needs an embedding model. The model must be **multilingual** to support knowledge in any language.
-
-**Recommended models:**
-
-| Model | Dimensions | Languages | Size | Notes |
-|-------|-----------|-----------|------|-------|
-| multilingual-e5-small | 384 | 100+ | ~120 MB | Best balance of size, speed, and multilingual quality |
-| multilingual-e5-base | 768 | 100+ | ~280 MB | Better accuracy, heavier |
-| paraphrase-multilingual-MiniLM-L12-v2 | 384 | 50+ | ~120 MB | Sentence-Transformers classic |
-| all-MiniLM-L6-v2 | 384 | English only | ~23 MB | Smallest, English-only fallback |
-
-**Implementation approach:**
-- **ONNX Runtime** (primary): load ONNX-exported models directly in Rust via `ort` crate. No Python dependency, runs on CPU/GPU. Adds the model weight file as a sidecar (not baked into the binary).
-- **External API** (fallback): call an OpenAI-compatible embedding endpoint (`ENGRAM_EMBED_ENDPOINT`). Works with OpenAI, Ollama, vLLM, or any compatible server. Zero local model overhead.
-- **Auto-detect**: if a local ONNX model file exists next to the .brain file, use it. Otherwise check for `ENGRAM_EMBED_ENDPOINT`. Otherwise disable vector search (BM25 still works).
-
-**Why multilingual is essential:**
-- Use Case 3 (multi-language knowledge) requires cross-language similarity
-- "Hund" and "Dog" should be semantically similar even though they share no characters
-- A German question should find English knowledge and vice versa
-- Enterprise users operate in multiple languages
-
-The HNSW index infrastructure already exists. What's missing is the vectorization step.
-
----
-
-### 6. Frontend / Web UI
-
-**Status:** Discussed, not started
-**Priority:** Critical -- essential for usability
-
-A web-based UI for visualizing and interacting with the knowledge graph. This is not optional polish -- without it, engram is accessible only via CLI and curl, which limits adoption to developers.
-
-**Core features:**
-- Graph visualization (nodes + edges, force-directed layout with D3.js or vis.js)
-- Search interface with filter builder (confidence, properties, tiers, boolean)
-- Node detail view with properties, edges, provenance history
-- Learning controls (reinforce, correct, decay) with visual confidence indicators
-- Import wizards (Wikipedia, documents, NER pipeline, web search)
-- Natural language interface (ask/tell with response display)
-- Mesh status dashboard (peer connections, sync history, trust scores)
-
-**Technology decision:**
-- **Separate frontend project** (recommended): React or Svelte app, talks to the HTTP API
-- Served by engram itself (embed static files in binary) or as a standalone SPA
-- CORS is already permissive in the API, so the frontend can run on any port
-
-**Design principles:**
-- Works without JavaScript frameworks for basic views (progressive enhancement)
-- Mobile-responsive (knowledge lookup on phone)
-- Dark mode (developers spend enough time staring at screens)
-
----
-
-### 7. Real gRPC Endpoint
-
-**Status:** Not started
-**Priority:** Low
-
-The current "gRPC-style" routes are standard HTTP/JSON endpoints. Real gRPC would provide:
-- Protobuf binary serialization (faster than JSON for large payloads)
-- HTTP/2 framing (multiplexed streams)
-- Strongly typed service contracts
-- Better tooling for service-to-service communication
-
-**Approach:**
-- Define `.proto` files for all 18 API operations
-- Use `tonic` + `prost` for Rust code generation
-- Run gRPC on a separate port (e.g., 50051) alongside the HTTP API
-- Both APIs backed by the same handlers
-
-**Priority is low** because the HTTP/JSON API works for all current use cases (Python clients, curl, LLM tool calling, MCP). gRPC mainly benefits high-throughput service-to-service communication.
-
----
-
-## Medium-Term Improvements
-
-### 8. Graph Algorithms (PageRank, Community Detection)
-
-**Status:** Not started
+**Status:** Done
 **Priority:** Medium
 
-Built-in graph algorithms would enable analytics without external tools:
+Feature-gated (`--features onnx`) local embedding using `ort` v2.0 + `tokenizers` + `ndarray`:
 
-- **PageRank**: identify the most connected/important entities
-- **Community detection** (Louvain): find clusters of related knowledge
-- **Shortest path**: find the most direct relationship chain between two entities
-- **Betweenness centrality**: identify bridge entities that connect different knowledge domains
-- **Connected components**: find isolated knowledge islands
-
-These could be GPU-accelerated using the existing wgpu compute infrastructure for large graphs.
+- `OnnxEmbedder` implements `Embedder` trait with `Mutex<Session>` for thread safety
+- Auto-detects sidecar files: `{brain}.model.onnx` + `{brain}.tokenizer.json`
+- Mean-pooling + L2 normalization for transformer outputs
+- Tested with multilingual-e5-small (384D, ~120 MB)
+- Falls back to API embedder, then BM25
 
 ---
 
-### 9. Plugin / Extension System
+### 6. Real gRPC Endpoint
 
-**Status:** Not started
+**Status:** Done
 **Priority:** Low
 
-Allow custom importers, exporters, and rule evaluators as plugins:
+Feature-gated (`--features grpc`) real protobuf binary gRPC via tonic + prost:
 
-- **Importers**: RSS feed watcher, email inbox scanner, Slack channel monitor, Git commit history
-- **Exporters**: JSON-LD, CSV, Markdown reports, GraphML
-- **Rule evaluators**: custom rule syntax, external rule engines
-- **Webhooks**: notify external systems when knowledge changes
-
-Could use Rust's dynamic loading (`libloading`) or a simpler approach: shell commands that read/write JSON to engram's API.
+- Code generated from `proto/engram.proto` (13 RPCs)
+- Runs on separate port (default 50051) alongside HTTP API
+- All 13 service methods: Store, Relate, Query, Search, GetNode, DeleteNode, Reinforce, Correct, Decay, Health, Stats, Ask, Tell
+- Without `--features grpc`: JSON-over-HTTP/2 fallback on same paths
+- Tested end-to-end with Python grpcio client
 
 ---
 
-## Long-Term Vision
+## Deferred (Post v0.1.0)
 
-### 10. SPARQL Query Adapter
-
-Translate SPARQL queries to engram's graph operations. Not a full SPARQL 1.1 implementation -- focus on the subset that agents and knowledge tools actually use:
-- Basic graph patterns (triple patterns)
-- FILTER with comparison operators
-- OPTIONAL for left-join semantics
-- LIMIT and OFFSET
-- Property paths (simple, not recursive)
-
-### 11. Temporal Queries
-
-Query knowledge as it was at a specific point in time:
-- "What did we know about server-01 on January 15th?"
-- "Show me the confidence history of this claim"
-- "What changed in the last 24 hours?"
-
-The WAL already records all mutations with timestamps. The temporal index exists. What's needed is a query API that takes a timestamp parameter and reconstructs the graph state at that point.
-
-### 12. Multi-Tenant / Namespace Support
-
-Multiple isolated knowledge graphs in a single engram instance:
-- Each tenant/namespace has its own .brain file
-- API routes include namespace prefix (`/ns/{name}/store`, etc.)
-- Cross-namespace queries with explicit opt-in
-- Per-namespace access control
-
-### 13. Distributed Consensus for Mesh
-
-For mesh deployments where consistency matters more than availability:
-- Raft consensus for critical knowledge (tier: core)
-- Eventual consistency for non-critical knowledge (tier: active, archival)
-- Configurable per-node-type consistency level
+| Feature | Priority | Notes |
+|---------|----------|-------|
+| SPARQL query adapter | Low | Translate SPARQL subset to engram traversal |
+| Temporal queries | Low | Reconstruct graph state at a point in time (WAL infrastructure exists) |
+| Multi-tenant namespaces | Low | Per-namespace .brain files with isolated access |
+| Distributed consensus (Raft) | Low | For mesh deployments needing strong consistency |
+| Graph algorithms (PageRank, Louvain) | Medium | Could be GPU-accelerated |
+| Plugin / extension system | Low | Custom importers, exporters, webhooks |
+| Encryption at rest | Low | Designed as deferred in v0.1.0 |
 
 ---
 
@@ -286,8 +186,6 @@ These need further discussion before implementation:
 
 3. **Embedding model bundling**: include a small model (MiniLM, ~20 MB) in the binary for zero-config semantic search, or keep the binary small and require external embedding?
 
-4. **Frontend architecture**: embedded in the binary (simple deployment) or separate project (better developer experience, larger ecosystem of UI frameworks)?
+4. **RDF mapping**: how to handle RDF features that don't map cleanly to property graphs (blank nodes, named graphs, reification)?
 
-5. **RDF mapping**: how to handle RDF features that don't map cleanly to property graphs (blank nodes, named graphs, reification)?
-
-6. **Quantization strategy**: which quantization method to implement first? int8 is simplest and most universally useful. Binary is fastest for candidate filtering. PQ is most flexible but most complex.
+5. **Quantization strategy**: which quantization method to implement first? int8 is simplest and most universally useful. Binary is fastest for candidate filtering. PQ is most flexible but most complex.

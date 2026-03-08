@@ -48,6 +48,15 @@ router.register('/', async () => {
       </div>
     </div>
 
+    <div class="card mb-2" id="compute-card">
+      <div class="card-header">
+        <h3><i class="fa-solid fa-microchip"></i> Compute Backends</h3>
+      </div>
+      <div id="compute-info" class="text-secondary" style="padding:0.5rem 1rem">
+        Loading...
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <h3><i class="fa-solid fa-diagram-project"></i> Explore Graph</h3>
@@ -85,4 +94,46 @@ router.register('/', async () => {
       document.getElementById('stat-health').style.color = 'var(--error)';
     }
   } catch (_) {}
+
+  // Load compute backends
+  try {
+    const compute = await engram.compute();
+    if (compute) {
+      let html = '<div style="display:grid;grid-template-columns:auto 1fr;gap:0.3rem 1rem;font-size:0.9rem">';
+      html += `<span><i class="fa-solid fa-microprocessor" style="width:1.2em"></i> CPU</span>`;
+      html += `<span>${compute.cpu_cores} cores${compute.has_avx2 ? ', AVX2+FMA' : ''}${compute.has_neon ? ', NEON' : ''}</span>`;
+      if (compute.has_gpu) {
+        html += `<span><i class="fa-solid fa-gpu-card" style="width:1.2em"></i> GPU</span>`;
+        html += `<span style="color:var(--confidence-high)">${escapeHtml(compute.gpu_name)} (${escapeHtml(compute.gpu_backend)})</span>`;
+      } else {
+        html += `<span><i class="fa-solid fa-gpu-card" style="width:1.2em"></i> GPU</span>`;
+        html += `<span class="text-muted">Not detected</span>`;
+      }
+      if (compute.has_npu) {
+        html += `<span><i class="fa-solid fa-brain" style="width:1.2em"></i> NPU</span>`;
+        html += `<span style="color:var(--confidence-high)">${escapeHtml(compute.npu_name)}</span>`;
+      } else {
+        html += `<span><i class="fa-solid fa-brain" style="width:1.2em"></i> NPU</span>`;
+        html += `<span class="text-muted">Not detected</span>`;
+      }
+      if (compute.dedicated_npu && compute.dedicated_npu.length > 0) {
+        for (const npu of compute.dedicated_npu) {
+          html += `<span></span><span style="color:var(--confidence-mid)">NPU hw: ${escapeHtml(npu)}</span>`;
+        }
+      }
+      // Embedder info
+      if (compute.embedder_model) {
+        html += `<span><i class="fa-solid fa-vector-square" style="width:1.2em"></i> Embedder</span>`;
+        html += `<span style="color:var(--confidence-high)">${escapeHtml(compute.embedder_model)} (${compute.embedder_dim}D)</span>`;
+      } else {
+        html += `<span><i class="fa-solid fa-vector-square" style="width:1.2em"></i> Embedder</span>`;
+        html += `<span class="text-muted">Not configured</span>`;
+      }
+      html += '</div>';
+      document.getElementById('compute-info').innerHTML = html;
+    }
+  } catch (_) {
+    const el = document.getElementById('compute-info');
+    if (el) el.innerHTML = '<span class="text-muted">Could not load compute info</span>';
+  }
 });

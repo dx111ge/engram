@@ -10,4 +10,6 @@ pub use storage::error::StorageError;
 pub use graph::Graph;
 pub use index::embedding::{Embedder, EmbedError};
 pub use index::embed_api::ApiEmbedder;
-pub use index::hnsw::HnswIndex;
+#[cfg(feature = "onnx")]
+pub use index::embed_onnx::OnnxEmbedder;
+pub use index::hnsw::{HnswIndex, QuantizationMode};

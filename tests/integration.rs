@@ -681,12 +681,12 @@ fn boolean_search_queries() {
 
 #[test]
 fn a2a_skill_routing() {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, RwLock};
     use engram_a2a::task::{TaskRequest, TaskMessage, TaskState, MessagePart};
     use engram_a2a::skill::route_task;
 
     let (_dir, g) = setup();
-    let graph = Arc::new(Mutex::new(g));
+    let graph = Arc::new(RwLock::new(g));
 
     // -- Store via A2A --
     let req = TaskRequest {
@@ -980,4 +980,70 @@ fn compute_backend_cpu_simd() {
         assert!(dists[0].abs() < 0.01, "NPU: identical distance should be ~0, got {}", dists[0]);
         println!("NPU compute: verified (cosine distances correct)");
     }
+}
+
+#[test]
+fn jsonld_export_import_roundtrip() {
+    let (_dir, mut g) = setup();
+    let p = prov("test");
+
+    // Build a small graph
+    g.store("Rust", &p).unwrap();
+    g.set_node_type("Rust", "Language").unwrap();
+    g.set_property("Rust", "paradigm", "systems").unwrap();
+
+    g.store("WebAssembly", &p).unwrap();
+    g.set_node_type("WebAssembly", "Technology").unwrap();
+
+    g.relate("Rust", "WebAssembly", "compiles_to", &p).unwrap();
+
+    // Export
+    let nodes = g.all_nodes().unwrap();
+    let edges = g.all_edges().unwrap();
+
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(edges.len(), 1);
+
+    // Verify node data
+    let rust_node = nodes.iter().find(|n| n.label == "Rust").unwrap();
+    assert_eq!(rust_node.node_type.as_deref(), Some("Language"));
+    assert_eq!(rust_node.properties.get("paradigm").map(|s| s.as_str()), Some("systems"));
+
+    let wasm_node = nodes.iter().find(|n| n.label == "WebAssembly").unwrap();
+    assert_eq!(wasm_node.node_type.as_deref(), Some("Technology"));
+
+    // Verify edge data
+    assert_eq!(edges[0].from, "Rust");
+    assert_eq!(edges[0].to, "WebAssembly");
+    assert_eq!(edges[0].relationship, "compiles_to");
+
+    // Import into a fresh graph
+    let dir2 = TempDir::new().unwrap();
+    let path2 = dir2.path().join("test2.brain");
+    let mut g2 = Graph::create(&path2).unwrap();
+
+    for node in &nodes {
+        g2.store_with_confidence(&node.label, node.confidence, &p).unwrap();
+        if let Some(ref t) = node.node_type {
+            g2.set_node_type(&node.label, t).unwrap();
+        }
+        for (k, v) in &node.properties {
+            g2.set_property(&node.label, k, v).unwrap();
+        }
+    }
+    for edge in &edges {
+        g2.relate(&edge.from, &edge.to, &edge.relationship, &p).unwrap();
+    }
+
+    // Verify roundtrip
+    let nodes2 = g2.all_nodes().unwrap();
+    let edges2 = g2.all_edges().unwrap();
+    assert_eq!(nodes2.len(), 2);
+    assert_eq!(edges2.len(), 1);
+
+    let rust2 = nodes2.iter().find(|n| n.label == "Rust").unwrap();
+    assert_eq!(rust2.node_type.as_deref(), Some("Language"));
+    assert_eq!(rust2.properties.get("paradigm").map(|s| s.as_str()), Some("systems"));
+
+    println!("JSON-LD roundtrip: 2 nodes, 1 edge exported and re-imported successfully");
 }

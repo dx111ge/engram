@@ -30,16 +30,60 @@ impl ApiEmbedder {
     }
 
     /// Create from environment variables. Returns None if ENGRAM_EMBED_ENDPOINT is not set.
+    ///
+    /// If ENGRAM_EMBED_DIM is not set, sends a probe request to auto-detect the dimension.
+    /// This handles Matryoshka models (like nomic-embed-text-v2-moe) that support multiple dimensions.
     pub fn from_env() -> Option<Self> {
         let endpoint = std::env::var("ENGRAM_EMBED_ENDPOINT").ok()?;
         let model =
             std::env::var("ENGRAM_EMBED_MODEL").unwrap_or_else(|_| "multilingual-e5-small".into());
-        let dim: usize = std::env::var("ENGRAM_EMBED_DIM")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(384);
         let api_key = std::env::var("ENGRAM_EMBED_API_KEY").ok();
+
+        // If ENGRAM_EMBED_DIM is explicitly set, use it. Otherwise, auto-detect.
+        let dim: usize = match std::env::var("ENGRAM_EMBED_DIM").ok().and_then(|s| s.parse().ok()) {
+            Some(d) => d,
+            None => {
+                // Auto-detect: send a probe embedding and measure the dimension
+                let mut embedder = Self::new(endpoint.clone(), model.clone(), 0, api_key.clone());
+                match embedder.probe_dimension() {
+                    Ok(d) => d,
+                    Err(_) => 384, // safe fallback
+                }
+            }
+        };
+
         Some(Self::new(endpoint, model, dim, api_key))
+    }
+
+    /// Send a probe embedding to detect the model's output dimension.
+    pub fn probe_dimension(&self) -> Result<usize, EmbedError> {
+        let body = format!(
+            r#"{{"model":"{}","input":"dimension probe"}}"#,
+            escape_json(&self.model)
+        );
+        let url = format!("{}/embeddings", self.endpoint);
+        let response_body = http_post(&url, &body, self.api_key.as_deref())
+            .map_err(EmbedError::RuntimeError)?;
+
+        // Parse just the first embedding array to get its length
+        let embed_key = response_body
+            .find("\"embedding\"")
+            .ok_or_else(|| EmbedError::RuntimeError("probe: missing 'embedding' field".into()))?;
+        let arr_open = response_body[embed_key..]
+            .find('[')
+            .map(|p| embed_key + p)
+            .ok_or_else(|| EmbedError::RuntimeError("probe: missing array".into()))?;
+        let arr_close = response_body[arr_open..]
+            .find(']')
+            .map(|p| arr_open + p)
+            .ok_or_else(|| EmbedError::RuntimeError("probe: unclosed array".into()))?;
+
+        let arr_str = &response_body[arr_open + 1..arr_close];
+        let count = arr_str.split(',').filter(|s| !s.trim().is_empty()).count();
+        if count == 0 {
+            return Err(EmbedError::RuntimeError("probe: empty embedding".into()));
+        }
+        Ok(count)
     }
 
     fn call_api(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
@@ -325,7 +369,7 @@ fn parse_embeddings_response(
             .filter_map(|s| s.trim().parse::<f32>().ok())
             .collect();
 
-        if values.len() != expected_dim {
+        if expected_dim > 0 && values.len() != expected_dim {
             return Err(EmbedError::DimensionMismatch {
                 expected: expected_dim,
                 got: values.len(),

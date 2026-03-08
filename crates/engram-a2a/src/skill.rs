@@ -4,7 +4,7 @@
 /// parses the incoming message, executes against the graph, and
 /// returns artifacts.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use engram_core::graph::{Graph, Provenance};
 
@@ -13,7 +13,7 @@ use crate::task::{Artifact, MessagePart, TaskMessage, TaskRequest, TaskResponse}
 /// Route a task to the appropriate skill handler.
 pub fn route_task(
     request: &TaskRequest,
-    graph: &Arc<Mutex<Graph>>,
+    graph: &Arc<RwLock<Graph>>,
 ) -> TaskResponse {
     let task_id = request.id.as_deref().unwrap_or("auto");
     let text = request.message.text();
@@ -29,10 +29,10 @@ pub fn route_task(
 }
 
 /// Store knowledge — handles both text and structured input.
-fn handle_store(task_id: &str, message: &TaskMessage, graph: &Arc<Mutex<Graph>>) -> TaskResponse {
-    let mut g = match graph.lock() {
+fn handle_store(task_id: &str, message: &TaskMessage, graph: &Arc<RwLock<Graph>>) -> TaskResponse {
+    let mut g = match graph.write() {
         Ok(g) => g,
-        Err(_) => return TaskResponse::failed(task_id, "graph lock poisoned"),
+        Err(_) => return TaskResponse::failed(task_id, "graph write lock poisoned"),
     };
     let prov = Provenance::user("a2a");
     let text = message.text();
@@ -85,10 +85,10 @@ fn handle_store_structured(
 }
 
 /// Query knowledge — natural language or structured.
-fn handle_query(task_id: &str, text: &str, graph: &Arc<Mutex<Graph>>) -> TaskResponse {
-    let g = match graph.lock() {
+fn handle_query(task_id: &str, text: &str, graph: &Arc<RwLock<Graph>>) -> TaskResponse {
+    let g = match graph.read() {
         Ok(g) => g,
-        Err(_) => return TaskResponse::failed(task_id, "graph lock poisoned"),
+        Err(_) => return TaskResponse::failed(task_id, "graph read lock poisoned"),
     };
 
     // Use the NL ask handler
@@ -104,10 +104,10 @@ fn handle_query(task_id: &str, text: &str, graph: &Arc<Mutex<Graph>>) -> TaskRes
 }
 
 /// Reason & prove — inference and proof.
-fn handle_reason(task_id: &str, text: &str, graph: &Arc<Mutex<Graph>>) -> TaskResponse {
-    let g = match graph.lock() {
+fn handle_reason(task_id: &str, text: &str, graph: &Arc<RwLock<Graph>>) -> TaskResponse {
+    let g = match graph.read() {
         Ok(g) => g,
-        Err(_) => return TaskResponse::failed(task_id, "graph lock poisoned"),
+        Err(_) => return TaskResponse::failed(task_id, "graph read lock poisoned"),
     };
 
     // Try to extract "from" and "to" for prove, otherwise use search
@@ -149,10 +149,10 @@ fn handle_reason(task_id: &str, text: &str, graph: &Arc<Mutex<Graph>>) -> TaskRe
 }
 
 /// Learn & correct — reinforce, correct, decay.
-fn handle_learn(task_id: &str, message: &TaskMessage, graph: &Arc<Mutex<Graph>>) -> TaskResponse {
-    let mut g = match graph.lock() {
+fn handle_learn(task_id: &str, message: &TaskMessage, graph: &Arc<RwLock<Graph>>) -> TaskResponse {
+    let mut g = match graph.write() {
         Ok(g) => g,
-        Err(_) => return TaskResponse::failed(task_id, "graph lock poisoned"),
+        Err(_) => return TaskResponse::failed(task_id, "graph write lock poisoned"),
     };
 
     let text = message.text();
@@ -232,10 +232,10 @@ fn handle_learn(task_id: &str, message: &TaskMessage, graph: &Arc<Mutex<Graph>>)
 }
 
 /// Explain provenance.
-fn handle_explain(task_id: &str, text: &str, graph: &Arc<Mutex<Graph>>) -> TaskResponse {
-    let g = match graph.lock() {
+fn handle_explain(task_id: &str, text: &str, graph: &Arc<RwLock<Graph>>) -> TaskResponse {
+    let g = match graph.read() {
         Ok(g) => g,
-        Err(_) => return TaskResponse::failed(task_id, "graph lock poisoned"),
+        Err(_) => return TaskResponse::failed(task_id, "graph read lock poisoned"),
     };
 
     // Extract entity name from questions like "How do we know about X?"
@@ -282,13 +282,13 @@ fn handle_explain(task_id: &str, text: &str, graph: &Arc<Mutex<Graph>>) -> TaskR
 mod tests {
     use super::*;
 
-    fn make_graph() -> Arc<Mutex<Graph>> {
+    fn make_graph() -> Arc<RwLock<Graph>> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.brain");
         let g = Graph::create(&path).unwrap();
         // Leak tempdir to keep it alive
         std::mem::forget(dir);
-        Arc::new(Mutex::new(g))
+        Arc::new(RwLock::new(g))
     }
 
     #[test]
@@ -335,7 +335,7 @@ mod tests {
     fn query_skill() {
         let graph = make_graph();
         // Store something first
-        graph.lock().unwrap().store("Rust", &Provenance::user("test")).unwrap();
+        graph.write().unwrap().store("Rust", &Provenance::user("test")).unwrap();
 
         let req = TaskRequest {
             id: Some("t3".to_string()),
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn explain_skill() {
         let graph = make_graph();
-        graph.lock().unwrap().store("Rust", &Provenance::user("test")).unwrap();
+        graph.write().unwrap().store("Rust", &Provenance::user("test")).unwrap();
 
         let req = TaskRequest {
             id: Some("t5".to_string()),
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn learn_reinforce() {
         let graph = make_graph();
-        graph.lock().unwrap().store("Rust", &Provenance::user("test")).unwrap();
+        graph.write().unwrap().store("Rust", &Provenance::user("test")).unwrap();
 
         let req = TaskRequest {
             id: Some("t6".to_string()),
@@ -398,8 +398,8 @@ mod tests {
     #[test]
     fn reason_skill() {
         let graph = make_graph();
-        graph.lock().unwrap().store("A", &Provenance::user("test")).unwrap();
-        graph.lock().unwrap().store("B", &Provenance::user("test")).unwrap();
+        graph.write().unwrap().store("A", &Provenance::user("test")).unwrap();
+        graph.write().unwrap().store("B", &Provenance::user("test")).unwrap();
 
         let req = TaskRequest {
             id: Some("t7".to_string()),

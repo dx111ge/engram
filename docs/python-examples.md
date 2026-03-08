@@ -164,6 +164,22 @@ class EngramClient:
             body["confidence"] = confidence
         return self._post("/relate", body)
 
+    def batch(
+        self,
+        *,
+        entities: list[dict] | None = None,
+        relations: list[dict] | None = None,
+        source: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {}
+        if entities:
+            body["entities"] = entities
+        if relations:
+            body["relations"] = relations
+        if source:
+            body["source"] = source
+        return self._post("/batch", body)
+
     def query(
         self,
         start: str,
@@ -227,6 +243,9 @@ class EngramClient:
 
     def stats(self) -> dict:
         return self._get("/stats")
+
+    def compute(self) -> dict:
+        return self._get("/compute")
 
     def tools(self) -> list:
         return self._get("/tools")
@@ -841,66 +860,37 @@ print(report)
 
 ## 9. Bulk Import
 
-### Import from a Python list
+### Using the batch endpoint (recommended)
+
+The `/batch` endpoint accepts arrays of entities and relationships in a single
+request. Everything runs under one write lock with one deferred checkpoint --
+dramatically faster than individual `/store` + `/relate` calls.
 
 ```python
-import requests
-from typing import Iterable
+client = EngramClient()
 
-
-BASE = "http://localhost:3030"
-
-
-def bulk_store(
-    records: Iterable[dict],
-    *,
-    source: str = "bulk-import",
-    default_confidence: float = 0.75,
-) -> list[dict]:
-    """
-    Store a list of entity dicts. Each dict must have 'entity' and may have
-    'type', 'properties', and 'confidence'.
-
-    Returns a list of store responses.
-    """
-    results = []
-    for rec in records:
-        body = {
-            "entity": rec["entity"],
-            "source": source,
-            "confidence": rec.get("confidence", default_confidence),
-        }
-        if "type" in rec:
-            body["type"] = rec["type"]
-        if "properties" in rec:
-            body["properties"] = rec["properties"]
-
-        resp = requests.post(f"{BASE}/store", json=body)
-        data = resp.json()
-        if "error" in data:
-            print(f"  WARN: could not store {rec['entity']!r}: {data['error']}")
-        else:
-            results.append(data)
-    return results
-
-
-records = [
-    {"entity": "kafka",     "type": "message-broker", "properties": {"version": "3.6"}},
-    {"entity": "zookeeper", "type": "coordinator",     "properties": {"version": "3.8"}},
-    {"entity": "schema-registry", "type": "service",  "confidence": 0.85},
-]
-
-stored = bulk_store(records, source="platform-team")
-print(f"Stored {len(stored)} nodes")
+result = client.batch(
+    entities=[
+        {"entity": "kafka",           "type": "message-broker", "properties": {"version": "3.6"}},
+        {"entity": "zookeeper",       "type": "coordinator",     "properties": {"version": "3.8"}},
+        {"entity": "schema-registry", "type": "service",         "confidence": 0.85},
+    ],
+    relations=[
+        {"from": "kafka",     "to": "zookeeper",       "relationship": "depends_on", "confidence": 0.95},
+        {"from": "kafka",     "to": "schema-registry",  "relationship": "uses",       "confidence": 0.90},
+    ],
+    source="platform-team",
+)
+print(result)
+# {'nodes_stored': 3, 'edges_created': 2, 'errors': None}
 ```
 
 ### Import entities and edges from JSON
 
 ```python
 import json
-import requests
 
-BASE = "http://localhost:3030"
+client = EngramClient()
 
 
 def import_graph_json(path: str, *, source: str = "json-import") -> dict:
@@ -914,55 +904,22 @@ def import_graph_json(path: str, *, source: str = "json-import") -> dict:
             {"from": "...", "to": "...", "relationship": "...", "confidence": 0.8}
         ]
     }
+
+    Uses the /batch endpoint for single-request bulk ingestion.
     """
     with open(path) as f:
         data = json.load(f)
 
-    nodes_ok = 0
-    nodes_err = 0
-    for rec in data.get("entities", []):
-        body = {"entity": rec["entity"], "source": source}
-        if "type" in rec:
-            body["type"] = rec["type"]
-        if "properties" in rec:
-            body["properties"] = rec["properties"]
-        if "confidence" in rec:
-            body["confidence"] = rec["confidence"]
-
-        r = requests.post(f"{BASE}/store", json=body).json()
-        if "error" in r:
-            nodes_err += 1
-        else:
-            nodes_ok += 1
-
-    edges_ok = 0
-    edges_err = 0
-    for rec in data.get("relationships", []):
-        body = {
-            "from": rec["from"],
-            "to": rec["to"],
-            "relationship": rec["relationship"],
-        }
-        if "confidence" in rec:
-            body["confidence"] = rec["confidence"]
-
-        r = requests.post(f"{BASE}/relate", json=body).json()
-        if "error" in r:
-            edges_err += 1
-        else:
-            edges_ok += 1
-
-    return {
-        "nodes_stored": nodes_ok,
-        "nodes_failed": nodes_err,
-        "edges_stored": edges_ok,
-        "edges_failed": edges_err,
-    }
+    return client.batch(
+        entities=data.get("entities"),
+        relations=data.get("relationships"),
+        source=source,
+    )
 
 
 result = import_graph_json("/tmp/platform.json", source="platform-team")
 print(result)
-# {'nodes_stored': 12, 'nodes_failed': 0, 'edges_stored': 18, 'edges_failed': 0}
+# {'nodes_stored': 12, 'edges_created': 18, 'errors': None}
 ```
 
 ### Import from CSV

@@ -144,10 +144,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             })
         }
 
+        /// Max vectors buffer size per dispatch (leave headroom below 128MB limit).
+        const MAX_VECTORS_BUFFER_BYTES: usize = 120 * 1024 * 1024;
+
         /// Compute cosine distances from `query` to each vector on the GPU.
         ///
         /// `vectors_flat` is a contiguous array of N vectors, each of dimension `dim`.
         /// Returns a Vec of distances (1.0 - cosine_similarity), or None on failure.
+        ///
+        /// For large inputs that exceed the GPU buffer size limit, automatically
+        /// splits into chunks and dispatches multiple times.
         pub fn batch_cosine_distances(
             &self,
             query: &[f32],
@@ -159,6 +165,41 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 return Some(Vec::new());
             }
 
+            let bytes_per_vector = dim * std::mem::size_of::<f32>();
+            let total_bytes = count * bytes_per_vector;
+
+            if total_bytes <= Self::MAX_VECTORS_BUFFER_BYTES {
+                // Single dispatch — fits in one buffer
+                return self.dispatch_chunk(query, vectors_flat, dim, count);
+            }
+
+            // Chunked dispatch — split into chunks that fit within buffer limits
+            let max_vectors_per_chunk = Self::MAX_VECTORS_BUFFER_BYTES / bytes_per_vector;
+            let mut all_distances = Vec::with_capacity(count);
+            let mut offset = 0;
+
+            while offset < count {
+                let chunk_count = (count - offset).min(max_vectors_per_chunk);
+                let chunk_start = offset * dim;
+                let chunk_end = chunk_start + chunk_count * dim;
+                let chunk_flat = &vectors_flat[chunk_start..chunk_end];
+
+                let chunk_distances = self.dispatch_chunk(query, chunk_flat, dim, chunk_count)?;
+                all_distances.extend(chunk_distances);
+                offset += chunk_count;
+            }
+
+            Some(all_distances)
+        }
+
+        /// Dispatch a single GPU compute pass for a chunk of vectors.
+        fn dispatch_chunk(
+            &self,
+            query: &[f32],
+            vectors_flat: &[f32],
+            dim: usize,
+            count: usize,
+        ) -> Option<Vec<f32>> {
             let params = GpuParams {
                 dim: dim as u32,
                 count: count as u32,

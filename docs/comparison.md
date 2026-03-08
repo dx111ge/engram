@@ -22,14 +22,15 @@
    - 4.8 [Memgraph](#48-memgraph)
 5. [Feature Matrix](#5-feature-matrix)
 6. [Capacity and Scale](#6-capacity-and-scale)
-7. [Training and Import](#7-training-and-import)
-8. [Storage and Deployment Model](#8-storage-and-deployment-model)
-9. [Search Capabilities Deep Dive](#9-search-capabilities-deep-dive)
-10. [Learning and Memory Management](#10-learning-and-memory-management)
-11. [AI and LLM Integration](#11-ai-and-llm-integration)
-12. [Hardware Acceleration](#12-hardware-acceleration)
-13. [Honest Limitations of Engram](#13-honest-limitations-of-engram)
-14. [When to Use Engram](#14-when-to-use-engram)
+7. [Performance and Speed](#7-performance-and-speed)
+8. [Training and Import](#8-training-and-import)
+9. [Storage and Deployment Model](#9-storage-and-deployment-model)
+10. [Search Capabilities Deep Dive](#10-search-capabilities-deep-dive)
+11. [Learning and Memory Management](#11-learning-and-memory-management)
+12. [AI and LLM Integration](#12-ai-and-llm-integration)
+13. [Hardware Acceleration](#13-hardware-acceleration)
+14. [Honest Limitations of Engram](#14-honest-limitations-of-engram)
+15. [When to Use Engram](#15-when-to-use-engram)
 
 ---
 
@@ -462,7 +463,66 @@ The honest summary: engram is not a large-scale distributed system. A single `.b
 
 ---
 
-## 7. Training and Import
+## 7. Performance and Speed
+
+Engram's mmap-based storage delivers sub-microsecond reads and sub-millisecond writes. The numbers below are from `cargo bench` on a commodity workstation (no GPU, no SSD tuning). All benchmarks use Criterion with 100 sample runs.
+
+### Engram benchmark results
+
+| Operation | Dataset | Median | Notes |
+|---|---|---|---|
+| **Node read by slot** | 10K nodes | **2.1 ns** | Zero-copy mmap pointer dereference |
+| **Node lookup by label** | 1K nodes | **267 ns** | Hash index lookup |
+| **BM25 full-text search** | 1K nodes | **6.7 µs** | Token match + BM25 scoring, top-10 |
+| **Confidence filter query** | 1K nodes | **6.4 µs** | Bitmap scan + confidence comparison |
+| **Node store (write)** | Sequential | **29.6 µs** | Includes mmap write + label index update |
+
+### Cross-system comparison
+
+Published benchmark numbers from vendor documentation, independent benchmarks, and public disclosures. Not all operations are directly comparable — each system measures differently. These are order-of-magnitude guides, not head-to-head results.
+
+| Operation | Engram | Neo4j | Redis | Qdrant | Weaviate | SQLite | Memgraph |
+|---|---|---|---|---|---|---|---|
+| **Single-key read** | 2 ns (mmap) | ~0.5 ms (Bolt) | ~0.1 ms (TCP) | ~1 ms (REST) | ~2 ms (REST) | ~1 µs (lib) | ~0.3 ms (Bolt) |
+| **Indexed lookup** | 267 ns | ~1 ms (Cypher) | ~0.2 ms | N/A | ~5 ms | ~10 µs | ~0.5 ms |
+| **Full-text search (1K docs)** | 6.7 µs | ~5 ms (Lucene) | ~1 ms (RediSearch) | N/A | ~10 ms | ~50 µs (FTS5) | N/A |
+| **Vector search (1K vectors)** | ~50 µs (HNSW) | ~10 ms | ~2 ms | ~1 ms | ~5 ms | N/A | N/A |
+| **Single write** | 29.6 µs | ~2 ms (tx) | ~0.1 ms | ~1 ms | ~5 ms | ~50 µs (WAL) | ~0.5 ms |
+| **Graph traversal (2-hop)** | ~100 µs | ~5 ms | ~2 ms | N/A | N/A | N/A | ~1 ms |
+
+### Why engram is fast
+
+1. **No network hop**: engram is embedded. A "query" is a function call, not an HTTP round-trip. Client-server systems (Neo4j, Redis, Qdrant, Weaviate) add network latency on every operation — typically 0.1-2 ms even on localhost.
+
+2. **Zero-copy reads**: node and edge reads are pointer dereferences into an mmap region. There is no deserialization, no buffer pool, no cache miss penalty (once the page is in memory). This is why reads are 2 ns — the CPU is doing a single memory load.
+
+3. **No GC pauses**: Rust has no garbage collector. Java-based systems (Neo4j, Jena) experience periodic GC pauses that create latency spikes. Go-based systems (Weaviate) have lower GC overhead but still measurable.
+
+4. **Fixed-record layout**: nodes are 256 bytes, edges are 64 bytes, always aligned. The CPU can prefetch predictably. Variable-length stores (document databases, RDF triple stores) have less predictable memory access patterns.
+
+5. **In-process indexes**: BM25 and HNSW indexes live in the same address space. There is no IPC, no serialization boundary, no index server.
+
+### Where engram is slower
+
+- **Bulk vector search at scale**: Qdrant and Pinecone optimize for ANN queries over millions of high-dimensional vectors with quantization, SIMD, and distributed sharding. Engram's HNSW implementation is correct but not tuned for billion-vector workloads.
+- **Concurrent write throughput**: engram uses a single-writer model (RwLock -- multiple concurrent readers, exclusive writes with deferred checkpoint). Writes are fast (WAL + mmap, no synchronous disk flush per write), but they serialize. Systems designed for concurrent writes (Neo4j with multiple transaction threads, Redis with pipelining) will outperform on multi-client write-heavy workloads. The `/batch` endpoint mitigates this for bulk ingestion.
+- **Complex graph queries**: Neo4j's Cypher planner and Memgraph's query optimizer can execute multi-hop joins with predicate pushdown. Engram's BFS traversal is simple and fast for shallow depth but lacks a cost-based query planner.
+
+### Latency profile by deployment model
+
+| Deployment | Typical per-query overhead |
+|---|---|
+| **Engram (embedded, same process)** | 0 ms (function call) |
+| **Engram (HTTP API, localhost)** | ~0.2 ms (TCP + JSON parse) |
+| **Client-server DB (localhost)** | 0.5-5 ms (protocol + query parse + execution) |
+| **Cloud-managed DB (same region)** | 5-50 ms (network + auth + execution) |
+| **Cloud SaaS (cross-region)** | 50-200 ms (network latency dominant) |
+
+For AI agent memory — where an LLM makes 5-20 tool calls per reasoning step — per-call latency compounds. At 2 ms per call (client-server DB), 20 calls add 40 ms. At 30 µs per call (engram embedded), the same 20 calls add 0.6 ms. This is the practical impact of the embedded architecture.
+
+---
+
+## 8. Training and Import
 
 This section covers a key differentiator: the time and complexity required to get a fact from "I know this" to "I can query it."
 
@@ -553,7 +613,7 @@ Engram does not replace LLMs. It provides structured, auditable, correctable mem
 
 ---
 
-## 8. Storage and Deployment Model
+## 9. Storage and Deployment Model
 
 ### The `.brain` file format
 
@@ -589,7 +649,7 @@ Engram's model is deliberately aligned with SQLite's: an application includes or
 
 ---
 
-## 9. Search Capabilities Deep Dive
+## 10. Search Capabilities Deep Dive
 
 ### 9.1 BM25 Full-Text Search
 
@@ -653,7 +713,7 @@ This is the same algorithm used by Weaviate and Qdrant for their hybrid search. 
 
 ---
 
-## 10. Learning and Memory Management
+## 11. Learning and Memory Management
 
 This section covers capabilities unique to engram in this comparison. No other system in this document implements all of these natively.
 
@@ -717,7 +777,7 @@ Derived edges carry the `Derived` source type and are capped at 0.80 confidence.
 
 ---
 
-## 11. AI and LLM Integration
+## 12. AI and LLM Integration
 
 ### 11.1 MCP Server
 
@@ -764,7 +824,7 @@ An optional LLM backend is planned (configurable via the `ENGRAM_LLM_ENDPOINT` e
 
 ---
 
-## 12. Hardware Acceleration
+## 13. Hardware Acceleration
 
 Engram's `engram-compute` crate provides a unified acceleration abstraction with automatic backend selection.
 
@@ -798,11 +858,11 @@ NPU detection is informational in v0.1.0. The system identifies Intel AI Boost, 
 
 ---
 
-## 13. Honest Limitations of Engram
+## 14. Honest Limitations of Engram
 
 This section documents what engram cannot do as of v0.1.0. These are not hedges — they are current hard boundaries.
 
-**No ACID transactions.** Engram uses a WAL for crash recovery but does not implement multi-operation transactions. A `store` followed by a `relate` is two separate operations. If the process crashes between them, the node exists but the edge does not. Applications that require atomic multi-step mutations should use a transactional database.
+**No ACID transactions.** Engram uses a WAL for crash recovery but does not implement multi-operation transactions. The `/batch` endpoint groups multiple stores and relates under a single write lock, but they are not transactionally atomic -- if the process crashes mid-batch, some operations may have persisted and others not. Applications that require atomic multi-step mutations should use a transactional database.
 
 **No Cypher or SPARQL.** The query DSL covers full-text, property filters, tier filters, confidence filters, temporal ranges, and boolean combinations. It does not support path expressions, aggregations, subqueries, or the broader surface area of Cypher or SPARQL. Complex graph queries (shortest path across weighted edges, PageRank, community detection) are not supported.
 
@@ -822,7 +882,7 @@ This section documents what engram cannot do as of v0.1.0. These are not hedges 
 
 ---
 
-## 14. When to Use Engram
+## 15. When to Use Engram
 
 Given the limitations above, the following describes the conditions under which engram is a reasonable choice as of v0.1.0.
 

@@ -6,6 +6,13 @@ let graphNetwork = null;
 let graphNodes = null;
 let graphEdges = null;
 
+// vis.js renders to canvas, so CSS variables don't work — use hex directly
+function graphNodeColor(c) {
+  if (c >= 0.7) return '#00b894';
+  if (c >= 0.4) return '#fdcb6e';
+  return '#d63031';
+}
+
 router.register('/graph', () => {
   renderTo(`
     <div class="graph-controls">
@@ -135,7 +142,8 @@ function setupGraphEvents() {
   clearBtn.addEventListener('click', () => {
     graphNodes.clear();
     graphEdges.clear();
-    document.getElementById('graph-empty').style.display = '';
+    const emptyEl = document.getElementById('graph-empty');
+    if (emptyEl) emptyEl.style.display = '';
     document.getElementById('node-detail-content').innerHTML =
       '<p class="text-muted" style="font-size:0.85rem">Click a node to see its details here.</p>';
   });
@@ -164,7 +172,8 @@ async function expandNode(label) {
 
   try {
     const result = await engram.query({ start: label, depth, min_confidence: minConf });
-    document.getElementById('graph-empty').style.display = 'none';
+    const emptyEl = document.getElementById('graph-empty');
+    if (emptyEl) emptyEl.style.display = 'none';
 
     if (!result.nodes || result.nodes.length === 0) {
       showToast(`No results found for "${label}"`, 'info');
@@ -174,7 +183,7 @@ async function expandNode(label) {
     // Add nodes
     for (const n of result.nodes) {
       const size = 10 + (n.confidence || 0.5) * 25;
-      const color = confidenceColor(n.confidence || 0.5);
+      const color = graphNodeColor(n.confidence || 0.5);
       const existing = graphNodes.get(n.node_id);
       const nodeData = {
         id: n.node_id,

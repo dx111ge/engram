@@ -168,10 +168,10 @@ fn resource_definitions() -> Value {
 // ── Tool execution ──
 
 fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, String> {
-    let mut g = state.graph.lock().map_err(|_| "graph lock poisoned".to_string())?;
-
     match name {
+        // Write operations — acquire write lock, mark dirty
         "engram_store" => {
+            let mut g = state.graph.write().map_err(|_| "graph write lock poisoned".to_string())?;
             let entity = args["entity"].as_str().ok_or("missing entity")?;
             let source = args.get("source").and_then(|v| v.as_str()).unwrap_or("mcp");
             let prov = Provenance::user(source);
@@ -195,10 +195,13 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
                 }
             }
 
+            drop(g);
+            state.mark_dirty();
             Ok(serde_json::json!({ "stored": entity, "slot": slot }))
         }
 
         "engram_relate" => {
+            let mut g = state.graph.write().map_err(|_| "graph write lock poisoned".to_string())?;
             let from = args["from"].as_str().ok_or("missing from")?;
             let to = args["to"].as_str().ok_or("missing to")?;
             let rel = args["relationship"].as_str().ok_or("missing relationship")?;
@@ -211,10 +214,14 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
             }
             .map_err(|e| e.to_string())?;
 
+            drop(g);
+            state.mark_dirty();
             Ok(serde_json::json!({ "from": from, "to": to, "relationship": rel, "edge_slot": slot }))
         }
 
+        // Read operations — acquire read lock only
         "engram_query" => {
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
             let start = args["start"].as_str().ok_or("missing start")?;
             let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
             let min_conf = args.get("min_confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
@@ -238,6 +245,7 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
         }
 
         "engram_search" => {
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
             let query = args["query"].as_str().ok_or("missing query")?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
@@ -255,6 +263,7 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
         }
 
         "engram_prove" => {
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
             let from = args["from"].as_str().ok_or("missing from")?;
             let rel = args["relationship"].as_str().ok_or("missing relationship")?;
             let to = args["to"].as_str().ok_or("missing to")?;
@@ -278,6 +287,7 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
         }
 
         "engram_explain" => {
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
             let entity = args["entity"].as_str().ok_or("missing entity")?;
 
             let confidence = g.get_node(entity).map_err(|e| e.to_string())?
@@ -308,7 +318,7 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
 }
 
 fn read_resource(state: &AppState, uri: &str) -> Result<Value, String> {
-    let g = state.graph.lock().map_err(|_| "graph lock poisoned".to_string())?;
+    let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
 
     match uri {
         "engram://stats" => {

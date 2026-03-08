@@ -66,6 +66,13 @@ pub struct PropertyRequest {
     pub value: String,
 }
 
+#[derive(Deserialize)]
+pub struct BatchRequest {
+    pub entities: Option<Vec<StoreRequest>>,
+    pub relations: Option<Vec<RelateRequest>>,
+    pub source: Option<String>,
+}
+
 // ── Responses ──
 
 #[derive(Serialize)]
@@ -166,6 +173,13 @@ pub struct DeleteResponse {
 }
 
 #[derive(Serialize)]
+pub struct BatchResponse {
+    pub nodes_stored: u32,
+    pub edges_created: u32,
+    pub errors: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,
 }
@@ -180,9 +194,57 @@ pub struct ExplainResponse {
     pub edges_to: Vec<EdgeResponse>,
 }
 
+#[derive(Deserialize)]
+pub struct RulesRequest {
+    pub rules: Vec<String>,
+    pub append: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct RulesResponse {
+    pub loaded: u32,
+    pub names: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct RulesListResponse {
+    pub count: u32,
+    pub names: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct CooccurrenceHit {
     pub entity: String,
     pub count: u32,
     pub probability: f32,
+}
+
+#[derive(Deserialize)]
+pub struct QuantizeRequest {
+    pub enabled: bool,
+}
+
+#[derive(Serialize)]
+pub struct QuantizeResponse {
+    pub mode: String,
+    pub vector_memory_bytes: u64,
+}
+
+#[derive(Serialize)]
+pub struct JsonLdExportResponse {
+    pub nodes: u32,
+    pub edges: u32,
+}
+
+#[derive(Deserialize)]
+pub struct JsonLdImportRequest {
+    pub data: serde_json::Value,
+    pub source: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct JsonLdImportResponse {
+    pub nodes_imported: u32,
+    pub edges_imported: u32,
+    pub errors: Option<Vec<String>>,
 }
