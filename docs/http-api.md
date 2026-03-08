@@ -194,6 +194,8 @@ Applies time-based confidence decay (0.999/day) to all nodes. Nodes below 0.10 b
 
 #### POST /learn/derive — Run inference rules
 
+Evaluates rules against the graph using forward chaining. Runs to **fixed point** — automatically repeats until no new facts are derived (max 10 rounds). Duplicate edges, properties, and flags are skipped.
+
 ```bash
 curl -X POST http://localhost:3030/learn/derive \
   -H 'Content-Type: application/json' \

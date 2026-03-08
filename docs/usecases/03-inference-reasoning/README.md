@@ -96,11 +96,9 @@ curl -s -X POST http://127.0.0.1:3030/learn/derive \
   -d '{"rules": ["rule transitive_dependency\nwhen edge(A, \"depends_on\", B)\nwhen edge(B, \"depends_on\", C)\nthen edge(A, \"depends_on\", C, min(e1, e2))"]}'
 ```
 
-**Round 1**: 17 rule firings, 12 new edges created (single-hop transitive closure).
+The engine runs to **fixed point** automatically -- it keeps re-evaluating until no new facts are produced. A single call derives the full transitive closure.
 
-**Round 2**: Running the same rule again finds 45 firings and 10 more edges. The edges created in round 1 enable new matches -- this is how iterative forward chaining propagates deeper.
-
-After 2 rounds: **14 nodes, 41 edges** (+22 derived). Frontend now has direct `depends_on` edges to all 12 transitive dependencies including PostgreSQL, Redis, auth-lib, and Kafka.
+Result: **14 nodes, 41 edges** (+22 derived). Frontend now has direct `depends_on` edges to all 12 transitive dependencies including PostgreSQL, Redis, auth-lib, and Kafka.
 
 ```
 frontend connects to: api-gateway, Elasticsearch, user-service, order-service,
@@ -200,7 +198,7 @@ then flag(<node_var>, "<reason>")
 
 ### Key Takeaways
 
-- **Forward chaining is iterative.** Each round creates new edges that enable further matches. Two rounds of the transitive rule turned 19 direct edges into 41 (22 derived).
+- **Forward chaining runs to fixed point.** The engine automatically re-evaluates until no new facts are derived. A single call to `/learn/derive` turned 19 direct edges into 41 (22 derived).
 - **Rules compose.** The transitive closure rule creates edges that the vulnerability rule then matches. No coordination needed -- the graph is the shared state.
 - **Confidence propagates naturally.** Derived edges carry `min(e1, e2)` confidence, so a chain through a low-confidence link reduces the derived confidence. This models real-world uncertainty.
 - **Flag is non-destructive.** The `flag` action sets a `_flag` property that can be queried, searched, or cleared. It doesn't modify confidence or edges.

@@ -208,19 +208,13 @@ def main():
         'then edge(A, "depends_on", C, min(e1, e2))'
     )
 
-    # Round 1: single-hop transitive closure
     result = api("POST", "/learn/derive", {"rules": [transitive_rule]})
-    print(f"\n  Round 1:")
-    print(f"    Rules fired: {result['rules_fired']}, edges created: {result['edges_created']}")
+    print(f"\n  Rules fired: {result['rules_fired']}")
+    print(f"  Edges created: {result['edges_created']}")
 
-    # Round 2: deeper propagation (new edges from round 1 enable more matches)
-    result2 = api("POST", "/learn/derive", {"rules": [transitive_rule]})
-    print(f"  Round 2:")
-    print(f"    Rules fired: {result2['rules_fired']}, edges created: {result2['edges_created']}")
-
-    total_new = result['edges_created'] + result2['edges_created']
     stats = api("GET", "/stats")
-    print(f"\n  Graph now: {stats['nodes']} nodes, {stats['edges']} edges (+{total_new} derived)")
+    print(f"\n  Graph now: {stats['nodes']} nodes, {stats['edges']} edges (+{result['edges_created']} derived)")
+    print(f"  (engine runs to fixed point automatically -- no manual re-runs needed)")
 
     # Check new transitive edges
     subsection("Verify: Does frontend now have a direct edge to PostgreSQL?")

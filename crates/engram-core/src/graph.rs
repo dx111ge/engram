@@ -1199,8 +1199,41 @@ impl Graph {
     // --- Inference engine ---
 
     /// Forward chaining: evaluate rules against the graph and fire matching actions.
-    /// Returns a summary of what was inferred.
+    /// Runs to fixed point — repeats until no new facts are derived in a round.
+    /// Returns a summary of what was inferred across all rounds.
     pub fn forward_chain(
+        &mut self,
+        rules: &[Rule],
+        provenance: &Provenance,
+    ) -> Result<InferenceResult> {
+        let mut result = InferenceResult::default();
+        let max_rounds = 10; // safety limit to prevent infinite loops
+
+        for round in 0..max_rounds {
+            let round_result = self.forward_chain_once(rules, provenance)?;
+            let new_facts = round_result.edges_created + round_result.flags_raised;
+
+            result.rules_evaluated += round_result.rules_evaluated;
+            result.rules_fired += round_result.rules_fired;
+            result.edges_created += round_result.edges_created;
+            result.flags_raised += round_result.flags_raised;
+            result.firings.extend(round_result.firings);
+
+            if new_facts == 0 {
+                break; // fixed point reached
+            }
+
+            if round == max_rounds - 1 {
+                // Safety: avoid runaway rules
+                break;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Single pass of forward chaining — evaluate all rules once.
+    fn forward_chain_once(
         &mut self,
         rules: &[Rule],
         provenance: &Provenance,
@@ -1261,12 +1294,22 @@ impl Graph {
                             value,
                         } => {
                             if let Some(label) = bindings.get(node_var.as_str()) {
+                                // Skip if property already has this value
+                                let existing = self.get_property(label, key).ok().flatten();
+                                if existing.as_deref() == Some(value.as_str()) {
+                                    continue;
+                                }
                                 self.set_property(label, key, value)?;
                                 actions_taken.push(format!("prop({label}, {key}={value})"));
                             }
                         }
                         Action::Flag { node_var, reason } => {
                             if let Some(label) = bindings.get(node_var.as_str()) {
+                                // Skip if already flagged with the same reason
+                                let existing = self.get_property(label, "_flag").ok().flatten();
+                                if existing.as_deref() == Some(reason.as_str()) {
+                                    continue;
+                                }
                                 self.set_property(label, "_flag", reason)?;
                                 actions_taken.push(format!("flag({label}: {reason})"));
                                 result.flags_raised += 1;
