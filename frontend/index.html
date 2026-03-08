@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>engram - Knowledge Graph</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <script src="js/vis-network.min.js"></script>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Toast container -->
+  <div id="toast-container"></div>
+
+  <!-- Navigation -->
+  <nav id="main-nav">
+    <div class="nav-brand">
+      <a href="#/">
+        <i class="fa-solid fa-brain"></i>
+        <span>engram</span>
+      </a>
+    </div>
+    <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation">
+      <i class="fa-solid fa-bars"></i>
+    </button>
+    <ul class="nav-links" id="nav-links">
+      <li><a href="#/" data-route="/"><i class="fa-solid fa-gauge"></i> Dashboard</a></li>
+      <li><a href="#/graph" data-route="/graph"><i class="fa-solid fa-diagram-project"></i> Graph</a></li>
+      <li><a href="#/search" data-route="/search"><i class="fa-solid fa-magnifying-glass"></i> Search</a></li>
+      <li><a href="#/nl" data-route="/nl"><i class="fa-solid fa-comments"></i> Natural Language</a></li>
+      <li><a href="#/import" data-route="/import"><i class="fa-solid fa-file-import"></i> Import</a></li>
+      <li><a href="#/learning" data-route="/learning"><i class="fa-solid fa-graduation-cap"></i> Learning</a></li>
+    </ul>
+    <div class="nav-status">
+      <span id="health-indicator" class="health-dot offline" title="Checking..."></span>
+      <button class="btn-icon" id="settings-btn" title="API Settings">
+        <i class="fa-solid fa-gear"></i>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Settings Modal -->
+  <div class="modal-overlay" id="settings-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-gear"></i> API Settings</h3>
+        <button class="btn-icon modal-close" data-modal="settings-modal"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="modal-body">
+        <label for="api-url-input">API Base URL</label>
+        <input type="text" id="api-url-input" placeholder="http://localhost:3030">
+        <p class="help-text">The engram HTTP API endpoint. Default: http://localhost:3030</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close" data-modal="settings-modal">Cancel</button>
+        <button class="btn btn-primary" id="save-api-url">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main content area -->
+  <main id="app">
+    <!-- Views are rendered here by the router -->
+  </main>
+
+  <!-- Scripts -->
+  <script src="js/app.js"></script>
+  <script src="js/dashboard.js"></script>
+  <script src="js/graph.js"></script>
+  <script src="js/search.js"></script>
+  <script src="js/node.js"></script>
+  <script src="js/nl.js"></script>
+  <script src="js/import.js"></script>
+  <script src="js/learning.js"></script>
+</body>
+</html>

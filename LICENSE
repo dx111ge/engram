@@ -1,0 +1,115 @@
+Engram Software License Agreement
+===================================
+
+Copyright (c) 2026 dx111ge. All rights reserved.
+
+This license agreement ("Agreement") governs the use of the Engram software
+("Software"). By downloading, installing, or using the Software, you agree to
+be bound by the terms of this Agreement.
+
+
+1. DEFINITIONS
+
+"Software" means the Engram binary executable, associated documentation, and
+any updates or patches provided by the copyright holder.
+
+"Commercial Use" means any use of the Software in connection with a business,
+organization, or activity that generates revenue, or any use by a for-profit
+entity beyond evaluation purposes.
+
+"Non-Commercial Use" means personal use, academic research, education, and use
+by registered non-profit organizations.
+
+
+2. GRANT OF LICENSE
+
+2.1 Non-Commercial License (Free)
+
+You are granted a free, non-exclusive, non-transferable, worldwide license to
+use the Software for Non-Commercial Use, including:
+
+  - Personal projects and experimentation
+  - Academic research and publications
+  - Educational use (courses, workshops, self-study)
+  - Use by registered non-profit organizations
+
+2.2 Commercial License (Paid)
+
+Commercial Use of the Software requires a separate paid license. To obtain a
+commercial license, contact: sven.andreas@gmail.com
+
+Evaluation of the Software for up to 30 days by commercial entities does not
+require a paid license.
+
+
+3. REDISTRIBUTION
+
+You may redistribute unmodified copies of the Software binary and this license
+file, provided that:
+
+  - This license file is included with every copy
+  - No fee is charged for the Software itself (you may charge for media,
+    distribution, or support services)
+  - You do not misrepresent the origin of the Software
+
+
+4. RESTRICTIONS
+
+You may NOT:
+
+  - Reverse engineer, decompile, disassemble, or otherwise attempt to derive
+    the source code of the Software
+  - Modify, adapt, translate, or create derivative works based on the Software
+  - Remove, alter, or obscure any copyright notices or this license
+  - Use the Software to build a competing product or service
+  - Sublicense, lease, or rent the Software
+
+
+5. DATA OWNERSHIP
+
+All data stored in .brain files created by the Software is owned exclusively by
+the user who created it. The copyright holder claims no rights over user data.
+Users may freely copy, move, back up, and delete their .brain files.
+
+
+6. INTELLECTUAL PROPERTY
+
+The Software, including its design, architecture, algorithms, and
+documentation, is the intellectual property of the copyright holder and is
+protected by copyright law and international treaties.
+
+
+7. DISCLAIMER OF WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR DEALINGS IN THE SOFTWARE.
+
+
+8. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER'S TOTAL LIABILITY TO YOU FOR ALL DAMAGES
+EXCEED THE AMOUNT PAID BY YOU FOR THE SOFTWARE IN THE TWELVE (12) MONTHS
+PRECEDING THE CLAIM.
+
+
+9. TERMINATION
+
+This license is effective until terminated. It will terminate automatically if
+you fail to comply with any term of this Agreement. Upon termination, you must
+destroy all copies of the Software in your possession.
+
+
+10. GOVERNING LAW
+
+This Agreement shall be governed by and construed in accordance with applicable
+law, without regard to conflict of law principles.
+
+
+11. CONTACT
+
+For commercial licensing inquiries: sven.andreas@gmail.com
+For bug reports and feature requests: https://github.com/dx111ge/engram/issues
