@@ -23,14 +23,22 @@ pub mod confidence;
 pub mod conflict;
 pub mod dedup;
 pub mod error;
+pub mod file_source;
 pub mod gazetteer;
+pub mod ledger;
 pub mod lang;
+pub mod learned_patterns;
+pub mod learned_trust;
 #[cfg(feature = "llm-ner")]
 pub mod llm_ner;
+pub mod mesh_fast_path;
 pub mod ner_chain;
 pub mod pipeline;
 pub mod resolver;
 pub mod rules;
+pub mod scheduler;
+pub mod source;
+pub mod subsumption;
 #[cfg(feature = "spacy")]
 pub mod spacy;
 pub mod traits;
@@ -41,6 +49,8 @@ pub use confidence::{ConfidenceCalculator, ConfidenceConfig};
 pub use conflict::{ConflictConfig, ConflictDetector};
 pub use dedup::{ContentDedup, dedup_batch, dedup_by_label};
 pub use error::IngestError;
+pub use ledger::SearchLedger;
+pub use file_source::{FileSource, FileSourceConfig, PollWatcher};
 pub use gazetteer::{GazetteerExtractor, GraphGazetteer, GazetteerEntry};
 pub use lang::DefaultLanguageDetector;
 #[cfg(feature = "lang-detect")]
@@ -49,6 +59,7 @@ pub use pipeline::{Pipeline, PlainTextParser, StructuredParser};
 pub use ner_chain::{ChainStrategy, NerChain};
 pub use resolver::{ConservativeResolver, ResolverConfig};
 pub use rules::RuleBasedNer;
+pub use source::{SourceRegistry, SourceInfo, SourceUsage, UsageSnapshot};
 pub use traits::{
     CostModel, Extractor, LanguageDetector, Parser, Resolver, Source, SourceCapabilities,
     SourceParams, Transformer,

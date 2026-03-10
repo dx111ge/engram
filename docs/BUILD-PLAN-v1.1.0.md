@@ -56,21 +56,21 @@
 | 8.14 | Multi-threaded pipeline executor (rayon + tokio) | Medium | 8.2 | `[x]` |
 | 8.15 | Pipeline shortcuts (`?skip=ner,resolve` query params) | Small | 8.14 | `[x]` |
 | 8.16 | Wire into API: `POST /ingest`, `POST /ingest/file`, `POST /ingest/configure` | Small | 8.14 | `[x]` |
-| 8.17 | Source trait with capabilities + usage endpoint | Medium | 8.1 | `[ ]` |
-| 8.18 | File source (notify crate, watch mode, poll fallback, format auto-detect) | Medium | 8.17 | `[ ]` |
-| 8.19 | Search ledger (`.brain.ledger`, temporal cursors, content hash dedup) | Medium | 8.17 | `[ ]` |
-| 8.20 | Query subsumption (substring check, configurable window) | Small | 8.19 | `[ ]` |
-| 8.21 | Adaptive frequency scheduler (min/max bounds, yield-based adjustment) | Medium | 8.19 | `[ ]` |
-| 8.22 | Source usage endpoint integration (pre-fetch budget check, soft/hard limits) | Medium | 8.17 | `[ ]` |
-| 8.23 | Mesh fast path (skip NER, resolve locally, peer trust multiplier) | Small | 8.10, 8.15 | `[ ]` |
-| 8.24 | Learned patterns from graph co-occurrence | Medium | 8.6 | `[ ]` |
-| 8.25 | NER correction feedback loop | Small | 8.24 | `[ ]` |
-| 8.26 | Source health monitoring (success/failure rate, latency, auth status) | Small | 8.17 | `[ ]` |
-| 8.27 | Wire source APIs: `GET /sources`, `GET /sources/{name}/usage`, `GET /sources/{name}/ledger` | Small | 8.22, 8.19 | `[ ]` |
-| 8.28 | Learned trust: create Source/Author nodes on first encounter, `from_source`/`authored_by` edges | Medium | 8.13, 8.17 | `[ ]` |
-| 8.29 | Learned trust: auto-adjust via corroboration/correction propagation, per-source author scoping | Medium | 8.28 | `[ ]` |
+| 8.17 | Source trait with capabilities + usage endpoint | Medium | 8.1 | `[x]` |
+| 8.18 | File source (notify crate, watch mode, poll fallback, format auto-detect) | Medium | 8.17 | `[x]` |
+| 8.19 | Search ledger (`.brain.ledger`, temporal cursors, content hash dedup) | Medium | 8.17 | `[x]` |
+| 8.20 | Query subsumption (substring check, configurable window) | Small | 8.19 | `[x]` |
+| 8.21 | Adaptive frequency scheduler (min/max bounds, yield-based adjustment) | Medium | 8.19 | `[x]` |
+| 8.22 | Source usage endpoint integration (pre-fetch budget check, soft/hard limits) | Medium | 8.17 | `[x]` |
+| 8.23 | Mesh fast path (skip NER, resolve locally, peer trust multiplier) | Small | 8.10, 8.15 | `[x]` |
+| 8.24 | Learned patterns from graph co-occurrence | Medium | 8.6 | `[x]` |
+| 8.25 | NER correction feedback loop | Small | 8.24 | `[x]` |
+| 8.26 | Source health monitoring (success/failure rate, latency, auth status) | Small | 8.17 | `[x]` |
+| 8.27 | Wire source APIs: `GET /sources`, `GET /sources/{name}/usage`, `GET /sources/{name}/ledger` | Small | 8.22, 8.19 | `[x]` |
+| 8.28 | Learned trust: create Source/Author nodes on first encounter, `from_source`/`authored_by` edges | Medium | 8.13, 8.17 | `[x]` |
+| 8.29 | Learned trust: auto-adjust via corroboration/correction propagation, per-source author scoping | Medium | 8.28 | `[x]` |
 
-**Phase 8 done:** `[ ]`
+**Phase 8 done:** `[x]`
 
 ---
 

@@ -131,6 +131,11 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// Get the path of the underlying .brain file.
+    pub fn path(&self) -> &Path {
+        self.brain.path()
+    }
+
     /// Create a new graph with a fresh .brain file.
     pub fn create(path: &Path) -> Result<Self> {
         Self::create_with_capacity(path, 1024, 4096)

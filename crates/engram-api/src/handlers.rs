@@ -1691,3 +1691,73 @@ pub async fn ingest_configure() -> impl axum::response::IntoResponse {
     (StatusCode::NOT_IMPLEMENTED,
      Json(ErrorResponse { error: "ingest feature not enabled — rebuild with --features ingest".into() }))
 }
+
+// ── GET /sources — list registered sources (stub) ──
+
+#[cfg(feature = "ingest")]
+pub async fn list_sources() -> ApiResult<serde_json::Value> {
+    // Source registry will be wired to AppState in a future phase.
+    // For now, return an empty list with the endpoint shape.
+    Ok(Json(serde_json::json!({
+        "sources": serde_json::Value::Array(vec![]),
+        "note": "source registry not yet wired to server state"
+    })))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn list_sources() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled".into() }))
+}
+
+// ── GET /sources/{name}/usage ──
+
+#[cfg(feature = "ingest")]
+pub async fn source_usage(
+    Path(name): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    Ok(Json(serde_json::json!({
+        "source": name,
+        "usage": {
+            "requests": 0,
+            "items": 0,
+            "errors": 0,
+            "cost": 0.0
+        },
+        "note": "source registry not yet wired to server state"
+    })))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn source_usage() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled".into() }))
+}
+
+// ── GET /sources/{name}/ledger ──
+
+#[cfg(feature = "ingest")]
+pub async fn source_ledger(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    // Try to load the ledger from the brain file path
+    let graph = state.graph.read().map_err(|_| read_lock_err())?;
+    let brain_path = graph.path().to_path_buf();
+    drop(graph);
+
+    let ledger = engram_ingest::SearchLedger::open(&brain_path);
+    let entries: Vec<_> = ledger.entries_for_source(&name).into_iter().cloned().collect();
+
+    Ok(Json(serde_json::json!({
+        "source": name,
+        "entries": entries.len(),
+        "ledger": entries,
+    })))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn source_ledger() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled".into() }))
+}

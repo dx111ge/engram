@@ -11,6 +11,7 @@ lang-detect = ["dep:whatlang"]  # Language detection via whatlang
 anno = []                       # Feature-gated ONNX NER backend (GLiNER2 + coreference)
 spacy = ["dep:reqwest"]         # Feature-gated SpaCy HTTP sidecar integration
 llm-ner = ["dep:reqwest"]       # Feature-gated LLM fallback NER
+file-source = ["dep:notify"]    # File watching source with notify crate
 
 [dependencies]
 engram-core = { path = "../engram-core" }
@@ -25,6 +26,7 @@ strsim = "0.11"
 toml = "0.8"
 whatlang = { version = "0.18", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"], optional = true }
+notify = { version = "7", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
