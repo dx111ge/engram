@@ -781,7 +781,6 @@ fn split_is_a_preserve_case<'a>(original: &'a str, lower: &str) -> Option<(Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use tempfile::TempDir;
 
     fn test_graph() -> (TempDir, Graph) {

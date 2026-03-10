@@ -10,6 +10,7 @@ default = []
 llm = []
 mesh = ["engram-mesh"]
 ingest = ["engram-ingest"]
+actions = ["engram-action"]
 grpc = ["tonic", "prost"]
 
 [dependencies]
@@ -17,6 +18,7 @@ engram-core = { path = "../engram-core" }
 engram-compute = { path = "../engram-compute" }
 engram-mesh = { path = "../engram-mesh", optional = true }
 engram-ingest = { path = "../engram-ingest", optional = true }
+engram-action = { path = "../engram-action", optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

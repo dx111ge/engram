@@ -1761,3 +1761,106 @@ pub async fn source_ledger() -> impl axum::response::IntoResponse {
     (StatusCode::NOT_IMPLEMENTED,
      Json(ErrorResponse { error: "ingest feature not enabled".into() }))
 }
+
+// ── Action engine endpoints ──────────────────────────────────────────
+
+#[cfg(feature = "actions")]
+pub async fn load_action_rules(
+    State(state): State<AppState>,
+    body: String,
+) -> ApiResult<serde_json::Value> {
+    let rules = engram_action::parse_rules(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e.to_string() })))?;
+    let count = rules.len();
+    let mut engine = state.action_engine.write().map_err(|_| write_lock_err())?;
+    engine.load_rules(rules);
+    Ok(Json(serde_json::json!({ "loaded": count })))
+}
+
+#[cfg(not(feature = "actions"))]
+pub async fn load_action_rules() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "actions feature not enabled".into() }))
+}
+
+#[cfg(feature = "actions")]
+pub async fn list_action_rules(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let engine = state.action_engine.read().map_err(|_| read_lock_err())?;
+    let ids: Vec<&str> = engine.list_rules();
+    Ok(Json(serde_json::json!({ "rules": ids })))
+}
+
+#[cfg(not(feature = "actions"))]
+pub async fn list_action_rules() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "actions feature not enabled".into() }))
+}
+
+#[cfg(feature = "actions")]
+pub async fn get_action_rule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let engine = state.action_engine.read().map_err(|_| read_lock_err())?;
+    match engine.get_rule(&id) {
+        Some(rule) => Ok(Json(serde_json::json!(rule))),
+        None => Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("rule '{}' not found", id) }))),
+    }
+}
+
+#[cfg(not(feature = "actions"))]
+pub async fn get_action_rule() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "actions feature not enabled".into() }))
+}
+
+#[cfg(feature = "actions")]
+pub async fn delete_action_rule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let mut engine = state.action_engine.write().map_err(|_| write_lock_err())?;
+    let removed = engine.remove_rule(&id);
+    if removed {
+        Ok(Json(serde_json::json!({ "removed": id })))
+    } else {
+        Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("rule '{}' not found", id) })))
+    }
+}
+
+#[cfg(not(feature = "actions"))]
+pub async fn delete_action_rule() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "actions feature not enabled".into() }))
+}
+
+#[cfg(feature = "actions")]
+pub async fn dry_run_action(
+    State(state): State<AppState>,
+    Json(event_json): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    // Build a synthetic FactStored event from the JSON
+    let label = event_json.get("label").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let confidence = event_json.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+    let entity_type = event_json.get("entity_type").and_then(|v| v.as_str());
+
+    let event = engram_core::events::GraphEvent::FactStored {
+        node_id: 0,
+        label: std::sync::Arc::from(label),
+        confidence,
+        source: std::sync::Arc::from("dry-run"),
+        entity_type: entity_type.map(|s| std::sync::Arc::from(s)),
+    };
+
+    let engine = state.action_engine.read().map_err(|_| read_lock_err())?;
+    let results = engine.dry_run(&event);
+    Ok(Json(serde_json::json!({ "results": results })))
+}
+
+#[cfg(not(feature = "actions"))]
+pub async fn dry_run_action() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "actions feature not enabled".into() }))
+}

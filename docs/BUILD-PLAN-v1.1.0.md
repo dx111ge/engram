@@ -81,19 +81,19 @@
 
 | # | Task | Effort | Deps | Status |
 |---|------|--------|------|--------|
-| 9.1 | Create `engram-action` crate skeleton | Small | 7.1 | `[ ]` |
-| 9.2 | Event subscriber (consumes GraphEvent channel) | Small | 9.1 | `[ ]` |
-| 9.3 | Rule parser (TOML rule definitions) | Medium | 9.2 | `[ ]` |
-| 9.4 | Condition evaluator (pattern matching against events) | Medium | 9.3 | `[ ]` |
-| 9.5 | Internal effects (confidence cascade, edge creation, tier change) | Medium | 9.4 | `[ ]` |
-| 9.6 | External effects (webhook, API call, message notification) | Medium | 9.4 | `[ ]` |
-| 9.7 | `CreateIngestJob` effect (dynamic jobs, `QueryTemplate`, `ReconcileStrategy`) | Medium | 9.4, 8.14 | `[ ]` |
-| 9.8 | Safety constraints (cooldown, chain depth, effect budget) | Small | 9.5-9.7 | `[ ]` |
-| 9.9 | Timer-based triggers (scheduled rules) | Small | 9.4 | `[ ]` |
-| 9.10 | Wire into API: rule management endpoints | Small | 9.8 | `[ ]` |
-| 9.11 | Dry run mode | Small | 9.4 | `[ ]` |
+| 9.1 | Create `engram-action` crate skeleton | Small | 7.1 | `[x]` |
+| 9.2 | Event subscriber (consumes GraphEvent channel) | Small | 9.1 | `[x]` |
+| 9.3 | Rule parser (TOML rule definitions) | Medium | 9.2 | `[x]` |
+| 9.4 | Condition evaluator (pattern matching against events) | Medium | 9.3 | `[x]` |
+| 9.5 | Internal effects (confidence cascade, edge creation, tier change) | Medium | 9.4 | `[x]` |
+| 9.6 | External effects (webhook, API call, message notification) | Medium | 9.4 | `[x]` |
+| 9.7 | `CreateIngestJob` effect (dynamic jobs, `QueryTemplate`, `ReconcileStrategy`) | Medium | 9.4, 8.14 | `[x]` |
+| 9.8 | Safety constraints (cooldown, chain depth, effect budget) | Small | 9.5-9.7 | `[x]` |
+| 9.9 | Timer-based triggers (scheduled rules) | Small | 9.4 | `[x]` |
+| 9.10 | Wire into API: rule management endpoints | Small | 9.8 | `[x]` |
+| 9.11 | Dry run mode | Small | 9.4 | `[x]` |
 
-**Phase 9 done:** `[ ]`
+**Phase 9 done:** `[x]`
 
 ---
 

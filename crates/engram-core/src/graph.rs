@@ -894,6 +894,13 @@ impl Graph {
         Ok(true)
     }
 
+    /// Get a node's type name, if one has been set.
+    pub fn get_node_type(&self, label: &str) -> Option<String> {
+        let slot = self.find_slot_by_label(label).ok()??;
+        let node = self.brain.read_node(slot).ok()?;
+        self.node_type_names.get(node.node_type as usize).cloned()
+    }
+
     /// Get the edge type name for an edge type ID.
     pub fn edge_type_name(&self, type_id: u32) -> String {
         self.type_registry.name_or_default(type_id)

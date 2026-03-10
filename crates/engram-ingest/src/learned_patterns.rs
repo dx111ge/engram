@@ -198,7 +198,6 @@ impl NerFeedback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::DetectedLanguage;
 
     fn make_entity(text: &str, confidence: f32) -> ExtractedEntity {
         ExtractedEntity {

@@ -49,6 +49,9 @@ pub struct AppState {
     /// Optional rule set for push-based inference triggers.
     /// When non-empty, rules are evaluated after store/relate/tell mutations.
     pub rules: Arc<RwLock<Vec<Rule>>>,
+    /// Optional action engine for event-driven rules.
+    #[cfg(feature = "actions")]
+    pub action_engine: Arc<RwLock<engram_action::ActionEngine>>,
     /// Optional mesh networking state.
     #[cfg(feature = "mesh")]
     pub mesh: Option<MeshState>,
@@ -57,8 +60,11 @@ pub struct AppState {
 impl AppState {
     pub fn new(graph: Graph) -> Self {
         let hw = engram_compute::planner::HardwareInfo::detect();
+        let graph = Arc::new(RwLock::new(graph));
         AppState {
-            graph: Arc::new(RwLock::new(graph)),
+            #[cfg(feature = "actions")]
+            action_engine: Arc::new(RwLock::new(engram_action::ActionEngine::new(graph.clone()))),
+            graph,
             compute: ComputeInfo {
                 cpu_cores: hw.cpu_cores,
                 has_avx2: hw.has_avx2,
