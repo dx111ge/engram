@@ -10,6 +10,7 @@ pub mod storage;
 pub mod index;
 pub mod graph;
 pub mod learning;
+pub mod events;
 
 pub use storage::brain_file::BrainFile;
 pub use storage::edge::Edge;
@@ -21,3 +22,4 @@ pub use index::embed_api::ApiEmbedder;
 #[cfg(feature = "onnx")]
 pub use index::embed_onnx::OnnxEmbedder;
 pub use index::hnsw::{HnswIndex, QuantizationMode};
+pub use events::{EventBus, GraphEvent, ThresholdDirection, ConflictType, OverflowStrategy};

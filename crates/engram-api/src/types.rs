@@ -73,6 +73,56 @@ pub struct BatchRequest {
     pub entities: Option<Vec<StoreRequest>>,
     pub relations: Option<Vec<RelateRequest>>,
     pub source: Option<String>,
+    /// Upsert mode: "insert" (default, dedup by label) or "upsert"
+    pub mode: Option<BatchMode>,
+    /// How to handle confidence on upsert: "max", "replace", "average"
+    pub confidence_strategy: Option<ConfidenceStrategy>,
+}
+
+/// Batch operation mode.
+#[derive(Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BatchMode {
+    /// Default: store if new, return existing ID if duplicate.
+    #[default]
+    Insert,
+    /// Store if new, update confidence if exists.
+    Upsert,
+}
+
+/// How to resolve confidence conflicts during upsert.
+#[derive(Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfidenceStrategy {
+    /// Keep whichever confidence is higher (existing or incoming).
+    #[default]
+    Max,
+    /// Incoming always wins.
+    Replace,
+    /// New confidence = (existing + incoming) / 2.
+    Average,
+}
+
+/// A single NDJSON line item for streaming batch.
+/// Can be either an entity store or a relation create.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum BatchItem {
+    Relation {
+        from: String,
+        to: String,
+        relationship: String,
+        confidence: Option<f32>,
+        source: Option<String>,
+    },
+    Entity {
+        entity: String,
+        #[serde(rename = "type")]
+        entity_type: Option<String>,
+        properties: Option<std::collections::HashMap<String, String>>,
+        confidence: Option<f32>,
+        source: Option<String>,
+    },
 }
 
 // ── Responses ──
@@ -178,6 +228,7 @@ pub struct DeleteResponse {
 pub struct BatchResponse {
     pub nodes_stored: u32,
     pub edges_created: u32,
+    pub nodes_updated: u32,
     pub errors: Option<Vec<String>>,
 }
 

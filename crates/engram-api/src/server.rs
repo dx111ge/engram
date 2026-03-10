@@ -20,6 +20,7 @@ pub fn router(state: AppState) -> Router {
         .route("/store", post(handlers::store))
         .route("/relate", post(handlers::relate))
         .route("/batch", post(handlers::batch))
+        .route("/batch/stream", post(handlers::batch_stream))
         .route("/query", post(handlers::query))
         .route("/similar", post(handlers::similar))
         .route("/search", post(handlers::search))
@@ -53,6 +54,8 @@ pub fn router(state: AppState) -> Router {
         // Proxy (CORS bypass for browser-based intel dashboard)
         .route("/proxy/gdelt", get(handlers::proxy_gdelt))
         .route("/proxy/rss", get(handlers::proxy_news_rss))
+        .route("/proxy/llm", post(handlers::proxy_llm))
+        .route("/proxy/search", get(handlers::proxy_web_search))
         // System
         .route("/health", get(handlers::health))
         .route("/stats", get(handlers::stats))

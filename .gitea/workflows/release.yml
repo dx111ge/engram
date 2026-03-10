@@ -6,32 +6,75 @@ on:
       - 'v*'
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            artifact: engram-linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            artifact: engram-linux-aarch64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --locked
       - name: Build release
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: cross build --release --target ${{ matrix.target }}
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: engram-windows-x86_64
-          path: target/x86_64-pc-windows-msvc/release/engram.exe
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/engram
 
-  build-linux:
+  build-windows:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu
+          targets: x86_64-pc-windows-gnu
+      - name: Install cross
+        run: cargo install cross --locked
       - name: Build release
-        run: cargo build --release --target x86_64-unknown-linux-gnu
+        run: cross build --release --target x86_64-pc-windows-gnu
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: engram-linux-x86_64
-          path: target/x86_64-unknown-linux-gnu/release/engram
+          name: engram-windows-x86_64
+          path: target/x86_64-pc-windows-gnu/release/engram.exe
+
+  build-macos:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            artifact: engram-macos-x86_64
+          - target: aarch64-apple-darwin
+            artifact: engram-macos-aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install zig
+        run: |
+          sudo snap install zig --classic --beta || {
+            ZIG_VERSION="0.13.0"
+            curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" | tar -xJ
+            sudo mv zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/
+            sudo mv zig-linux-x86_64-${ZIG_VERSION}/lib /usr/local/lib/zig
+          }
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+      - name: Build release
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/engram

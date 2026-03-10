@@ -8,6 +8,7 @@ members = [
     "crates/engram-mesh",
     "crates/engram-a2a",
     "crates/engram-api",
+    "crates/engram-ingest",
 ]
 exclude = [
     "crates/engram-intel",  # WASM crate -- built separately via wasm-pack
@@ -29,12 +30,14 @@ mesh = ["engram-api/mesh", "engram-mesh"]
 llm = ["engram-api/llm"]
 onnx = ["engram-core/onnx"]
 grpc = ["engram-api/grpc"]
+ingest = ["engram-ingest"]
 
 [dependencies]
 engram-core = { path = "crates/engram-core" }
 engram-compute = { path = "crates/engram-compute" }
 engram-api = { path = "crates/engram-api" }
 engram-mesh = { path = "crates/engram-mesh", optional = true }
+engram-ingest = { path = "crates/engram-ingest", optional = true }
 tokio = { workspace = true }
 
 [workspace.package]

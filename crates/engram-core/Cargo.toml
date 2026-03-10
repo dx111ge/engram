@@ -13,9 +13,13 @@ onnx = ["ort", "tokenizers", "ndarray"]
 engram-compute = { path = "../engram-compute" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
 ort = { version = "2.0.0-rc.12", optional = true }
 ndarray = { version = "0.17", optional = true }
 tokenizers = { version = "0.21", optional = true, default-features = false, features = ["onig"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Memory", "Win32_Foundation", "Win32_Security"] }

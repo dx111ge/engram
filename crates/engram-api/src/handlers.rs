@@ -110,31 +110,21 @@ pub async fn batch(
 ) -> ApiResult<BatchResponse> {
     let mut g = state.graph.write().map_err(|_| write_lock_err())?;
     let prov = provenance(&req.source);
+    let mode = req.mode.unwrap_or_default();
+    let strategy = req.confidence_strategy.unwrap_or_default();
 
     let mut nodes_stored: u32 = 0;
+    let mut nodes_updated: u32 = 0;
     let mut edges_created: u32 = 0;
     let mut errors: Vec<String> = Vec::new();
 
     // Process entity stores
     if let Some(entities) = req.entities {
         for entity in entities {
-            let result = if let Some(conf) = entity.confidence {
-                g.store_with_confidence(&entity.entity, conf, &prov)
-            } else {
-                g.store(&entity.entity, &prov)
-            };
-            match result {
-                Ok(_slot) => {
-                    if let Some(ref t) = entity.entity_type {
-                        let _ = g.set_node_type(&entity.entity, t);
-                    }
-                    if let Some(ref props) = entity.properties {
-                        for (k, v) in props {
-                            let _ = g.set_property(&entity.entity, k, v);
-                        }
-                    }
-                    nodes_stored += 1;
-                }
+            match store_entity(&mut g, &entity, &prov, mode, strategy) {
+                Ok(StoreOutcome::Created) => nodes_stored += 1,
+                Ok(StoreOutcome::Updated) => nodes_updated += 1,
+                Ok(StoreOutcome::Unchanged) => nodes_stored += 1,
                 Err(e) => errors.push(format!("store {}: {}", entity.entity, e)),
             }
         }
@@ -162,6 +152,184 @@ pub async fn batch(
     Ok(Json(BatchResponse {
         nodes_stored,
         edges_created,
+        nodes_updated,
+        errors: if errors.is_empty() { None } else { Some(errors) },
+    }))
+}
+
+/// Outcome of a single entity store operation.
+enum StoreOutcome {
+    Created,
+    Updated,
+    Unchanged,
+}
+
+/// Store a single entity with upsert support.
+fn store_entity(
+    g: &mut engram_core::Graph,
+    entity: &StoreRequest,
+    prov: &engram_core::graph::Provenance,
+    mode: BatchMode,
+    strategy: ConfidenceStrategy,
+) -> std::result::Result<StoreOutcome, engram_core::StorageError> {
+    // Check if entity already exists (for upsert logic)
+    let existing = g.get_node(&entity.entity)?;
+
+    match (existing, mode) {
+        // Entity exists + upsert mode: update confidence
+        (Some(node), BatchMode::Upsert) => {
+            if let Some(incoming_conf) = entity.confidence {
+                let old_conf = node.confidence;
+                let new_conf = match strategy {
+                    ConfidenceStrategy::Max => old_conf.max(incoming_conf),
+                    ConfidenceStrategy::Replace => incoming_conf,
+                    ConfidenceStrategy::Average => (old_conf + incoming_conf) / 2.0,
+                };
+                if (new_conf - old_conf).abs() > f32::EPSILON {
+                    g.store_with_confidence(&entity.entity, new_conf, prov)?;
+                    return Ok(StoreOutcome::Updated);
+                }
+            }
+            // Set properties even on existing nodes
+            if let Some(ref props) = entity.properties {
+                for (k, v) in props {
+                    let _ = g.set_property(&entity.entity, k, v);
+                }
+            }
+            Ok(StoreOutcome::Unchanged)
+        }
+        // Entity exists + insert mode: dedup (existing behavior)
+        (Some(_), BatchMode::Insert) => {
+            if let Some(ref props) = entity.properties {
+                for (k, v) in props {
+                    let _ = g.set_property(&entity.entity, k, v);
+                }
+            }
+            Ok(StoreOutcome::Unchanged)
+        }
+        // New entity: store normally
+        (None, _) => {
+            let _slot = if let Some(conf) = entity.confidence {
+                g.store_with_confidence(&entity.entity, conf, prov)?
+            } else {
+                g.store(&entity.entity, prov)?
+            };
+            if let Some(ref t) = entity.entity_type {
+                let _ = g.set_node_type(&entity.entity, t);
+            }
+            if let Some(ref props) = entity.properties {
+                for (k, v) in props {
+                    let _ = g.set_property(&entity.entity, k, v);
+                }
+            }
+            Ok(StoreOutcome::Created)
+        }
+    }
+}
+
+// ── POST /batch/stream (NDJSON) ──
+
+/// Streaming NDJSON batch endpoint.
+/// Accepts newline-delimited JSON, processes each line independently.
+/// Uses chunked write locking (default 1000 items per chunk) to keep
+/// reads alive during large imports.
+pub async fn batch_stream(
+    State(state): State<AppState>,
+    body: axum::body::Body,
+) -> ApiResult<BatchResponse> {
+    use axum::body::to_bytes;
+
+    // Read body (axum doesn't have built-in line streaming, so we read
+    // and split -- for truly huge payloads, a streaming line reader
+    // would be better, but this handles millions of lines fine)
+    let bytes = to_bytes(body, 256 * 1024 * 1024) // 256MB max
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, format!("body read error: {e}")))?;
+
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, format!("invalid UTF-8: {e}")))?;
+
+    // Parse all lines first (fast, no lock needed)
+    let mut items: Vec<BatchItem> = Vec::new();
+    let mut parse_errors: Vec<String> = Vec::new();
+
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<BatchItem>(line) {
+            Ok(item) => items.push(item),
+            Err(e) => parse_errors.push(format!("line {}: {}", i + 1, e)),
+        }
+    }
+
+    // Process in chunks with write lock per chunk
+    const CHUNK_SIZE: usize = 1000;
+    let mut nodes_stored: u32 = 0;
+    let mut nodes_updated: u32 = 0;
+    let mut edges_created: u32 = 0;
+    let mut errors = parse_errors;
+
+    for chunk in items.chunks(CHUNK_SIZE) {
+        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+
+        for item in chunk {
+            match item {
+                BatchItem::Entity {
+                    entity,
+                    entity_type,
+                    properties,
+                    confidence,
+                    source,
+                } => {
+                    let prov = provenance(source);
+                    let req = StoreRequest {
+                        entity: entity.clone(),
+                        entity_type: entity_type.clone(),
+                        properties: properties.clone(),
+                        source: source.clone(),
+                        confidence: *confidence,
+                    };
+                    match store_entity(&mut g, &req, &prov, BatchMode::Upsert, ConfidenceStrategy::Max) {
+                        Ok(StoreOutcome::Created) => nodes_stored += 1,
+                        Ok(StoreOutcome::Updated) => nodes_updated += 1,
+                        Ok(StoreOutcome::Unchanged) => nodes_stored += 1,
+                        Err(e) => errors.push(format!("store {}: {}", entity, e)),
+                    }
+                }
+                BatchItem::Relation {
+                    from,
+                    to,
+                    relationship,
+                    confidence,
+                    source,
+                } => {
+                    let prov = provenance(source);
+                    let result = if let Some(conf) = confidence {
+                        g.relate_with_confidence(from, to, relationship, *conf, &prov)
+                    } else {
+                        g.relate(from, to, relationship, &prov)
+                    };
+                    match result {
+                        Ok(_) => edges_created += 1,
+                        Err(e) => errors.push(format!("relate {} -> {}: {}", from, to, e)),
+                    }
+                }
+            }
+        }
+
+        drop(g);
+        // Mark dirty after each chunk so checkpoint can run between chunks
+        state.mark_dirty();
+    }
+
+    state.fire_rules_async();
+
+    Ok(Json(BatchResponse {
+        nodes_stored,
+        edges_created,
+        nodes_updated,
         errors: if errors.is_empty() { None } else { Some(errors) },
     }))
 }
@@ -1092,6 +1260,212 @@ pub async fn proxy_news_rss(
 
     Ok((
         StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        body,
+    ).into_response())
+}
+
+// ── GET /proxy/search ── Web search via DuckDuckGo HTML ──
+
+/// Proxy web search via Brave Search API or DuckDuckGo fallback.
+/// Set ENGRAM_SEARCH_API_KEY for Brave Search, otherwise falls back to DuckDuckGo instant answers.
+/// Returns JSON array of search results with title, url, snippet.
+pub async fn proxy_web_search(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
+    use axum::response::IntoResponse;
+
+    let query = params.get("q").cloned().unwrap_or_default();
+    if query.is_empty() {
+        return Err(api_err(StatusCode::BAD_REQUEST, "missing 'q' parameter".to_string()));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut results = Vec::new();
+
+    // Primary: SearXNG (self-hosted meta search, no API key needed)
+    let searxng_base = std::env::var("ENGRAM_SEARXNG_URL")
+        .unwrap_or_else(|_| "http://localhost:8090".to_string());
+    // Optional time_range: "day", "week", "month", "year"
+    let time_range = params.get("time_range").cloned().unwrap_or_default();
+    let time_param = if !time_range.is_empty() {
+        format!("&time_range={}", urlencoding::encode(&time_range))
+    } else {
+        String::new()
+    };
+    let search_url = format!(
+        "{}/search?q={}&format=json&categories=general&engines=google,bing,duckduckgo{}",
+        searxng_base,
+        urlencoding::encode(&query),
+        time_param
+    );
+    let resp = client
+        .get(&search_url)
+        .header("Accept", "application/json")
+        .send()
+        .await;
+
+    if let Ok(resp) = resp {
+        if resp.status().is_success() {
+            if let Ok(data) = resp.json::<serde_json::Value>().await {
+                if let Some(web_results) = data.get("results").and_then(|r| r.as_array()) {
+                    for r in web_results.iter().take(50) {
+                        let title = r.get("title").and_then(|t| t.as_str()).unwrap_or_default();
+                        let url = r.get("url").and_then(|u| u.as_str()).unwrap_or_default();
+                        let snippet = r.get("content").and_then(|d| d.as_str()).unwrap_or_default();
+                        let domain = url.split('/').nth(2).unwrap_or("");
+                        if !title.is_empty() && !url.is_empty() {
+                            results.push(serde_json::json!({
+                                "title": title,
+                                "url": url,
+                                "snippet": snippet,
+                                "domain": domain,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: DuckDuckGo Instant Answer API (limited but no auth needed)
+    if results.is_empty() {
+        let ddg_url = format!(
+            "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
+            urlencoding::encode(&query)
+        );
+        let resp = client
+            .get(&ddg_url)
+            .header("User-Agent", "engram-intel/1.0")
+            .send()
+            .await;
+
+        if let Ok(resp) = resp {
+            if resp.status().is_success() {
+                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    // Abstract
+                    if let (Some(heading), Some(abs)) = (
+                        data.get("Heading").and_then(|h| h.as_str()),
+                        data.get("Abstract").and_then(|a| a.as_str()),
+                    ) {
+                        if !abs.is_empty() {
+                            let url = data.get("AbstractURL").and_then(|u| u.as_str()).unwrap_or_default();
+                            let domain = url.split('/').nth(2).unwrap_or("");
+                            results.push(serde_json::json!({
+                                "title": heading,
+                                "url": url,
+                                "snippet": abs,
+                                "domain": domain,
+                            }));
+                        }
+                    }
+                    // Related topics
+                    if let Some(topics) = data.get("RelatedTopics").and_then(|r| r.as_array()) {
+                        for t in topics.iter().take(8) {
+                            let text = t.get("Text").and_then(|x| x.as_str()).unwrap_or_default();
+                            let url = t.get("FirstURL").and_then(|u| u.as_str()).unwrap_or_default();
+                            if !text.is_empty() {
+                                let title = text.split(" - ").next().unwrap_or(text);
+                                let domain = url.split('/').nth(2).unwrap_or("");
+                                results.push(serde_json::json!({
+                                    "title": title,
+                                    "url": url,
+                                    "snippet": text,
+                                    "domain": domain,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let body = serde_json::json!({ "results": results }).to_string();
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        body,
+    ).into_response())
+}
+
+// ── POST /proxy/llm ── Forward chat completion requests to configured LLM ──
+
+/// Proxy LLM chat completion requests to an OpenAI-compatible endpoint.
+/// Uses ENGRAM_EMBED_ENDPOINT (same as embeddings) or ENGRAM_LLM_ENDPOINT if set.
+/// Model defaults to ENGRAM_LLM_MODEL env var, then request body, then "llama3.2".
+pub async fn proxy_llm(
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
+    use axum::response::IntoResponse;
+
+    let endpoint = std::env::var("ENGRAM_LLM_ENDPOINT")
+        .or_else(|_| std::env::var("ENGRAM_EMBED_ENDPOINT"))
+        .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
+    let api_key = std::env::var("ENGRAM_LLM_API_KEY")
+        .or_else(|_| std::env::var("ENGRAM_EMBED_API_KEY"))
+        .unwrap_or_default();
+    let default_model = std::env::var("ENGRAM_LLM_MODEL")
+        .unwrap_or_else(|_| "llama3.2".to_string());
+
+    let messages = body.get("messages").cloned().unwrap_or(serde_json::json!([]));
+    let model = body.get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or(&default_model);
+    let temperature = body.get("temperature")
+        .and_then(|t| t.as_f64())
+        .unwrap_or(0.7);
+    let max_tokens = body.get("max_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(1024);
+
+    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+
+    let request_body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": false,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut req = client.post(&url)
+        .header("Content-Type", "application/json");
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {api_key}"));
+    }
+
+    let resp = req
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("LLM request failed: {e}")))?;
+
+    let status = StatusCode::from_u16(resp.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    Ok((
+        status,
         [
             (axum::http::header::CONTENT_TYPE, "application/json"),
             (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),

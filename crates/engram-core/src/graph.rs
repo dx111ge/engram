@@ -4,6 +4,7 @@
 /// a hash index for node lookup by label, a property store
 /// for key-value metadata, and a persisted edge type registry.
 
+use crate::events::{EventBus, GraphEvent, ThresholdDirection};
 use crate::index::bitmap::BitmapIndex;
 use crate::index::embedding::Embedder;
 use crate::index::fulltext::{FullTextIndex, SearchHit};
@@ -31,6 +32,7 @@ use crate::storage::props::PropertyStore;
 use crate::storage::type_registry::TypeRegistry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Resolve a rule variable or literal to a label string.
 /// Quoted strings like `"Russia"` are literals -- return the unquoted value.
@@ -122,6 +124,10 @@ pub struct Graph {
     source_types: HashMap<u64, SourceType>,
     /// Compute planner for GPU/NPU-accelerated similarity search
     compute_planner: Option<engram_compute::planner::ComputePlanner>,
+    /// Event bus for graph change notifications (v1.1.0)
+    event_bus: Option<EventBus>,
+    /// Confidence thresholds for ThresholdCrossed events
+    confidence_thresholds: Vec<f32>,
 }
 
 impl Graph {
@@ -151,6 +157,8 @@ impl Graph {
             cooccurrence: CooccurrenceTracker::new(path),
             source_types: HashMap::new(),
             compute_planner: None,
+            event_bus: None,
+            confidence_thresholds: vec![0.3, 0.5, 0.7, 0.9],
         })
     }
 
@@ -181,6 +189,8 @@ impl Graph {
             cooccurrence,
             source_types: HashMap::new(),
             compute_planner: None,
+            event_bus: None,
+            confidence_thresholds: vec![0.3, 0.5, 0.7, 0.9],
         };
         graph.rebuild_indexes()?;
         Ok(graph)
@@ -202,6 +212,52 @@ impl Graph {
     /// Reduces vector memory by ~4x with ~1% accuracy loss.
     pub fn set_vector_quantization(&mut self, mode: crate::index::hnsw::QuantizationMode) {
         self.hnsw.set_quantization(mode);
+    }
+
+    /// Set the event bus for graph change notifications.
+    pub fn set_event_bus(&mut self, bus: EventBus) {
+        self.event_bus = Some(bus);
+    }
+
+    /// Get a reference to the event bus (for subscribing).
+    pub fn event_bus(&self) -> Option<&EventBus> {
+        self.event_bus.as_ref()
+    }
+
+    /// Emit an event to subscribers. No-op if no event bus is set.
+    fn emit(&self, event: GraphEvent) {
+        if let Some(ref bus) = self.event_bus {
+            bus.publish(event);
+        }
+    }
+
+    /// Check if a confidence change crosses any configured threshold.
+    fn check_threshold_crossing(
+        &self,
+        node_id: u64,
+        label: &str,
+        old_conf: f32,
+        new_conf: f32,
+    ) {
+        for &threshold in &self.confidence_thresholds {
+            if old_conf < threshold && new_conf >= threshold {
+                self.emit(GraphEvent::ThresholdCrossed {
+                    node_id,
+                    label: Arc::from(label),
+                    old_confidence: old_conf,
+                    new_confidence: new_conf,
+                    direction: ThresholdDirection::Up,
+                });
+            } else if old_conf >= threshold && new_conf < threshold {
+                self.emit(GraphEvent::ThresholdCrossed {
+                    node_id,
+                    label: Arc::from(label),
+                    old_confidence: old_conf,
+                    new_confidence: new_conf,
+                    direction: ThresholdDirection::Down,
+                });
+            }
+        }
     }
 
     /// Get the current vector quantization mode.
@@ -259,6 +315,14 @@ impl Graph {
             }
         }
 
+        self.emit(GraphEvent::FactStored {
+            node_id,
+            label: Arc::from(label),
+            confidence: init_conf,
+            source: Arc::from(provenance.source_id.as_str()),
+            entity_type: None,
+        });
+
         Ok(node_id)
     }
 
@@ -271,9 +335,20 @@ impl Graph {
     ) -> Result<u64> {
         let node_id = self.store(label, provenance)?;
         if let Some(slot) = self.find_slot_by_label(label)? {
+            let old_conf = self.brain.read_node(slot)?.confidence;
+            let clamped = confidence.clamp(0.0, 1.0);
             self.brain.update_node_field(slot, |n| {
-                n.confidence = confidence.clamp(0.0, 1.0);
+                n.confidence = clamped;
             })?;
+            if (old_conf - clamped).abs() > f32::EPSILON {
+                self.emit(GraphEvent::FactUpdated {
+                    node_id,
+                    label: Arc::from(label),
+                    old_confidence: old_conf,
+                    new_confidence: clamped,
+                });
+                self.check_threshold_crossing(node_id, label, old_conf, clamped);
+            }
         }
         Ok(node_id)
     }
@@ -303,6 +378,15 @@ impl Graph {
 
         self.adj_out.entry(from_node).or_default().push(edge_slot);
         self.adj_in.entry(to_node).or_default().push(edge_slot);
+
+        let edge = self.brain.read_edge(edge_slot)?;
+        self.emit(GraphEvent::EdgeCreated {
+            edge_id,
+            from: from_node,
+            to: to_node,
+            rel_type: Arc::from(relationship),
+            confidence: edge.confidence,
+        });
 
         Ok(edge_id)
     }
@@ -440,8 +524,12 @@ impl Graph {
         let slots = self.label_index.get(target_hash).to_vec();
 
         for slot in slots {
-            let node = self.brain.read_node(slot)?;
-            if node.is_active() && self.slot_label_eq(slot, label)? {
+            let active = {
+                let node = self.brain.read_node(slot)?;
+                node.is_active()
+            };
+            if active && self.slot_label_eq(slot, label)? {
+                let nid = self.brain.read_node(slot)?.id;
                 let now = current_timestamp();
                 self.brain.update_node_field(slot, |n| {
                     n.soft_delete(now);
@@ -452,6 +540,11 @@ impl Graph {
                 self.fulltext.remove_document(slot);
                 self.temporal.remove(slot);
                 self.hnsw.remove(slot);
+                self.emit(GraphEvent::FactDeleted {
+                    node_id: nid,
+                    label: Arc::from(label),
+                    source: Arc::from(provenance.source_id.as_str()),
+                });
                 return Ok(true);
             }
         }
@@ -466,9 +559,16 @@ impl Graph {
             Some(s) => s,
             None => return Ok(false),
         };
+        let nid = self.brain.read_node(slot)?.id;
         self.props.set(slot, key, value);
         // Re-index: rebuild fulltext for this slot with label + all prop values
         self.reindex_fulltext(slot)?;
+        self.emit(GraphEvent::PropertyChanged {
+            node_id: nid,
+            label: Arc::from(label),
+            key: Arc::from(key),
+            value: Arc::from(value),
+        });
         Ok(true)
     }
 
@@ -863,6 +963,10 @@ impl Graph {
             Some(s) => s,
             None => return Ok(false),
         };
+        let (nid, old_conf) = {
+            let node = self.brain.read_node(slot)?;
+            (node.id, node.confidence)
+        };
         let cap = self.source_cap(slot);
         let now = current_timestamp();
         self.brain.update_node_field(slot, |n| {
@@ -871,6 +975,16 @@ impl Graph {
             n.confidence = reinforce::reinforce_access(n.confidence, cap);
             n.updated_at = now;
         })?;
+        let new_conf = self.brain.read_node(slot)?.confidence;
+        if (old_conf - new_conf).abs() > f32::EPSILON {
+            self.emit(GraphEvent::FactUpdated {
+                node_id: nid,
+                label: Arc::from(label),
+                old_confidence: old_conf,
+                new_confidence: new_conf,
+            });
+            self.check_threshold_crossing(nid, label, old_conf, new_conf);
+        }
         Ok(true)
     }
 
@@ -881,6 +995,10 @@ impl Graph {
             Some(s) => s,
             None => return Ok(false),
         };
+        let (nid, old_conf) = {
+            let node = self.brain.read_node(slot)?;
+            (node.id, node.confidence)
+        };
         let cap = self.source_cap(slot);
         let now = current_timestamp();
         self.brain.update_node_field(slot, |n| {
@@ -890,6 +1008,16 @@ impl Graph {
             n.source_id = provenance.to_source_hash();
             n.updated_at = now;
         })?;
+        let new_conf = self.brain.read_node(slot)?.confidence;
+        if (old_conf - new_conf).abs() > f32::EPSILON {
+            self.emit(GraphEvent::FactUpdated {
+                node_id: nid,
+                label: Arc::from(label),
+                old_confidence: old_conf,
+                new_confidence: new_conf,
+            });
+            self.check_threshold_crossing(nid, label, old_conf, new_conf);
+        }
         Ok(true)
     }
 
@@ -901,19 +1029,27 @@ impl Graph {
         let mut decayed_count = 0u32;
 
         for slot in 0..node_count {
-            let node = self.brain.read_node(slot)?;
-            if !node.is_active() || node.confidence <= 0.0 {
+            let (active, nid, old_conf, last_acc) = {
+                let node = self.brain.read_node(slot)?;
+                (node.is_active(), node.id, node.confidence, node.last_accessed)
+            };
+            if !active || old_conf <= 0.0 {
                 continue;
             }
 
-            let new_conf = decay::apply_decay(node.confidence, node.last_accessed, now);
-            if (new_conf - node.confidence).abs() > f32::EPSILON {
+            let new_conf = decay::apply_decay(old_conf, last_acc, now);
+            if (new_conf - old_conf).abs() > f32::EPSILON {
                 self.brain.update_node_field(slot, |n| {
                     n.confidence = new_conf;
                 })?;
                 decayed_count += 1;
+                self.check_threshold_crossing(nid, "decay", old_conf, new_conf);
             }
         }
+
+        self.emit(GraphEvent::DecayApplied {
+            nodes_affected: decayed_count,
+        });
 
         Ok(decayed_count)
     }
@@ -1206,6 +1342,12 @@ impl Graph {
             }
         }
 
+        self.emit(GraphEvent::TierSweepCompleted {
+            promoted: result.promoted_to_core,
+            demoted: result.demoted_to_archival,
+            archived: result.demoted_to_archival,
+        });
+
         Ok(result)
     }
 
@@ -1215,13 +1357,23 @@ impl Graph {
             Some(s) => s,
             None => return Ok(false),
         };
-        let node = self.brain.read_node(slot)?;
-        let old_tier = node.memory_tier;
+        let (nid, old_tier) = {
+            let node = self.brain.read_node(slot)?;
+            (node.id, node.memory_tier)
+        };
         self.tier_bitmap.remove(old_tier as u32, slot);
         self.brain.update_node_field(slot, |n| {
             n.memory_tier = tier;
         })?;
         self.tier_bitmap.insert(tier as u32, slot);
+        if old_tier != tier {
+            self.emit(GraphEvent::TierChanged {
+                node_id: nid,
+                label: Arc::from(label),
+                old_tier,
+                new_tier: tier,
+            });
+        }
         Ok(true)
     }
 
