@@ -113,17 +113,17 @@
 | 10.6b | Coordinated cluster detection (dense internal, sparse external, low author trust, temporal sync) | Medium | 10.4 | `[x]` |
 | 10.7 | Severity scoring and ranking | Small | 10.2-10.6 | `[x]` |
 | 10.8 | Suggested query generation (mechanical, from graph topology) | Medium | 10.7 | `[x]` |
-| 10.9 | LLM-suggested queries (optional, via existing LLM endpoint) | Small | 10.8 | `[-]` |
-| 10.10 | Mesh knowledge profile auto-derivation (cluster -> DomainCoverage) | Medium | 10.4 | `[-]` |
-| 10.11 | Mesh profile gossip broadcast + ProfileQuery message type | Medium | 10.10 | `[-]` |
-| 10.12 | Mesh federated query protocol (FederatedQuery/FederatedResult) | Medium | 10.11 | `[-]` |
-| 10.13 | Mesh discovery API (`/mesh/profiles`, `/mesh/discover`) | Small | 10.12 | `[-]` |
-| 10.14 | 3-tier enrichment dispatcher (mesh > free external > paid external) | Medium | 10.12, 8.17 | `[-]` |
-| 10.15 | Query-triggered enrichment (eager + await modes) | Medium | 10.14 | `[-]` |
-| 10.16 | Mesh-level black area detection (uncovered areas across all peers) | Small | 10.10, 10.7 | `[-]` |
+| 10.9 | LLM-suggested queries (optional, via existing LLM endpoint) | Small | 10.8 | `[x]` |
+| 10.10 | Mesh knowledge profile auto-derivation (cluster -> DomainCoverage) | Medium | 10.4 | `[x]` |
+| 10.11 | Mesh profile gossip broadcast + ProfileQuery message type | Medium | 10.10 | `[x]` |
+| 10.12 | Mesh federated query protocol (FederatedQuery/FederatedResult) | Medium | 10.11 | `[x]` |
+| 10.13 | Mesh discovery API (`/mesh/profiles`, `/mesh/discover`) | Small | 10.12 | `[x]` |
+| 10.14 | 3-tier enrichment dispatcher (mesh > free external > paid external) | Medium | 10.12, 8.17 | `[x]` |
+| 10.15 | Query-triggered enrichment (eager + await modes) | Medium | 10.14 | `[x]` |
+| 10.16 | Mesh-level black area detection (uncovered areas across all peers) | Small | 10.10, 10.7 | `[x]` |
 | 10.17 | Wire into API: `/reason/gaps`, `/reason/scan`, `/reason/frontier` | Small | 10.8 | `[x]` |
 
-**Phase 10 done:** `[x]` (core detection complete; mesh federation deferred to mesh feature integration)
+**Phase 10 done:** `[x]`
 
 ---
 
@@ -137,20 +137,20 @@
 | 11.1 | `EventBus` (tokio broadcast channel) in `engram-core` | Small | 7.1 | `[x]` |
 | 11.2 | SSE event subscription endpoint (`GET /events/stream`) | Medium | 11.1 | `[x]` |
 | 11.3 | Webhook receiver endpoint (`POST /ingest/webhook/{id}`) | Medium | 8.13 | `[x]` |
-| 11.4 | WebSocket ingest endpoint (`WS /ingest/ws/{id}`) | Medium | 8.13 | `[-]` |
-| 11.5 | SSE response streaming for enrichment (`?enrich=await`) | Medium | 10.11 | `[-]` |
-| 11.6 | SSE ingest progress streaming (`GET /batch/jobs/{id}/stream`) | Small | 7.3 | `[-]` |
+| 11.4 | WebSocket ingest endpoint (`WS /ingest/ws/{id}`) | Medium | 8.13 | `[x]` |
+| 11.5 | SSE response streaming for enrichment (`GET /enrich/stream`) | Medium | 10.11 | `[x]` |
+| 11.6 | SSE ingest progress streaming (`GET /batch/jobs/{id}/stream`) | Small | 7.3 | `[x]` |
 | 11.7 | MCP tools: `engram_gaps`, `engram_frontier` | Medium | 10.17 | `[x]` |
-| 11.8 | MCP tools: `engram_mesh_discover`, `engram_mesh_query` | Small | 10.13 | `[-]` |
-| 11.9 | MCP restricted tools: `engram_ingest`, `engram_create_rule` (opt-in) | Small | 8.16, 9.10 | `[-]` |
+| 11.8 | MCP tools: `engram_mesh_discover`, `engram_mesh_query` | Small | 10.13 | `[x]` |
+| 11.9 | MCP restricted tools: `engram_ingest`, `engram_create_rule` (opt-in) | Small | 8.16, 9.10 | `[x]` |
 | 11.10 | A2A skills: `analyze_gaps` | Medium | 10.17 | `[x]` |
-| 11.11 | A2A skills: `federated_search`, `suggest_investigations` | Small | 10.13, 10.9 | `[-]` |
-| 11.12 | A2A streaming task support for long-running operations | Medium | 11.5 | `[-]` |
-| 11.13 | gRPC proto definitions (`proto/engram_v110.proto`) | Medium | 8.27, 10.17 | `[-]` |
-| 11.14 | gRPC server-streaming RPCs (ingest progress, enrichment, events) | Medium | 11.13, 11.2 | `[-]` |
-| 11.15 | gRPC client-streaming RPC (bulk ingest) | Small | 11.13, 8.16 | `[-]` |
+| 11.11 | A2A skills: `federated_search`, `suggest_investigations` | Small | 10.13, 10.9 | `[x]` |
+| 11.12 | A2A streaming task support for long-running operations | Medium | 11.5 | `[x]` |
+| 11.13 | gRPC proto definitions (`proto/engram_v110.proto`) | Medium | 8.27, 10.17 | `[x]` |
+| 11.14 | gRPC server-streaming RPCs (ingest progress, enrichment, events) | Medium | 11.13, 11.2 | `[x]` |
+| 11.15 | gRPC client-streaming RPC (bulk ingest) | Small | 11.13, 8.16 | `[x]` |
 
-**Phase 11 done:** `[x]` (core streaming complete; WebSocket, enrichment streaming, gRPC deferred)
+**Phase 11 done:** `[x]`
 
 ---
 

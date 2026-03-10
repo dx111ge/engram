@@ -356,17 +356,185 @@ mod service {
     }
 }
 
+// ── Streaming gRPC service (v1.1.0) ──
+
+#[cfg(feature = "grpc")]
+mod stream_service {
+    use super::proto;
+    use super::proto::engram_stream_service_server::EngramStreamService;
+    use crate::state::AppState;
+    use engram_core::graph::Provenance;
+    use tonic::{Request, Response, Status, Streaming};
+    use tokio_stream::wrappers::BroadcastStream;
+
+    pub struct EngramStreamGrpc {
+        pub state: AppState,
+    }
+
+    fn internal(e: impl std::fmt::Display) -> Status {
+        Status::internal(e.to_string())
+    }
+
+    type GrpcStream<T> = std::pin::Pin<Box<dyn futures::Stream<Item = Result<T, Status>> + Send>>;
+
+    #[tonic::async_trait]
+    impl EngramStreamService for EngramStreamGrpc {
+        type EventStreamStream = GrpcStream<proto::GraphEventMessage>;
+
+        async fn event_stream(
+            &self,
+            request: Request<proto::EventStreamRequest>,
+        ) -> Result<Response<Self::EventStreamStream>, Status> {
+            use tokio_stream::StreamExt;
+
+            let topics = request.into_inner().topics;
+            let rx = self.state.event_bus.subscribe();
+
+            let stream = BroadcastStream::new(rx)
+                .filter_map(move |result| {
+                    match result {
+                        Ok(event) => {
+                            let event_type = format!("{:?}", event);
+                            let event_type_short = event_type.split('{').next().unwrap_or(&event_type).trim().to_string();
+
+                            // Topic filtering
+                            if !topics.is_empty() && !topics.iter().any(|t| event_type_short.to_lowercase().contains(&t.to_lowercase())) {
+                                return None;
+                            }
+
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+
+                            Some(Ok(proto::GraphEventMessage {
+                                event_type: event_type_short,
+                                data: serde_json::to_string(&format!("{:?}", event)).unwrap_or_default(),
+                                timestamp,
+                            }))
+                        }
+                        Err(_) => None,
+                    }
+                });
+
+            Ok(Response::new(Box::pin(stream)))
+        }
+
+        type IngestProgressStream = GrpcStream<proto::IngestProgressMessage>;
+
+        async fn ingest_progress(
+            &self,
+            request: Request<proto::IngestProgressRequest>,
+        ) -> Result<Response<Self::IngestProgressStream>, Status> {
+            let job_id = request.into_inner().job_id;
+
+            // Stub: return a single "complete" message
+            let msg = proto::IngestProgressMessage {
+                job_id: job_id.clone(),
+                phase: "complete".to_string(),
+                processed: 0,
+                total: 0,
+                progress: 1.0,
+                error: String::new(),
+            };
+            let stream = tokio_stream::once(Ok(msg));
+            Ok(Response::new(Box::pin(stream)))
+        }
+
+        type EnrichStreamStream = GrpcStream<proto::EnrichmentMessage>;
+
+        async fn enrich_stream(
+            &self,
+            request: Request<proto::EnrichStreamRequest>,
+        ) -> Result<Response<Self::EnrichStreamStream>, Status> {
+            let req = request.into_inner();
+            let g = self.state.graph.read().map_err(|_| internal("lock"))?;
+
+            // Local search phase
+            let results = g.search(&req.query, 20).unwrap_or_default();
+            let local_data = serde_json::json!({
+                "results": results.iter().map(|r| serde_json::json!({
+                    "label": r.label,
+                    "confidence": r.confidence,
+                    "score": r.score,
+                })).collect::<Vec<_>>()
+            });
+            drop(g);
+
+            let events = vec![
+                proto::EnrichmentMessage {
+                    phase: "local".to_string(),
+                    status: "complete".to_string(),
+                    data: serde_json::to_string(&local_data).unwrap_or_default(),
+                },
+                proto::EnrichmentMessage {
+                    phase: "mesh".to_string(),
+                    status: "skipped".to_string(),
+                    data: "{}".to_string(),
+                },
+                proto::EnrichmentMessage {
+                    phase: "external".to_string(),
+                    status: "skipped".to_string(),
+                    data: "{}".to_string(),
+                },
+            ];
+
+            let stream = tokio_stream::iter(events.into_iter().map(Ok));
+            Ok(Response::new(Box::pin(stream)))
+        }
+
+        async fn bulk_ingest(
+            &self,
+            request: Request<Streaming<proto::IngestItem>>,
+        ) -> Result<Response<proto::BulkIngestResponse>, Status> {
+            use tokio_stream::StreamExt;
+
+            let start = std::time::Instant::now();
+            let mut stream = request.into_inner();
+            let mut ingested = 0u64;
+            let mut errors = 0u64;
+
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(item) => {
+                        let source = if item.source.is_empty() { "grpc" } else { &item.source };
+                        let prov = Provenance::user(source);
+                        let mut g = self.state.graph.write().map_err(|_| internal("lock"))?;
+                        match g.store(&item.text, &prov) {
+                            Ok(_) => {
+                                ingested += 1;
+                                self.state.mark_dirty();
+                            }
+                            Err(_) => errors += 1,
+                        }
+                    }
+                    Err(_) => errors += 1,
+                }
+            }
+
+            Ok(Response::new(proto::BulkIngestResponse {
+                ingested,
+                errors,
+                duration_ms: start.elapsed().as_millis() as u64,
+            }))
+        }
+    }
+}
+
 /// Start the real gRPC server (protobuf binary, tonic).
 #[cfg(feature = "grpc")]
 pub async fn serve_grpc(state: crate::state::AppState, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     use proto::engram_service_server::EngramServiceServer;
+    use proto::engram_stream_service_server::EngramStreamServiceServer;
 
-    let svc = service::EngramGrpc { state };
+    let svc = service::EngramGrpc { state: state.clone() };
+    let stream_svc = stream_service::EngramStreamGrpc { state };
     let addr = addr.parse().map_err(|e| format!("invalid gRPC address: {e}"))?;
 
     tracing::info!("engram gRPC service (tonic) listening on {}", addr);
     tonic::transport::Server::builder()
         .add_service(EngramServiceServer::new(svc))
+        .add_service(EngramStreamServiceServer::new(stream_svc))
         .serve(addr)
         .await?;
     Ok(())

@@ -26,6 +26,8 @@ pub fn route_task(
         "learn" => handle_learn(task_id, &request.message, graph),
         "explain" => handle_explain(task_id, &text, graph),
         "analyze-gaps" => handle_analyze_gaps(task_id, &text, graph),
+        "federated-search" => handle_federated_search(task_id, &text, graph),
+        "suggest-investigations" => handle_suggest_investigations(task_id, &text, graph),
         other => TaskResponse::failed(task_id, &format!("Unknown skill: {other}")),
     }
 }
@@ -276,6 +278,84 @@ fn handle_explain(task_id: &str, text: &str, graph: &Arc<RwLock<Graph>>) -> Task
             ])
         }
         Ok(None) => TaskResponse::failed(task_id, &format!("entity not found: {entity}")),
+        Err(e) => TaskResponse::failed(task_id, &e.to_string()),
+    }
+}
+
+/// Federated search — search across local graph with mesh-aware ACL filtering.
+fn handle_federated_search(task_id: &str, text: &str, graph: &Arc<RwLock<Graph>>) -> TaskResponse {
+    let g = match graph.read() {
+        Ok(g) => g,
+        Err(_) => return TaskResponse::failed(task_id, "graph read lock poisoned"),
+    };
+
+    let query = engram_reason::FederatedQuery {
+        query: text.to_string(),
+        query_type: "fulltext".to_string(),
+        max_results: 20,
+        min_confidence: 0.0,
+        requesting_node: "a2a".to_string(),
+        sensitivity_clearance: "public".to_string(),
+    };
+
+    let result = engram_reason::federated::execute_local(&g, &query);
+
+    TaskResponse::completed(task_id, vec![
+        Artifact::json(serde_json::json!({
+            "action": "federated_search",
+            "query": text,
+            "peer": result.peer_id,
+            "facts": result.facts,
+            "total": result.total_matches,
+        })),
+    ])
+}
+
+/// Suggest investigations — uses gap detection + LLM suggestions.
+fn handle_suggest_investigations(task_id: &str, text: &str, graph: &Arc<RwLock<Graph>>) -> TaskResponse {
+    let g = match graph.read() {
+        Ok(g) => g,
+        Err(_) => return TaskResponse::failed(task_id, "graph read lock poisoned"),
+    };
+
+    let config = engram_reason::DetectionConfig::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64;
+
+    match engram_reason::scan(&g, &config, now) {
+        Ok((gaps, _report)) => {
+            let min_severity = if text.contains("critical") { 0.7 } else { 0.3 };
+            let filtered: Vec<_> = gaps.into_iter()
+                .filter(|gap| gap.severity >= min_severity)
+                .take(10)
+                .collect();
+
+            // Generate mechanical query suggestions
+            let suggestions: Vec<serde_json::Value> = filtered.into_iter().map(|mut gap| {
+                engram_reason::queries::generate_queries(&mut gap, &g);
+                serde_json::json!({
+                    "gap": gap.entities.first().unwrap_or(&String::new()),
+                    "kind": format!("{:?}", gap.kind),
+                    "severity": gap.severity,
+                    "suggested_queries": gap.suggested_queries,
+                })
+            }).collect();
+
+            // Also include LLM suggestion config info
+            let llm_config = engram_reason::LlmSuggestionConfig::from_env();
+            let llm_available = llm_config.api_key.is_some();
+
+            TaskResponse::completed(task_id, vec![
+                Artifact::json(serde_json::json!({
+                    "action": "suggest_investigations",
+                    "investigations": suggestions,
+                    "total_gaps": suggestions.len(),
+                    "llm_suggestions_available": llm_available,
+                })),
+            ])
+        }
         Err(e) => TaskResponse::failed(task_id, &e.to_string()),
     }
 }

@@ -71,6 +71,17 @@ pub fn router(state: AppState) -> Router {
         .route("/reason/gaps", get(handlers::reason_gaps))
         .route("/reason/scan", post(handlers::reason_scan))
         .route("/reason/frontier", get(handlers::reason_frontier))
+        .route("/reason/suggest", post(handlers::reason_suggest))
+        // Mesh discovery (profiles, federated query)
+        .route("/mesh/profiles", get(handlers::mesh_profiles))
+        .route("/mesh/discover", get(handlers::mesh_discover))
+        .route("/mesh/query", post(handlers::mesh_federated_query))
+        // Batch job streaming
+        .route("/batch/jobs/{id}/stream", get(handlers::batch_job_stream))
+        // WebSocket ingest
+        .route("/ingest/ws/{pipeline_id}", get(handlers::ws_ingest))
+        // Enrichment SSE stream
+        .route("/enrich/stream", get(handlers::enrich_stream))
         // Proxy (CORS bypass for browser-based intel dashboard)
         .route("/proxy/gdelt", get(handlers::proxy_gdelt))
         .route("/proxy/rss", get(handlers::proxy_news_rss))

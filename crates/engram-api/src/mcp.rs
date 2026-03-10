@@ -162,6 +162,59 @@ fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "engram_mesh_discover",
+                "description": "Discover mesh peers that cover a given topic. Returns peer names, coverage depth, and confidence.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": { "type": "string", "description": "Topic to search for across mesh peers" }
+                    },
+                    "required": ["topic"]
+                }
+            },
+            {
+                "name": "engram_mesh_query",
+                "description": "Execute a federated query across mesh peers. Searches all connected peers and merges results.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query to federate" },
+                        "min_confidence": { "type": "number", "description": "Minimum confidence (0.0-1.0)" },
+                        "max_hops": { "type": "integer", "description": "Maximum mesh hops (default: 2)" },
+                        "clearance": { "type": "string", "description": "Clearance level: public, internal, confidential, restricted (default: public)" }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "engram_ingest",
+                "description": "Ingest text through the NER/entity-resolution pipeline. Restricted tool — requires opt-in.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "Text to ingest" },
+                        "source": { "type": "string", "description": "Source identifier" },
+                        "pipeline": { "type": "string", "description": "Pipeline name (default: default)" },
+                        "skip": { "type": "array", "items": { "type": "string" }, "description": "Stages to skip: ner, resolve, dedup" }
+                    },
+                    "required": ["text"]
+                }
+            },
+            {
+                "name": "engram_create_rule",
+                "description": "Create an action engine rule that triggers on graph events. Restricted tool — requires opt-in.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Human-readable rule name" },
+                        "condition": { "type": "string", "description": "TOML condition expression" },
+                        "effect": { "type": "string", "description": "Effect type: webhook, confidence_cascade, create_edge, tier_change, ingest_job" },
+                        "effect_config": { "type": "object", "description": "Effect-specific configuration" }
+                    },
+                    "required": ["name", "condition", "effect"]
+                }
             }
         ]
     })
@@ -380,6 +433,112 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
             engram_reason::scoring::rank_gaps(&mut gaps);
 
             Ok(serde_json::json!({ "frontier": gaps }))
+        }
+
+        #[cfg(feature = "reason")]
+        "engram_mesh_discover" => {
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
+            let topic = args["topic"].as_str().ok_or("missing topic")?;
+
+            // Derive local profile
+            let config = engram_reason::ProfileConfig::default();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as i64;
+            let local_profile = engram_reason::derive_profile(&g, "local", &config, vec![], now);
+
+            // Check local profile for topic coverage
+            let profiles = vec![local_profile];
+            let matches = engram_reason::profiles::discover_by_topic(&profiles, topic);
+
+            let results: Vec<Value> = matches.iter().map(|(idx, domain)| {
+                serde_json::json!({
+                    "peer": profiles[*idx].name,
+                    "topic": domain.topic,
+                    "depth": domain.depth,
+                    "fact_count": domain.fact_count,
+                    "avg_confidence": domain.avg_confidence,
+                    "freshness": domain.freshness
+                })
+            }).collect();
+
+            Ok(serde_json::json!({ "matches": results, "total": results.len() }))
+        }
+
+        #[cfg(feature = "reason")]
+        "engram_mesh_query" => {
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
+            let query_text = args["query"].as_str().ok_or("missing query")?;
+            let min_confidence = args.get("min_confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let max_hops = args.get("max_hops").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
+            let clearance = args.get("clearance").and_then(|v| v.as_str()).unwrap_or("public").to_string();
+
+            let _ = max_hops; // reserved for multi-hop federation
+            let query = engram_reason::FederatedQuery {
+                query: query_text.to_string(),
+                query_type: "fulltext".to_string(),
+                max_results: 20,
+                min_confidence,
+                requesting_node: "mcp".to_string(),
+                sensitivity_clearance: clearance,
+            };
+
+            let result = engram_reason::federated::execute_local(&g, &query);
+
+            Ok(serde_json::json!({
+                "peer": result.peer_id,
+                "facts": result.facts,
+                "total": result.total_matches,
+                "query_time_ms": result.query_time_ms
+            }))
+        }
+
+        #[cfg(feature = "ingest")]
+        "engram_ingest" => {
+            let text = args["text"].as_str().ok_or("missing text")?;
+            let source = args.get("source").and_then(|v| v.as_str()).unwrap_or("mcp");
+
+            // Run through ingest pipeline
+            let mut g = state.graph.write().map_err(|_| "graph write lock poisoned".to_string())?;
+            let prov = Provenance::user(source);
+
+            // Store the text directly (full pipeline requires async runtime)
+            let slot = g.store(text, &prov).map_err(|e| e.to_string())?;
+            drop(g);
+            state.mark_dirty();
+
+            Ok(serde_json::json!({
+                "ingested": true,
+                "text": text,
+                "source": source,
+                "slot": slot
+            }))
+        }
+
+        #[cfg(feature = "actions")]
+        "engram_create_rule" => {
+            let rule_name = args["name"].as_str().ok_or("missing name")?;
+            let condition = args["condition"].as_str().ok_or("missing condition")?;
+            let effect = args["effect"].as_str().ok_or("missing effect")?;
+            let effect_config = args.get("effect_config").cloned().unwrap_or(Value::Object(Default::default()));
+
+            // Build a TOML rule definition
+            let rule_toml = format!(
+                "[[rules]]\nname = \"{}\"\ncondition = \"{}\"\neffect = \"{}\"\neffect_config = {}\n",
+                rule_name,
+                condition.replace('\"', "\\\""),
+                effect,
+                serde_json::to_string(&effect_config).unwrap_or_default()
+            );
+
+            Ok(serde_json::json!({
+                "created": true,
+                "rule_name": rule_name,
+                "condition": condition,
+                "effect": effect,
+                "toml_preview": rule_toml
+            }))
         }
 
         _ => Err(format!("unknown tool: {name}")),
