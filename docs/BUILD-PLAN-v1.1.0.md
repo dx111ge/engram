@@ -161,26 +161,26 @@
 
 | # | Task | Effort | Deps | Status |
 |---|------|--------|------|--------|
-| 12.1 | Create `engram-ui` Leptos crate (Trunk.toml, main.rs, app.rs, router) | Medium | -- | `[ ]` |
-| 12.2 | Shared components: nav, toast, modal, settings, table, stat_card | Medium | 12.1 | `[ ]` |
-| 12.3 | API client module (gloo-net, context provider, error handling) | Small | 12.1 | `[ ]` |
-| 12.4 | SSE listener component (EventSource -> Leptos signals) | Medium | 12.1 | `[ ]` |
-| 12.5 | vis.js interop (wasm-bindgen extern, GraphCanvas component) | Medium | 12.1 | `[ ]` |
-| 12.6 | Page: Dashboard (stats, health, system overview) | Medium | 12.2, 12.3 | `[ ]` |
-| 12.7 | Page: Graph (vis.js visualization, node inspector, filtering) | Large | 12.5, 12.3 | `[ ]` |
-| 12.8 | Page: Search (BM25 + semantic, result list, property filters) | Medium | 12.3 | `[ ]` |
-| 12.9 | Page: Natural Language (/tell, /ask, conversation view) | Medium | 12.3 | `[ ]` |
-| 12.10 | Page: Import (JSON-LD upload/download, preview) | Small | 12.3 | `[ ]` |
-| 12.11 | Page: Learning (confidence scores, reinforcement, decay timeline) | Medium | 12.3 | `[ ]` |
-| 12.12 | Page: Ingest (pipeline config, live progress via SSE) | Large | 12.2, 12.4, 8.16 | `[ ]` |
-| 12.13 | Page: Sources (health dashboard, usage, ledger view) | Medium | 12.3, 8.27 | `[ ]` |
-| 12.14 | Page: Actions (rule editor, dry run, event log) | Medium | 12.3, 9.10 | `[ ]` |
-| 12.15 | Page: Gaps (black area map, severity table, LLM suggestions + warning) | Large | 12.5, 12.3, 10.17 | `[ ]` |
-| 12.16 | Page: Mesh (peer topology, profiles, federated query, trust controls) | Large | 12.5, 12.3, 10.13 | `[ ]` |
-| 12.17 | CSS migration (adapt existing style.css for Leptos class bindings) | Medium | 12.6-12.16 | `[ ]` |
-| 12.18 | Trunk release build integration (output to frontend/dist, served by engram) | Small | 12.17 | `[ ]` |
+| 12.1 | Create `engram-ui` Leptos crate (Trunk.toml, main.rs, app.rs, router) | Medium | -- | `[x]` |
+| 12.2 | Shared components: nav, toast, modal, settings, table, stat_card | Medium | 12.1 | `[x]` |
+| 12.3 | API client module (gloo-net, context provider, error handling) | Small | 12.1 | `[x]` |
+| 12.4 | SSE listener component (EventSource -> Leptos signals) | Medium | 12.1 | `[x]` |
+| 12.5 | vis.js interop (wasm-bindgen extern, GraphCanvas component) | Medium | 12.1 | `[x]` |
+| 12.6 | Page: Dashboard (stats, health, system overview) | Medium | 12.2, 12.3 | `[x]` |
+| 12.7 | Page: Graph (vis.js visualization, node inspector, filtering) | Large | 12.5, 12.3 | `[x]` |
+| 12.8 | Page: Search (BM25 + semantic, result list, property filters) | Medium | 12.3 | `[x]` |
+| 12.9 | Page: Natural Language (/tell, /ask, conversation view) | Medium | 12.3 | `[x]` |
+| 12.10 | Page: Import (JSON-LD upload/download, preview) | Small | 12.3 | `[x]` |
+| 12.11 | Page: Learning (confidence scores, reinforcement, decay timeline) | Medium | 12.3 | `[x]` |
+| 12.12 | Page: Ingest (pipeline config, live progress via SSE) | Large | 12.2, 12.4, 8.16 | `[x]` |
+| 12.13 | Page: Sources (health dashboard, usage, ledger view) | Medium | 12.3, 8.27 | `[x]` |
+| 12.14 | Page: Actions (rule editor, dry run, event log) | Medium | 12.3, 9.10 | `[x]` |
+| 12.15 | Page: Gaps (black area map, severity table, LLM suggestions + warning) | Large | 12.5, 12.3, 10.17 | `[x]` |
+| 12.16 | Page: Mesh (peer topology, profiles, federated query, trust controls) | Large | 12.5, 12.3, 10.13 | `[x]` |
+| 12.17 | CSS migration (adapt existing style.css for Leptos class bindings) | Medium | 12.6-12.16 | `[x]` |
+| 12.18 | Trunk release build integration (output to frontend/dist, served by engram) | Small | 12.17 | `[x]` |
 
-**Phase 12 done:** `[ ]`
+**Phase 12 done:** `[x]`
 
 ---
 
@@ -188,12 +188,12 @@
 
 | Phase | Tasks | Small | Medium | Large | Status |
 |-------|-------|-------|--------|-------|--------|
-| 7 Foundation | 5 | 3 | 1 | 0 | `[ ]` |
-| 8 Ingest | 27 | 10 | 14 | 1 | `[ ]` |
-| 9 Action | 11 | 5 | 4 | 0 | `[ ]` |
-| 10 Reason | 17 | 5 | 9 | 0 | `[ ]` |
-| 11 Streaming | 15 | 4 | 8 | 0 | `[ ]` |
-| 12 Frontend | 18 | 2 | 10 | 4 | `[ ]` |
+| 7 Foundation | 5 | 3 | 1 | 0 | `[x]` |
+| 8 Ingest | 29 | 12 | 14 | 1 | `[x]` |
+| 9 Action | 11 | 5 | 4 | 0 | `[x]` |
+| 10 Reason | 17 | 5 | 9 | 0 | `[x]` |
+| 11 Streaming | 15 | 4 | 8 | 0 | `[x]` |
+| 12 Frontend | 18 | 2 | 10 | 4 | `[x]` |
 | **Total** | **93** | **29** | **46** | **5** | |
 
 ## Parallel Work Streams

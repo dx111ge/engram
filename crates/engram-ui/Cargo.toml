@@ -1,0 +1,25 @@
+[package]
+name = "engram-ui"
+version = "1.1.0"
+edition = "2024"
+license = "LicenseRef-Proprietary"
+description = "Leptos WASM frontend for engram"
+
+[dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+leptos_router = "0.8"
+leptos_meta = "0.8"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["HtmlElement", "EventSource", "MessageEvent", "Window", "Document", "Storage"] }
+js-sys = "0.3"
+gloo-net = { version = "0.6", features = ["http", "eventsource"] }
+gloo-timers = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+console_error_panic_hook = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

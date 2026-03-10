@@ -1,0 +1,6 @@
+[build]
+target = "index.html"
+dist = "../../frontend/dist"
+
+[watch]
+watch = ["src", "index.html", "css"]
