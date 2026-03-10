@@ -6,6 +6,7 @@
 /// when explicitly requested.
 
 use engram_core::Graph;
+use engram_core::events::EventBus;
 use engram_core::learning::rules::Rule;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -49,6 +50,8 @@ pub struct AppState {
     /// Optional rule set for push-based inference triggers.
     /// When non-empty, rules are evaluated after store/relate/tell mutations.
     pub rules: Arc<RwLock<Vec<Rule>>>,
+    /// Event bus for broadcasting graph change events to SSE subscribers.
+    pub event_bus: Arc<EventBus>,
     /// Optional action engine for event-driven rules.
     #[cfg(feature = "actions")]
     pub action_engine: Arc<RwLock<engram_action::ActionEngine>>,
@@ -81,6 +84,7 @@ impl AppState {
             },
             dirty: Arc::new(AtomicBool::new(false)),
             rules: Arc::new(RwLock::new(Vec::new())),
+            event_bus: Arc::new(EventBus::default()),
             #[cfg(feature = "mesh")]
             mesh: None,
         }

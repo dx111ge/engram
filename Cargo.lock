@@ -592,6 +592,7 @@ version = "1.0.0"
 dependencies = [
  "engram-api",
  "engram-core",
+ "engram-reason",
  "serde",
  "serde_json",
  "tempfile",
@@ -633,6 +634,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "tower-http",
@@ -3008,6 +3010,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

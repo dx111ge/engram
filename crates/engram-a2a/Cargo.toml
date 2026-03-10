@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 engram-core = { path = "../engram-core" }
 engram-api = { path = "../engram-api" }
+engram-reason = { path = "../engram-reason" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

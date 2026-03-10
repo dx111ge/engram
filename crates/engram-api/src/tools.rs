@@ -167,6 +167,42 @@ pub fn tool_definitions() -> Value {
                         "required": ["entity"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "engram_gaps",
+                    "description": "List knowledge gaps (black areas) ranked by severity. Detects frontier nodes, structural holes, temporal gaps, confidence deserts, and coordinated clusters.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "min_severity": { "type": "number", "description": "Minimum severity to include (0.0-1.0, default: 0.3)" },
+                            "limit": { "type": "integer", "description": "Max results (default: 20)" }
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "engram_sources",
+                    "description": "List configured data sources with health status and usage statistics",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "engram_frontier",
+                    "description": "List frontier nodes — entities at the edge of knowledge with few connections",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
             }
         ]
     })

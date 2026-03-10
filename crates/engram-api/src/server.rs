@@ -64,6 +64,9 @@ pub fn router(state: AppState) -> Router {
         .route("/actions/rules/{id}", get(handlers::get_action_rule))
         .route("/actions/rules/{id}", delete(handlers::delete_action_rule))
         .route("/actions/dry-run", post(handlers::dry_run_action))
+        // Streaming
+        .route("/events/stream", get(handlers::event_stream))
+        .route("/ingest/webhook/{pipeline_id}", post(handlers::webhook_receive))
         // Reason / gap detection (available when compiled with `reason` feature)
         .route("/reason/gaps", get(handlers::reason_gaps))
         .route("/reason/scan", post(handlers::reason_scan))

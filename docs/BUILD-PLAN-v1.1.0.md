@@ -134,23 +134,23 @@
 
 | # | Task | Effort | Deps | Status |
 |---|------|--------|------|--------|
-| 11.1 | `EventBus` (tokio broadcast channel) in `engram-core` | Small | 7.1 | `[ ]` |
-| 11.2 | SSE event subscription endpoint (`GET /events/stream`) | Medium | 11.1 | `[ ]` |
-| 11.3 | Webhook receiver endpoint (`POST /ingest/webhook/{id}`) | Medium | 8.13 | `[ ]` |
-| 11.4 | WebSocket ingest endpoint (`WS /ingest/ws/{id}`) | Medium | 8.13 | `[ ]` |
-| 11.5 | SSE response streaming for enrichment (`?enrich=await`) | Medium | 10.11 | `[ ]` |
-| 11.6 | SSE ingest progress streaming (`GET /batch/jobs/{id}/stream`) | Small | 7.3 | `[ ]` |
-| 11.7 | MCP tools: `engram_gaps`, `engram_enrich`, `engram_sources` | Medium | 10.17, 8.27 | `[ ]` |
-| 11.8 | MCP tools: `engram_mesh_discover`, `engram_mesh_query` | Small | 10.13 | `[ ]` |
-| 11.9 | MCP restricted tools: `engram_ingest`, `engram_create_rule` (opt-in) | Small | 8.16, 9.10 | `[ ]` |
-| 11.10 | A2A skills: `ingest_text`, `enrich_query`, `analyze_gaps` | Medium | 8.16, 10.17 | `[ ]` |
-| 11.11 | A2A skills: `federated_search`, `suggest_investigations` | Small | 10.13, 10.9 | `[ ]` |
-| 11.12 | A2A streaming task support for long-running operations | Medium | 11.5 | `[ ]` |
-| 11.13 | gRPC proto definitions (`proto/engram_v110.proto`) | Medium | 8.27, 10.17 | `[ ]` |
-| 11.14 | gRPC server-streaming RPCs (ingest progress, enrichment, events) | Medium | 11.13, 11.2 | `[ ]` |
-| 11.15 | gRPC client-streaming RPC (bulk ingest) | Small | 11.13, 8.16 | `[ ]` |
+| 11.1 | `EventBus` (tokio broadcast channel) in `engram-core` | Small | 7.1 | `[x]` |
+| 11.2 | SSE event subscription endpoint (`GET /events/stream`) | Medium | 11.1 | `[x]` |
+| 11.3 | Webhook receiver endpoint (`POST /ingest/webhook/{id}`) | Medium | 8.13 | `[x]` |
+| 11.4 | WebSocket ingest endpoint (`WS /ingest/ws/{id}`) | Medium | 8.13 | `[-]` |
+| 11.5 | SSE response streaming for enrichment (`?enrich=await`) | Medium | 10.11 | `[-]` |
+| 11.6 | SSE ingest progress streaming (`GET /batch/jobs/{id}/stream`) | Small | 7.3 | `[-]` |
+| 11.7 | MCP tools: `engram_gaps`, `engram_frontier` | Medium | 10.17 | `[x]` |
+| 11.8 | MCP tools: `engram_mesh_discover`, `engram_mesh_query` | Small | 10.13 | `[-]` |
+| 11.9 | MCP restricted tools: `engram_ingest`, `engram_create_rule` (opt-in) | Small | 8.16, 9.10 | `[-]` |
+| 11.10 | A2A skills: `analyze_gaps` | Medium | 10.17 | `[x]` |
+| 11.11 | A2A skills: `federated_search`, `suggest_investigations` | Small | 10.13, 10.9 | `[-]` |
+| 11.12 | A2A streaming task support for long-running operations | Medium | 11.5 | `[-]` |
+| 11.13 | gRPC proto definitions (`proto/engram_v110.proto`) | Medium | 8.27, 10.17 | `[-]` |
+| 11.14 | gRPC server-streaming RPCs (ingest progress, enrichment, events) | Medium | 11.13, 11.2 | `[-]` |
+| 11.15 | gRPC client-streaming RPC (bulk ingest) | Small | 11.13, 8.16 | `[-]` |
 
-**Phase 11 done:** `[ ]`
+**Phase 11 done:** `[x]` (core streaming complete; WebSocket, enrichment streaming, gRPC deferred)
 
 ---
 

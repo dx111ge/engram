@@ -25,6 +25,7 @@ pub fn route_task(
         "reason" => handle_reason(task_id, &text, graph),
         "learn" => handle_learn(task_id, &request.message, graph),
         "explain" => handle_explain(task_id, &text, graph),
+        "analyze-gaps" => handle_analyze_gaps(task_id, &text, graph),
         other => TaskResponse::failed(task_id, &format!("Unknown skill: {other}")),
     }
 }
@@ -275,6 +276,39 @@ fn handle_explain(task_id: &str, text: &str, graph: &Arc<RwLock<Graph>>) -> Task
             ])
         }
         Ok(None) => TaskResponse::failed(task_id, &format!("entity not found: {entity}")),
+        Err(e) => TaskResponse::failed(task_id, &e.to_string()),
+    }
+}
+
+/// Analyze knowledge gaps — uses engram-reason to detect black areas.
+fn handle_analyze_gaps(task_id: &str, text: &str, graph: &Arc<RwLock<Graph>>) -> TaskResponse {
+    let g = match graph.read() {
+        Ok(g) => g,
+        Err(_) => return TaskResponse::failed(task_id, "graph read lock poisoned"),
+    };
+
+    let config = engram_reason::DetectionConfig::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64;
+
+    match engram_reason::scan(&g, &config, now) {
+        Ok((gaps, report)) => {
+            let min_severity = if text.contains("critical") { 0.7 } else { 0.3 };
+            let filtered: Vec<_> = gaps.into_iter()
+                .filter(|gap| gap.severity >= min_severity)
+                .take(20)
+                .collect();
+
+            TaskResponse::completed(task_id, vec![
+                Artifact::json(serde_json::json!({
+                    "action": "analyze_gaps",
+                    "gaps": filtered,
+                    "report": report,
+                })),
+            ])
+        }
         Err(e) => TaskResponse::failed(task_id, &e.to_string()),
     }
 }

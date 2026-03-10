@@ -1957,3 +1957,91 @@ pub async fn reason_frontier() -> impl axum::response::IntoResponse {
     (StatusCode::NOT_IMPLEMENTED,
      Json(ErrorResponse { error: "reason feature not enabled".into() }))
 }
+
+// ── SSE event streaming ──────────────────────────────────────────────
+
+/// SSE endpoint: subscribe to graph change events in real time.
+pub async fn event_stream(
+    State(state): State<AppState>,
+    query: axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use tokio_stream::wrappers::BroadcastStream;
+    use tokio_stream::StreamExt;
+
+    let topics: Vec<String> = query.get("topics")
+        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    let rx = state.event_bus.subscribe();
+    let stream = BroadcastStream::new(rx)
+        .filter_map(move |result| {
+            match result {
+                Ok(event) => {
+                    let event_type = event_type_name(&event);
+                    // Filter by topics if specified
+                    if !topics.is_empty() && !topics.iter().any(|t| t == "*" || t == event_type) {
+                        return None;
+                    }
+                    let data = serde_json::to_string(&format!("{:?}", event)).unwrap_or_default();
+                    Some(Ok(axum::response::sse::Event::default()
+                        .event(event_type)
+                        .data(data)))
+                }
+                Err(_) => None, // lagged, skip
+            }
+        });
+
+    axum::response::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+fn event_type_name(event: &engram_core::events::GraphEvent) -> &'static str {
+    use engram_core::events::GraphEvent;
+    match event {
+        GraphEvent::FactStored { .. } => "fact_stored",
+        GraphEvent::FactUpdated { .. } => "fact_updated",
+        GraphEvent::FactDeleted { .. } => "fact_deleted",
+        GraphEvent::EdgeCreated { .. } => "edge_created",
+        GraphEvent::PropertyChanged { .. } => "property_changed",
+        GraphEvent::TierChanged { .. } => "tier_changed",
+        GraphEvent::ThresholdCrossed { .. } => "threshold_crossed",
+        GraphEvent::QueryGap { .. } => "query_gap",
+        GraphEvent::TimerTick { .. } => "timer_tick",
+        GraphEvent::ConflictDetected { .. } => "conflict_detected",
+        GraphEvent::DecayApplied { .. } => "decay_applied",
+        GraphEvent::TierSweepCompleted { .. } => "tier_sweep_completed",
+    }
+}
+
+// ── Webhook receiver ─────────────────────────────────────────────────
+
+/// Webhook receiver: accepts JSON payload and processes through ingest pipeline.
+#[cfg(feature = "ingest")]
+pub async fn webhook_receive(
+    State(state): State<AppState>,
+    Path(pipeline_id): Path<String>,
+    body: String,
+) -> ApiResult<serde_json::Value> {
+    use engram_ingest::pipeline::{Pipeline, PipelineConfig};
+
+    let config = PipelineConfig::default();
+    let pipeline = Pipeline::new(config);
+
+    let graph = state.graph.clone();
+    let results = pipeline.execute(&body, &pipeline_id, &graph)
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    state.mark_dirty();
+
+    Ok(Json(serde_json::json!({
+        "pipeline": pipeline_id,
+        "entities": results.entities_stored,
+        "relations": results.relations_stored,
+    })))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn webhook_receive() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled".into() }))
+}

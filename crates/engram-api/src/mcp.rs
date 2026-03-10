@@ -143,6 +143,25 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["entity"]
                 }
+            },
+            {
+                "name": "engram_gaps",
+                "description": "List knowledge gaps (black areas) ranked by severity. Detects frontier nodes, structural holes, temporal gaps, confidence deserts, and coordinated clusters.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "min_severity": { "type": "number", "description": "Minimum severity (0.0-1.0, default: 0.3)" },
+                        "limit": { "type": "integer", "description": "Max results (default: 20)" }
+                    }
+                }
+            },
+            {
+                "name": "engram_frontier",
+                "description": "List frontier nodes — entities at the edge of knowledge with few connections",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     })
@@ -314,6 +333,53 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
                     "count": c
                 })).collect::<Vec<_>>()
             }))
+        }
+
+        #[cfg(feature = "reason")]
+        "engram_gaps" => {
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
+            let min_severity = args.get("min_severity")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.3) as f32;
+            let limit = args.get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20) as usize;
+
+            let config = engram_reason::DetectionConfig::default();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as i64;
+
+            let (gaps, report) = engram_reason::scan(&g, &config, now)
+                .map_err(|e| e.to_string())?;
+
+            let filtered: Vec<_> = gaps.into_iter()
+                .filter(|gap| gap.severity >= min_severity)
+                .take(limit)
+                .collect();
+
+            Ok(serde_json::json!({
+                "gaps": filtered,
+                "report": report
+            }))
+        }
+
+        #[cfg(feature = "reason")]
+        "engram_frontier" => {
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
+            let nodes = g.all_nodes().map_err(|e| e.to_string())?;
+            let config = engram_reason::DetectionConfig::default();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as i64;
+
+            let mut gaps = engram_reason::frontier::detect_frontier_nodes(&nodes, &config, now);
+            gaps.extend(engram_reason::frontier::detect_isolated_nodes(&nodes, now));
+            engram_reason::scoring::rank_gaps(&mut gaps);
+
+            Ok(serde_json::json!({ "frontier": gaps }))
         }
 
         _ => Err(format!("unknown tool: {name}")),
