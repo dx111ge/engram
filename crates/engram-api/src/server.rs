@@ -3,6 +3,7 @@
 use axum::routing::{delete, get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::handlers;
@@ -15,7 +16,12 @@ async fn tools_handler() -> axum::Json<serde_json::Value> {
 
 /// Build the axum router with all REST endpoints.
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    router_with_frontend(state, None)
+}
+
+/// Build the axum router, optionally serving a frontend directory at `/`.
+pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Router {
+    let mut app = Router::new()
         // Core graph operations
         .route("/store", post(handlers::store))
         .route("/relate", post(handlers::relate))
@@ -96,7 +102,15 @@ pub fn router(state: AppState) -> Router {
         // Middleware
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
-        .with_state(state)
+        .with_state(state);
+
+    // Serve frontend static files as fallback (if directory exists)
+    if let Some(dir) = frontend_dir {
+        let serve_dir = ServeDir::new(dir);
+        app = app.fallback_service(serve_dir);
+    }
+
+    app
 }
 
 // ── Mesh route handlers (feature-gated) ──
@@ -197,6 +211,11 @@ fn mesh_not_enabled() -> (axum::http::StatusCode, axum::Json<crate::types::Error
 /// the request path — writes go to WAL + mmap immediately and are
 /// crash-recoverable, but the full checkpoint happens asynchronously.
 pub async fn serve(state: AppState, addr: &str) -> std::io::Result<()> {
+    serve_with_frontend(state, addr, None).await
+}
+
+/// Start the HTTP server, optionally serving a frontend directory.
+pub async fn serve_with_frontend(state: AppState, addr: &str, frontend_dir: Option<&str>) -> std::io::Result<()> {
     // Background checkpoint timer — flush dirty writes every 5 seconds
     let checkpoint_state = state.clone();
     tokio::spawn(async move {
@@ -209,7 +228,7 @@ pub async fn serve(state: AppState, addr: &str) -> std::io::Result<()> {
         }
     });
 
-    let app = router(state);
+    let app = router_with_frontend(state, frontend_dir);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("engram API listening on {}", addr);
     axum::serve(listener, app).await

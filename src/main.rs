@@ -258,7 +258,23 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-        engram_api::server::serve(state, addr).await
+        // Detect frontend directory next to the executable
+        let frontend_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("frontend")))
+            .filter(|p| p.join("index.html").exists())
+            .or_else(|| {
+                // Fallback: check relative to working directory
+                let p = std::path::PathBuf::from("frontend");
+                if p.join("index.html").exists() { Some(p) } else { None }
+            });
+        if let Some(ref dir) = frontend_dir {
+            println!("Frontend: {}", dir.display());
+        } else {
+            println!("Frontend: not found (place frontend/ next to the binary)");
+        }
+        let frontend_str = frontend_dir.as_ref().map(|p| p.to_string_lossy().to_string());
+        engram_api::server::serve_with_frontend(state, addr, frontend_str.as_deref()).await
     })?;
 
     Ok(())
