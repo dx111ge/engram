@@ -941,6 +941,10 @@ impl Graph {
                     confidence: node.confidence,
                     memory_tier: node.memory_tier,
                     properties,
+                    created_at: node.created_at,
+                    updated_at: node.updated_at,
+                    edge_out_count: node.edge_out_count,
+                    edge_in_count: node.edge_in_count,
                 });
             }
         }
@@ -2261,6 +2265,10 @@ pub struct NodeSnapshot {
     pub confidence: f32,
     pub memory_tier: u8,
     pub properties: HashMap<String, String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub edge_out_count: u32,
+    pub edge_in_count: u32,
 }
 
 /// A human-readable view of an edge

@@ -1864,3 +1864,96 @@ pub async fn dry_run_action() -> impl axum::response::IntoResponse {
     (StatusCode::NOT_IMPLEMENTED,
      Json(ErrorResponse { error: "actions feature not enabled".into() }))
 }
+
+// ── Reason / gap detection endpoints ─────────────────────────────────
+
+#[cfg(feature = "reason")]
+pub async fn reason_gaps(
+    State(state): State<AppState>,
+    query: axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<serde_json::Value> {
+    let min_severity: f32 = query.get("min_severity")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
+    let limit: usize = query.get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+
+    let graph = state.graph.read().map_err(|_| read_lock_err())?;
+    let config = engram_reason::DetectionConfig::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64;
+
+    let (gaps, report) = engram_reason::scan(&graph, &config, now)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+
+    let filtered: Vec<_> = gaps.into_iter()
+        .filter(|g| g.severity >= min_severity)
+        .take(limit)
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "gaps": filtered,
+        "report": report,
+    })))
+}
+
+#[cfg(not(feature = "reason"))]
+pub async fn reason_gaps() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "reason feature not enabled".into() }))
+}
+
+#[cfg(feature = "reason")]
+pub async fn reason_scan(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let graph = state.graph.read().map_err(|_| read_lock_err())?;
+    let config = engram_reason::DetectionConfig::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64;
+
+    let (gaps, report) = engram_reason::scan(&graph, &config, now)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+
+    Ok(Json(serde_json::json!({
+        "gaps": gaps,
+        "report": report,
+    })))
+}
+
+#[cfg(not(feature = "reason"))]
+pub async fn reason_scan() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "reason feature not enabled".into() }))
+}
+
+#[cfg(feature = "reason")]
+pub async fn reason_frontier(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let graph = state.graph.read().map_err(|_| read_lock_err())?;
+    let nodes = graph.all_nodes()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+    let config = engram_reason::DetectionConfig::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64;
+
+    let mut gaps = engram_reason::frontier::detect_frontier_nodes(&nodes, &config, now);
+    gaps.extend(engram_reason::frontier::detect_isolated_nodes(&nodes, now));
+    engram_reason::scoring::rank_gaps(&mut gaps);
+
+    Ok(Json(serde_json::json!({ "frontier": gaps })))
+}
+
+#[cfg(not(feature = "reason"))]
+pub async fn reason_frontier() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "reason feature not enabled".into() }))
+}

@@ -580,6 +580,7 @@ dependencies = [
  "engram-core",
  "engram-ingest",
  "engram-mesh",
+ "engram-reason",
  "serde_json",
  "tempfile",
  "tokio",
@@ -623,6 +624,7 @@ dependencies = [
  "engram-core",
  "engram-ingest",
  "engram-mesh",
+ "engram-reason",
  "futures",
  "prost",
  "reqwest",
@@ -708,6 +710,19 @@ name = "engram-mesh"
 version = "1.0.0"
 dependencies = [
  "engram-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "engram-reason"
+version = "1.0.0"
+dependencies = [
+ "engram-core",
+ "engram-mesh",
  "serde",
  "serde_json",
  "tempfile",

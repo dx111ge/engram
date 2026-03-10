@@ -11,6 +11,7 @@ llm = []
 mesh = ["engram-mesh"]
 ingest = ["engram-ingest"]
 actions = ["engram-action"]
+reason = ["engram-reason"]
 grpc = ["tonic", "prost"]
 
 [dependencies]
@@ -19,6 +20,7 @@ engram-compute = { path = "../engram-compute" }
 engram-mesh = { path = "../engram-mesh", optional = true }
 engram-ingest = { path = "../engram-ingest", optional = true }
 engram-action = { path = "../engram-action", optional = true }
+engram-reason = { path = "../engram-reason", optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

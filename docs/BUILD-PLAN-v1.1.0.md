@@ -104,26 +104,26 @@
 
 | # | Task | Effort | Deps | Status |
 |---|------|--------|------|--------|
-| 10.1 | Create `engram-reason` crate skeleton | Small | -- | `[ ]` |
-| 10.2 | Frontier node detection | Small | 10.1 | `[ ]` |
-| 10.3 | Structural hole detection | Medium | 10.1 | `[ ]` |
-| 10.4 | Asymmetric cluster analysis | Medium | 10.1 | `[ ]` |
-| 10.5 | Temporal gap detection | Small | 10.1 | `[ ]` |
-| 10.6 | Confidence desert detection | Small | 10.1 | `[ ]` |
-| 10.6b | Coordinated cluster detection (dense internal, sparse external, low author trust, temporal sync) | Medium | 10.4 | `[ ]` |
-| 10.7 | Severity scoring and ranking | Small | 10.2-10.6 | `[ ]` |
-| 10.8 | Suggested query generation (mechanical, from graph topology) | Medium | 10.7 | `[ ]` |
-| 10.9 | LLM-suggested queries (optional, via existing LLM endpoint) | Small | 10.8 | `[ ]` |
-| 10.10 | Mesh knowledge profile auto-derivation (cluster -> DomainCoverage) | Medium | 10.4 | `[ ]` |
-| 10.11 | Mesh profile gossip broadcast + ProfileQuery message type | Medium | 10.10 | `[ ]` |
-| 10.12 | Mesh federated query protocol (FederatedQuery/FederatedResult) | Medium | 10.11 | `[ ]` |
-| 10.13 | Mesh discovery API (`/mesh/profiles`, `/mesh/discover`) | Small | 10.12 | `[ ]` |
-| 10.14 | 3-tier enrichment dispatcher (mesh > free external > paid external) | Medium | 10.12, 8.17 | `[ ]` |
-| 10.15 | Query-triggered enrichment (eager + await modes) | Medium | 10.14 | `[ ]` |
-| 10.16 | Mesh-level black area detection (uncovered areas across all peers) | Small | 10.10, 10.7 | `[ ]` |
-| 10.17 | Wire into API: `/reason/gaps`, `/query?enrich=`, `/mesh/query` | Small | 10.15, 10.13 | `[ ]` |
+| 10.1 | Create `engram-reason` crate skeleton | Small | -- | `[x]` |
+| 10.2 | Frontier node detection | Small | 10.1 | `[x]` |
+| 10.3 | Structural hole detection | Medium | 10.1 | `[x]` |
+| 10.4 | Asymmetric cluster analysis | Medium | 10.1 | `[x]` |
+| 10.5 | Temporal gap detection | Small | 10.1 | `[x]` |
+| 10.6 | Confidence desert detection | Small | 10.1 | `[x]` |
+| 10.6b | Coordinated cluster detection (dense internal, sparse external, low author trust, temporal sync) | Medium | 10.4 | `[x]` |
+| 10.7 | Severity scoring and ranking | Small | 10.2-10.6 | `[x]` |
+| 10.8 | Suggested query generation (mechanical, from graph topology) | Medium | 10.7 | `[x]` |
+| 10.9 | LLM-suggested queries (optional, via existing LLM endpoint) | Small | 10.8 | `[-]` |
+| 10.10 | Mesh knowledge profile auto-derivation (cluster -> DomainCoverage) | Medium | 10.4 | `[-]` |
+| 10.11 | Mesh profile gossip broadcast + ProfileQuery message type | Medium | 10.10 | `[-]` |
+| 10.12 | Mesh federated query protocol (FederatedQuery/FederatedResult) | Medium | 10.11 | `[-]` |
+| 10.13 | Mesh discovery API (`/mesh/profiles`, `/mesh/discover`) | Small | 10.12 | `[-]` |
+| 10.14 | 3-tier enrichment dispatcher (mesh > free external > paid external) | Medium | 10.12, 8.17 | `[-]` |
+| 10.15 | Query-triggered enrichment (eager + await modes) | Medium | 10.14 | `[-]` |
+| 10.16 | Mesh-level black area detection (uncovered areas across all peers) | Small | 10.10, 10.7 | `[-]` |
+| 10.17 | Wire into API: `/reason/gaps`, `/reason/scan`, `/reason/frontier` | Small | 10.8 | `[x]` |
 
-**Phase 10 done:** `[ ]`
+**Phase 10 done:** `[x]` (core detection complete; mesh federation deferred to mesh feature integration)
 
 ---
 
