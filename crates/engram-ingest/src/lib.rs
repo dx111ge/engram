@@ -19,6 +19,7 @@
 /// and chunked to keep reads alive during large imports.
 
 pub mod anno_backend;
+pub mod confidence;
 pub mod conflict;
 pub mod dedup;
 pub mod error;
@@ -36,6 +37,7 @@ pub mod traits;
 pub mod types;
 
 // Re-exports for convenience.
+pub use confidence::{ConfidenceCalculator, ConfidenceConfig};
 pub use conflict::{ConflictConfig, ConflictDetector};
 pub use dedup::{ContentDedup, dedup_batch, dedup_by_label};
 pub use error::IngestError;

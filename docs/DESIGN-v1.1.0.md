@@ -4043,6 +4043,74 @@ Phase 5: Ongoing quality management
 - Verify temporal pattern analysis detects synchronized activity windows
 - Verify cross-platform entity resolution links same narrative across sources
 
+### 15.11 Use Case 24: Financial Market Signal Detection
+
+**Scenario:** An analyst monitors financial instruments (stocks, crypto, commodities) by correlating news, filings, social sentiment, and market data. Engram detects emerging signals before they become consensus.
+
+**Why engram, not a trading bot:**
+
+Engram is a knowledge graph, not a prediction engine. It does not predict prices. What it does: correlate information across sources, detect narrative shifts, and surface gaps. The analyst decides what to trade. Engram tells them what they might be missing.
+
+**Pipeline:**
+
+```
+Phase 1: Multi-Source Ingest
+  - SEC filings (10-K, 10-Q, 8-K) via EDGAR API
+  - Earnings call transcripts (structured text)
+  - News feeds (Reuters, Bloomberg, financial RSS)
+  - Social sentiment (Twitter/X financial accounts, Reddit/WSB)
+  - Commodity prices (gold, oil, BTC via public APIs)
+  - Central bank statements (Fed, ECB, BoJ)
+
+Phase 2: Entity Extraction + Resolution
+  - NER: companies, executives, ticker symbols, monetary values, dates
+  - Resolution: "AAPL" = "Apple Inc." = "Apple" across all sources
+  - Relation extraction: "CEO departure", "merger announced", "earnings beat"
+
+Phase 3: Signal Correlation
+  - Co-occurrence tracking: which entities appear together in recent ingests?
+  - Temporal clustering: sudden spike in mentions = emerging narrative
+  - Confidence weighting: SEC filing > analyst report > social media
+  - Contradiction detection: bull vs bear narratives on same entity
+  - Black area detection: "everyone is talking about X, but nobody mentions Y
+    which is X's largest supplier" -> gap = potential blind spot
+
+Phase 4: Enrichment Triggers
+  - Action rule: when new entity appears in SEC filing with > 3 edges
+    to monitored entities -> auto-ingest related filings
+  - Gap detection: "Gold mentioned 50x this week but no central bank
+    context ingested" -> suggest: "Fed gold reserve policy", "ECB gold
+    purchases 2026"
+  - Mesh: analyst A monitors tech, analyst B monitors commodities ->
+    cross-domain correlation via mesh sync
+
+Phase 5: Analyst Dashboard
+  - Graph view: entity clusters with edge weights = correlation strength
+  - Timeline: narrative evolution (when did "recession" narrative start?)
+  - Confidence map: which claims are well-sourced vs. echo chamber?
+  - Alert: new contradictions (bull/bear divergence on same ticker)
+```
+
+**What engram provides that Bloomberg Terminal doesn't:**
+- Cross-source provenance (who said what, when, how reliable)
+- Learned trust per source and author (not all analysts are equal)
+- Gap detection (what is NOT being discussed that should be)
+- Contradiction surfacing (conflicting narratives with confidence scores)
+- Full audit trail (every fact traceable to original source)
+
+**What engram does NOT do:**
+- Price prediction (no ML models, no technical analysis)
+- Trading execution (no broker integration)
+- Real-time market data streaming (ingests on schedule, not tick-by-tick)
+- Financial advice (it's a knowledge graph, not an advisor)
+
+**Test plan:**
+- Ingest sample earnings transcripts, verify entity extraction (company, revenue, guidance)
+- Ingest contradictory analyst reports, verify conflict detection
+- Verify co-occurrence spike detection on simulated news burst
+- Verify gap detection finds missing supply chain context
+- Verify learned trust differentiates SEC filings from social media over time
+
 ---
 
 ## 16. Security Considerations

@@ -52,8 +52,8 @@
 | 8.10 | Entity resolution (conservative, progressive 4-step) | Large | 8.6 | `[x]` |
 | 8.11 | Deduplication (content hash + semantic) | Small | 8.10 | `[x]` |
 | 8.12 | Conflict detection and resolution | Medium | 8.11 | `[x]` |
-| 8.13 | Confidence calculation (learned trust * extraction confidence, author > source > baseline) | Small | 8.12 | `[ ]` |
-| 8.14 | Multi-threaded pipeline executor (rayon + tokio) | Medium | 8.2 | `[ ]` |
+| 8.13 | Confidence calculation (learned trust * extraction confidence, author > source > baseline) | Small | 8.12 | `[x]` |
+| 8.14 | Multi-threaded pipeline executor (rayon + tokio) | Medium | 8.2 | `[x]` |
 | 8.15 | Pipeline shortcuts (`?skip=ner,resolve` query params) | Small | 8.14 | `[ ]` |
 | 8.16 | Wire into API: `POST /ingest`, `POST /ingest/file`, `POST /ingest/configure` | Small | 8.14 | `[ ]` |
 | 8.17 | Source trait with capabilities + usage endpoint | Medium | 8.1 | `[ ]` |

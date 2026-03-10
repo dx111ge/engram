@@ -661,6 +661,7 @@ name = "engram-ingest"
 version = "1.0.0"
 dependencies = [
  "engram-core",
+ "rayon",
  "regex",
  "reqwest",
  "serde",

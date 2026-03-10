@@ -19,6 +19,7 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+rayon = "1"
 regex = "1"
 strsim = "0.11"
 toml = "0.8"

@@ -238,6 +238,167 @@ impl Pipeline {
         Ok(result)
     }
 
+    /// Execute the pipeline with rayon-parallelized NER + resolve.
+    ///
+    /// Same stages as `execute()` but NER extraction and entity resolution
+    /// run in parallel across rayon worker threads. Best for large batches
+    /// where NER is the bottleneck.
+    pub async fn execute_parallel(
+        &self,
+        items: Vec<RawItem>,
+    ) -> Result<PipelineResult, IngestError> {
+        use rayon::prelude::*;
+
+        let start = std::time::Instant::now();
+        let mut result = PipelineResult::default();
+
+        if items.is_empty() {
+            return Ok(result);
+        }
+
+        tracing::info!(
+            pipeline = %self.config.name,
+            items = items.len(),
+            workers = self.config.workers,
+            "starting parallel pipeline execution"
+        );
+
+        // Stage 1: Parse (sequential — usually fast)
+        let segments = self.parse_items(&items, &mut result)?;
+        if segments.is_empty() {
+            result.duration_ms = start.elapsed().as_millis() as u64;
+            return Ok(result);
+        }
+
+        // Stage 2+3+4: Language detect + NER + Resolve (parallel via rayon)
+        let has_ner = self.config.stages.ner && !self.extractors.is_empty();
+        let has_resolve = self.config.stages.entity_resolve && !self.resolvers.is_empty();
+        let graph_ref = &self.graph;
+
+        let facts: Vec<ProcessedFact> = if has_ner {
+            segments
+                .par_iter()
+                .flat_map(|seg| {
+                    let lang = if self.config.stages.language_detect {
+                        self.detect_language(&seg.text)
+                    } else {
+                        DetectedLanguage {
+                            code: "en".into(),
+                            confidence: 0.0,
+                        }
+                    };
+
+                    let mut extracted = self.run_extractors(&seg.text, &lang);
+
+                    // Resolve under read lock (blocking_read safe in rayon thread)
+                    if has_resolve {
+                        let graph = graph_ref.blocking_read();
+                        for entity in &mut extracted {
+                            if entity.resolved_to.is_none() {
+                                for resolver in &self.resolvers {
+                                    let res = resolver.resolve(entity, &graph);
+                                    if let crate::types::ResolutionResult::Matched(nid) = &res {
+                                        entity.resolved_to = Some(*nid);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+
+                    extracted
+                        .into_iter()
+                        .map(|entity| ProcessedFact {
+                            entity: entity.text.clone(),
+                            entity_type: Some(entity.entity_type.clone()),
+                            properties: seg.metadata.clone(),
+                            confidence: entity.confidence,
+                            provenance: Provenance {
+                                source: seg.source_name.clone(),
+                                source_url: seg.source_url.clone(),
+                                author: None,
+                                extraction_method: entity.method,
+                                fetched_at: seg.fetched_at,
+                                ingested_at: now,
+                            },
+                            extraction_method: entity.method,
+                            language: entity.language.clone(),
+                            relations: Vec::new(),
+                            conflicts: Vec::new(),
+                            resolution: entity
+                                .resolved_to
+                                .map(crate::types::ResolutionResult::Matched),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        } else {
+            // No NER — same as sequential path
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+
+            segments
+                .iter()
+                .map(|seg| {
+                    let lang = if self.config.stages.language_detect {
+                        self.detect_language(&seg.text)
+                    } else {
+                        DetectedLanguage {
+                            code: "en".into(),
+                            confidence: 0.0,
+                        }
+                    };
+                    ProcessedFact {
+                        entity: seg.text.clone(),
+                        entity_type: None,
+                        properties: seg.metadata.clone(),
+                        confidence: 0.5,
+                        provenance: Provenance {
+                            source: seg.source_name.clone(),
+                            source_url: seg.source_url.clone(),
+                            author: None,
+                            extraction_method: ExtractionMethod::Manual,
+                            fetched_at: seg.fetched_at,
+                            ingested_at: now,
+                        },
+                        extraction_method: ExtractionMethod::Manual,
+                        language: lang.code,
+                        relations: Vec::new(),
+                        conflicts: Vec::new(),
+                        resolution: None,
+                    }
+                })
+                .collect()
+        };
+
+        // Stage 6: Apply transformers (sequential)
+        let facts = self.apply_transformers(facts, &mut result);
+
+        // Stage 7: Load (async, chunked writes)
+        self.load_facts(facts, &mut result).await?;
+
+        result.duration_ms = start.elapsed().as_millis() as u64;
+
+        tracing::info!(
+            pipeline = %self.config.name,
+            facts_stored = result.facts_stored,
+            relations = result.relations_created,
+            resolved = result.facts_resolved,
+            errors = result.errors.len(),
+            duration_ms = result.duration_ms,
+            "parallel pipeline execution complete"
+        );
+
+        Ok(result)
+    }
+
     /// Execute the pipeline on pre-processed facts (skip parse/NER/resolve).
     /// Useful for structured data that already has entity labels and types.
     pub async fn load_processed(
@@ -801,5 +962,27 @@ mod tests {
         ]);
         let result = parser.parse(&Content::Structured(map)).unwrap();
         assert_eq!(result, vec!["Test Corp"]);
+    }
+
+    #[tokio::test]
+    async fn parallel_execution_stores_facts() {
+        let (_dir, graph) = test_graph();
+        let pipeline = Pipeline::new(graph.clone(), no_ner_config());
+
+        let items: Vec<RawItem> = (0..10)
+            .map(|i| make_item(&format!("ParEntity{}", i), "test"))
+            .collect();
+
+        let result = pipeline.execute_parallel(items).await.unwrap();
+        assert_eq!(result.facts_stored, 10);
+
+        let g = graph.read().await;
+        for i in 0..10 {
+            assert!(
+                g.find_node_id(&format!("ParEntity{}", i)).unwrap().is_some(),
+                "ParEntity{} should exist",
+                i
+            );
+        }
     }
 }
