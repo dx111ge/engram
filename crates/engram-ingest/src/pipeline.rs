@@ -1,8 +1,7 @@
 /// Pipeline executor: orchestrates stages, manages workers, batch writes.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::error::IngestError;
 use crate::traits::{Extractor, LanguageDetector, Parser, Resolver, Transformer};
@@ -94,7 +93,7 @@ impl Pipeline {
     /// 5. Build ProcessedFacts from extracted entities
     /// 6. Apply transformers
     /// 7. Batch-write to graph (write lock, chunked)
-    pub async fn execute(&self, items: Vec<RawItem>) -> Result<PipelineResult, IngestError> {
+    pub fn execute(&self, items: Vec<RawItem>) -> Result<PipelineResult, IngestError> {
         let start = std::time::Instant::now();
         let mut result = PipelineResult::default();
 
@@ -141,7 +140,7 @@ impl Pipeline {
 
                 // Stage 4: Resolve extracted entities against graph
                 if self.config.stages.entity_resolve && !self.resolvers.is_empty() {
-                    let graph = self.graph.read().await;
+                    let graph = self.graph.read().map_err(|_| IngestError::Graph("graph lock poisoned".into()))?;
                     for entity in &mut extracted {
                         if entity.resolved_to.is_none() {
                             for resolver in &self.resolvers {
@@ -221,7 +220,7 @@ impl Pipeline {
         let facts = self.apply_transformers(facts, &mut result);
 
         // Stage 7: Load — batch write to graph (chunked write locking)
-        self.load_facts(facts, &mut result).await?;
+        self.load_facts(facts, &mut result)?;
 
         result.duration_ms = start.elapsed().as_millis() as u64;
 
@@ -243,7 +242,7 @@ impl Pipeline {
     /// Same stages as `execute()` but NER extraction and entity resolution
     /// run in parallel across rayon worker threads. Best for large batches
     /// where NER is the bottleneck.
-    pub async fn execute_parallel(
+    pub fn execute_parallel(
         &self,
         items: Vec<RawItem>,
     ) -> Result<PipelineResult, IngestError> {
@@ -290,9 +289,9 @@ impl Pipeline {
 
                     let mut extracted = self.run_extractors(&seg.text, &lang);
 
-                    // Resolve under read lock (blocking_read safe in rayon thread)
+                    // Resolve under read lock
                     if has_resolve {
-                        let graph = graph_ref.blocking_read();
+                        let graph = graph_ref.read().unwrap();
                         for entity in &mut extracted {
                             if entity.resolved_to.is_none() {
                                 for resolver in &self.resolvers {
@@ -381,8 +380,8 @@ impl Pipeline {
         // Stage 6: Apply transformers (sequential)
         let facts = self.apply_transformers(facts, &mut result);
 
-        // Stage 7: Load (async, chunked writes)
-        self.load_facts(facts, &mut result).await?;
+        // Stage 7: Load (chunked writes)
+        self.load_facts(facts, &mut result)?;
 
         result.duration_ms = start.elapsed().as_millis() as u64;
 
@@ -401,7 +400,7 @@ impl Pipeline {
 
     /// Execute the pipeline on pre-processed facts (skip parse/NER/resolve).
     /// Useful for structured data that already has entity labels and types.
-    pub async fn load_processed(
+    pub fn load_processed(
         &self,
         facts: Vec<ProcessedFact>,
     ) -> Result<PipelineResult, IngestError> {
@@ -413,7 +412,7 @@ impl Pipeline {
         }
 
         let facts = self.apply_transformers(facts, &mut result);
-        self.load_facts(facts, &mut result).await?;
+        self.load_facts(facts, &mut result)?;
 
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
@@ -580,7 +579,7 @@ impl Pipeline {
     ///
     /// Acquires write lock per chunk of `batch_size` facts.
     /// Readers can interleave between chunks.
-    async fn load_facts(
+    fn load_facts(
         &self,
         facts: Vec<ProcessedFact>,
         result: &mut PipelineResult,
@@ -592,7 +591,7 @@ impl Pipeline {
         let chunk_size = self.config.batch_size;
 
         for chunk in facts.chunks(chunk_size) {
-            let mut graph = self.graph.write().await;
+            let mut graph = self.graph.write().map_err(|_| IngestError::Graph("graph write lock poisoned".into()))?;
 
             for fact in chunk {
                 // Store the entity node
@@ -756,17 +755,17 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn empty_pipeline_returns_default_result() {
+    #[test]
+    fn empty_pipeline_returns_default_result() {
         let (_dir, graph) = test_graph();
         let pipeline = Pipeline::new(graph, PipelineConfig::default());
-        let result = pipeline.execute(vec![]).await.unwrap();
+        let result = pipeline.execute(vec![]).unwrap();
         assert_eq!(result.facts_stored, 0);
         assert_eq!(result.errors.len(), 0);
     }
 
-    #[tokio::test]
-    async fn pipeline_stores_text_items_without_ner() {
+    #[test]
+    fn pipeline_stores_text_items_without_ner() {
         let (_dir, graph) = test_graph();
         let pipeline = Pipeline::new(graph.clone(), no_ner_config());
 
@@ -775,18 +774,17 @@ mod tests {
             make_item("Tim Cook", "test"),
         ];
 
-        let result = pipeline.execute(items).await.unwrap();
+        let result = pipeline.execute(items).unwrap();
         assert_eq!(result.facts_stored, 2);
         assert!(result.errors.is_empty());
 
-        // Verify nodes exist in graph
-        let g = graph.read().await;
+        let g = graph.read().unwrap();
         assert!(g.find_node_id("Apple Inc.").unwrap().is_some());
         assert!(g.find_node_id("Tim Cook").unwrap().is_some());
     }
 
-    #[tokio::test]
-    async fn pipeline_sets_provenance_properties() {
+    #[test]
+    fn pipeline_sets_provenance_properties() {
         let (_dir, graph) = test_graph();
         let pipeline = Pipeline::new(graph.clone(), no_ner_config());
 
@@ -798,16 +796,16 @@ mod tests {
             metadata: HashMap::from([("key1".into(), "val1".into())]),
         }];
 
-        let result = pipeline.execute(items).await.unwrap();
+        let result = pipeline.execute(items).unwrap();
         assert_eq!(result.facts_stored, 1);
 
-        let g = graph.read().await;
+        let g = graph.read().unwrap();
         let nid = g.find_node_id("TestEntity").unwrap().unwrap();
-        assert!(nid > 0 || nid == 0); // node exists (id is valid)
+        assert!(nid > 0 || nid == 0);
     }
 
-    #[tokio::test]
-    async fn load_processed_stores_facts_with_relations() {
+    #[test]
+    fn load_processed_stores_facts_with_relations() {
         let (_dir, graph) = test_graph();
         let pipeline = Pipeline::new(graph.clone(), PipelineConfig::default());
 
@@ -859,22 +857,21 @@ mod tests {
             },
         ];
 
-        let result = pipeline.load_processed(facts).await.unwrap();
+        let result = pipeline.load_processed(facts).unwrap();
         assert_eq!(result.facts_stored, 2);
         assert_eq!(result.relations_created, 1);
         assert!(result.errors.is_empty());
 
-        // Verify graph state
-        let g = graph.read().await;
+        let g = graph.read().unwrap();
         assert!(g.find_node_id("Alice").unwrap().is_some());
         assert!(g.find_node_id("Acme Corp").unwrap().is_some());
     }
 
-    #[tokio::test]
-    async fn chunked_write_locking_works_with_small_batch_size() {
+    #[test]
+    fn chunked_write_locking_works_with_small_batch_size() {
         let (_dir, graph) = test_graph();
         let config = PipelineConfig {
-            batch_size: 2, // force multiple chunks
+            batch_size: 2,
             stages: StageConfig {
                 ner: false,
                 entity_resolve: false,
@@ -889,10 +886,10 @@ mod tests {
             .map(|i| make_item(&format!("Entity{}", i), "test"))
             .collect();
 
-        let result = pipeline.execute(items).await.unwrap();
-        assert_eq!(result.facts_stored, 5); // 3 chunks: 2+2+1
+        let result = pipeline.execute(items).unwrap();
+        assert_eq!(result.facts_stored, 5);
 
-        let g = graph.read().await;
+        let g = graph.read().unwrap();
         for i in 0..5 {
             assert!(
                 g.find_node_id(&format!("Entity{}", i)).unwrap().is_some(),
@@ -902,12 +899,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn transformer_can_drop_facts() {
+    #[test]
+    fn transformer_can_drop_facts() {
         let (_dir, graph) = test_graph();
         let mut pipeline = Pipeline::new(graph.clone(), no_ner_config());
 
-        // Add a transformer that drops entities starting with "DROP_"
         struct DropFilter;
         impl Transformer for DropFilter {
             fn transform(&self, fact: &mut ProcessedFact) -> TransformResult {
@@ -930,17 +926,17 @@ mod tests {
             make_item("Also Keep", "test"),
         ];
 
-        let result = pipeline.execute(items).await.unwrap();
+        let result = pipeline.execute(items).unwrap();
         assert_eq!(result.facts_stored, 2);
 
-        let g = graph.read().await;
+        let g = graph.read().unwrap();
         assert!(g.find_node_id("Keep This").unwrap().is_some());
         assert!(g.find_node_id("DROP_This").unwrap().is_none());
         assert!(g.find_node_id("Also Keep").unwrap().is_some());
     }
 
-    #[tokio::test]
-    async fn plain_text_parser_works() {
+    #[test]
+    fn plain_text_parser_works() {
         let parser = PlainTextParser;
         let result = parser
             .parse(&Content::Text("hello".into()))
@@ -953,8 +949,8 @@ mod tests {
         }).is_err());
     }
 
-    #[tokio::test]
-    async fn structured_parser_extracts_entity_key() {
+    #[test]
+    fn structured_parser_extracts_entity_key() {
         let parser = StructuredParser;
         let map = HashMap::from([
             ("entity".into(), "Test Corp".into()),
@@ -964,8 +960,8 @@ mod tests {
         assert_eq!(result, vec!["Test Corp"]);
     }
 
-    #[tokio::test]
-    async fn parallel_execution_stores_facts() {
+    #[test]
+    fn parallel_execution_stores_facts() {
         let (_dir, graph) = test_graph();
         let pipeline = Pipeline::new(graph.clone(), no_ner_config());
 
@@ -973,10 +969,10 @@ mod tests {
             .map(|i| make_item(&format!("ParEntity{}", i), "test"))
             .collect();
 
-        let result = pipeline.execute_parallel(items).await.unwrap();
+        let result = pipeline.execute_parallel(items).unwrap();
         assert_eq!(result.facts_stored, 10);
 
-        let g = graph.read().await;
+        let g = graph.read().unwrap();
         for i in 0..10 {
             assert!(
                 g.find_node_id(&format!("ParEntity{}", i)).unwrap().is_some(),
@@ -984,5 +980,40 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn skip_stages_applied_to_config() {
+        let mut stages = StageConfig::default();
+        let unknown = stages.apply_skip("ner,resolve,dedup");
+        assert!(!stages.ner);
+        assert!(!stages.entity_resolve);
+        assert!(!stages.dedup);
+        assert!(stages.parse);
+        assert!(stages.language_detect);
+        assert!(stages.conflict_check);
+        assert!(stages.confidence_calc);
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn skip_unknown_stages_reported() {
+        let mut stages = StageConfig::default();
+        let unknown = stages.apply_skip("ner,foo,bar");
+        assert!(!stages.ner);
+        assert_eq!(unknown, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn enabled_and_skipped_stages() {
+        let mut stages = StageConfig::default();
+        stages.apply_skip("ner,conflict");
+        let enabled = stages.enabled_stages();
+        let skipped = stages.skipped_stages();
+        assert!(!enabled.contains(&"ner"));
+        assert!(!enabled.contains(&"conflict"));
+        assert!(skipped.contains(&"ner"));
+        assert!(skipped.contains(&"conflict"));
+        assert!(enabled.contains(&"parse"));
     }
 }

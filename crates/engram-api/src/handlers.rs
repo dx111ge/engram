@@ -1492,3 +1492,202 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     };
     Some(val.to_string())
 }
+
+// ── POST /ingest — ingest pipeline ──
+
+#[cfg(feature = "ingest")]
+pub async fn ingest(
+    State(state): State<AppState>,
+    Json(req): Json<IngestRequest>,
+) -> ApiResult<IngestResponse> {
+    use engram_ingest::{Pipeline, PipelineConfig, types::StageConfig};
+
+    let source = req.source.unwrap_or_else(|| "api-ingest".into());
+
+    // Build pipeline config with skip stages
+    let mut stages = StageConfig::default();
+    let mut skipped_names = Vec::new();
+    if let Some(ref skip) = req.skip {
+        let unknown = stages.apply_skip(skip);
+        if !unknown.is_empty() {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                format!("unknown stages to skip: {}", unknown.join(", ")),
+            ));
+        }
+        skipped_names = stages.skipped_stages().iter().map(|s| s.to_string()).collect();
+    }
+
+    let config = PipelineConfig {
+        name: "api-ingest".into(),
+        stages,
+        ..Default::default()
+    };
+
+    let pipeline = Pipeline::new(state.graph.clone(), config);
+
+    // Convert IngestItems to RawItems
+    let items: Vec<engram_ingest::types::RawItem> = req.items
+        .into_iter()
+        .map(|item| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+
+            match item {
+                IngestItem::Text(text) => engram_ingest::types::RawItem {
+                    content: engram_ingest::types::Content::Text(text),
+                    source_url: None,
+                    source_name: source.clone(),
+                    fetched_at: now,
+                    metadata: Default::default(),
+                },
+                IngestItem::Structured(map) => engram_ingest::types::RawItem {
+                    content: engram_ingest::types::Content::Structured(map),
+                    source_url: None,
+                    source_name: source.clone(),
+                    fetched_at: now,
+                    metadata: Default::default(),
+                },
+            }
+        })
+        .collect();
+
+    // Execute pipeline
+    let result = if req.parallel.unwrap_or(false) {
+        pipeline.execute_parallel(items)
+    } else {
+        pipeline.execute(items)
+    }
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    state.mark_dirty();
+
+    Ok(Json(IngestResponse {
+        facts_stored: result.facts_stored,
+        relations_created: result.relations_created,
+        facts_resolved: result.facts_resolved,
+        facts_deduped: result.facts_deduped,
+        conflicts_detected: result.conflicts_detected,
+        errors: result.errors,
+        duration_ms: result.duration_ms,
+        stages_skipped: skipped_names,
+    }))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn ingest() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled — rebuild with --features ingest".into() }))
+}
+
+/// POST /ingest/file — ingest from file upload (multipart)
+#[cfg(feature = "ingest")]
+pub async fn ingest_file(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> ApiResult<IngestResponse> {
+    use engram_ingest::{Pipeline, PipelineConfig, types::StageConfig};
+
+    let source = params.get("source").cloned().unwrap_or_else(|| "file-upload".into());
+
+    let mut stages = StageConfig::default();
+    let mut skipped_names = Vec::new();
+    if let Some(skip) = params.get("skip") {
+        let unknown = stages.apply_skip(skip);
+        if !unknown.is_empty() {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                format!("unknown stages to skip: {}", unknown.join(", ")),
+            ));
+        }
+        skipped_names = stages.skipped_stages().iter().map(|s| s.to_string()).collect();
+    }
+
+    let config = PipelineConfig {
+        name: "file-ingest".into(),
+        stages,
+        ..Default::default()
+    };
+
+    let pipeline = Pipeline::new(state.graph.clone(), config);
+
+    // Try to parse body as UTF-8 text
+    let text = String::from_utf8(body.to_vec())
+        .map_err(|_| api_err(StatusCode::BAD_REQUEST, "file body is not valid UTF-8"))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let items = vec![engram_ingest::types::RawItem {
+        content: engram_ingest::types::Content::Text(text),
+        source_url: None,
+        source_name: source,
+        fetched_at: now,
+        metadata: Default::default(),
+    }];
+
+    let parallel = params.get("parallel").is_some_and(|v| v == "true" || v == "1");
+    let result = if parallel {
+        pipeline.execute_parallel(items)
+    } else {
+        pipeline.execute(items)
+    }
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    state.mark_dirty();
+
+    Ok(Json(IngestResponse {
+        facts_stored: result.facts_stored,
+        relations_created: result.relations_created,
+        facts_resolved: result.facts_resolved,
+        facts_deduped: result.facts_deduped,
+        conflicts_detected: result.conflicts_detected,
+        errors: result.errors,
+        duration_ms: result.duration_ms,
+        stages_skipped: skipped_names,
+    }))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn ingest_file() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled — rebuild with --features ingest".into() }))
+}
+
+/// POST /ingest/configure — update pipeline defaults (runtime).
+#[cfg(feature = "ingest")]
+pub async fn ingest_configure(
+    Json(req): Json<IngestConfigureRequest>,
+) -> ApiResult<serde_json::Value> {
+    // For now, return the effective config. Runtime config persistence comes
+    // with Phase 8.17+ (source trait).
+    let mut stages = engram_ingest::types::StageConfig::default();
+    if let Some(ref skip) = req.skip {
+        let unknown = stages.apply_skip(skip);
+        if !unknown.is_empty() {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                format!("unknown stages to skip: {}", unknown.join(", ")),
+            ));
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "name": req.name.unwrap_or_else(|| "default".into()),
+        "batch_size": req.batch_size.unwrap_or(1000),
+        "workers": req.workers.unwrap_or(4),
+        "stages_enabled": stages.enabled_stages(),
+        "stages_skipped": stages.skipped_stages(),
+    })))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn ingest_configure() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled — rebuild with --features ingest".into() }))
+}

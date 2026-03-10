@@ -54,8 +54,8 @@
 | 8.12 | Conflict detection and resolution | Medium | 8.11 | `[x]` |
 | 8.13 | Confidence calculation (learned trust * extraction confidence, author > source > baseline) | Small | 8.12 | `[x]` |
 | 8.14 | Multi-threaded pipeline executor (rayon + tokio) | Medium | 8.2 | `[x]` |
-| 8.15 | Pipeline shortcuts (`?skip=ner,resolve` query params) | Small | 8.14 | `[ ]` |
-| 8.16 | Wire into API: `POST /ingest`, `POST /ingest/file`, `POST /ingest/configure` | Small | 8.14 | `[ ]` |
+| 8.15 | Pipeline shortcuts (`?skip=ner,resolve` query params) | Small | 8.14 | `[x]` |
+| 8.16 | Wire into API: `POST /ingest`, `POST /ingest/file`, `POST /ingest/configure` | Small | 8.14 | `[x]` |
 | 8.17 | Source trait with capabilities + usage endpoint | Medium | 8.1 | `[ ]` |
 | 8.18 | File source (notify crate, watch mode, poll fallback, format auto-detect) | Medium | 8.17 | `[ ]` |
 | 8.19 | Search ledger (`.brain.ledger`, temporal cursors, content hash dedup) | Medium | 8.17 | `[ ]` |

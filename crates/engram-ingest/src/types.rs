@@ -190,6 +190,71 @@ impl Default for StageConfig {
     }
 }
 
+impl StageConfig {
+    /// Apply skip directives from a comma-separated string.
+    ///
+    /// Recognized stage names: `parse`, `lang`, `ner`, `resolve`,
+    /// `dedup`, `conflict`, `confidence`. Unknown names are collected
+    /// and returned so the caller can warn or reject.
+    ///
+    /// # Example
+    /// ```
+    /// # use engram_ingest::types::StageConfig;
+    /// let mut stages = StageConfig::default();
+    /// let unknown = stages.apply_skip("ner,resolve,dedup");
+    /// assert!(!stages.ner);
+    /// assert!(!stages.entity_resolve);
+    /// assert!(!stages.dedup);
+    /// assert!(unknown.is_empty());
+    /// ```
+    pub fn apply_skip(&mut self, skip: &str) -> Vec<String> {
+        let mut unknown = Vec::new();
+        for token in skip.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            match token {
+                "parse" => self.parse = false,
+                "lang" | "language" | "language_detect" => self.language_detect = false,
+                "ner" | "extract" => self.ner = false,
+                "resolve" | "entity_resolve" => self.entity_resolve = false,
+                "dedup" | "deduplicate" => self.dedup = false,
+                "conflict" | "conflict_check" => self.conflict_check = false,
+                "confidence" | "confidence_calc" => self.confidence_calc = false,
+                other => unknown.push(other.to_string()),
+            }
+        }
+        unknown
+    }
+
+    /// Return the list of currently enabled stage names.
+    pub fn enabled_stages(&self) -> Vec<&'static str> {
+        let mut stages = Vec::new();
+        if self.parse { stages.push("parse"); }
+        if self.language_detect { stages.push("lang"); }
+        if self.ner { stages.push("ner"); }
+        if self.entity_resolve { stages.push("resolve"); }
+        if self.dedup { stages.push("dedup"); }
+        if self.conflict_check { stages.push("conflict"); }
+        if self.confidence_calc { stages.push("confidence"); }
+        stages
+    }
+
+    /// Return the list of currently skipped stage names.
+    pub fn skipped_stages(&self) -> Vec<&'static str> {
+        let mut stages = Vec::new();
+        if !self.parse { stages.push("parse"); }
+        if !self.language_detect { stages.push("lang"); }
+        if !self.ner { stages.push("ner"); }
+        if !self.entity_resolve { stages.push("resolve"); }
+        if !self.dedup { stages.push("dedup"); }
+        if !self.conflict_check { stages.push("conflict"); }
+        if !self.confidence_calc { stages.push("confidence"); }
+        stages
+    }
+}
+
 /// Pipeline executor configuration.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {

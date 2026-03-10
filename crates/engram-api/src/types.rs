@@ -1,6 +1,7 @@
 /// Request and response types for the REST API.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ── Requests ──
 
@@ -300,4 +301,55 @@ pub struct JsonLdImportResponse {
     pub nodes_imported: u32,
     pub edges_imported: u32,
     pub errors: Option<Vec<String>>,
+}
+
+// ── Ingest pipeline types (feature-gated) ──
+
+/// Request body for `POST /ingest`.
+#[derive(Deserialize)]
+pub struct IngestRequest {
+    /// Items to ingest (text or structured).
+    pub items: Vec<IngestItem>,
+    /// Source name for provenance.
+    pub source: Option<String>,
+    /// Comma-separated stages to skip (e.g. "ner,resolve,dedup").
+    pub skip: Option<String>,
+    /// Use parallel execution (rayon) for large batches.
+    pub parallel: Option<bool>,
+}
+
+/// A single item in an ingest request.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum IngestItem {
+    /// Structured key-value data.
+    Structured(HashMap<String, String>),
+    /// Plain text.
+    Text(String),
+}
+
+/// Request body for `POST /ingest/configure`.
+#[derive(Deserialize)]
+pub struct IngestConfigureRequest {
+    /// Pipeline name.
+    pub name: Option<String>,
+    /// Batch size for chunked writes.
+    pub batch_size: Option<usize>,
+    /// Worker thread count.
+    pub workers: Option<usize>,
+    /// Stages to skip by default.
+    pub skip: Option<String>,
+}
+
+/// Response for ingest endpoints.
+#[derive(Serialize)]
+pub struct IngestResponse {
+    pub facts_stored: u32,
+    pub relations_created: u32,
+    pub facts_resolved: u32,
+    pub facts_deduped: u32,
+    pub conflicts_detected: u32,
+    pub errors: Vec<String>,
+    pub duration_ms: u64,
+    pub stages_skipped: Vec<String>,
 }
