@@ -1,0 +1,3178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Engram Intel -- Geopolitical Intelligence Platform</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<style>
+:root {
+  --bg: #0a0e17;
+  --surface: #111827;
+  --surface2: #1a2332;
+  --border: #2a3a4e;
+  --text: #e2e8f0;
+  --muted: #7a8ba3;
+  --accent: #3b82f6;
+  --accent2: #6366f1;
+  --green: #22c55e;
+  --red: #ef4444;
+  --orange: #f59e0b;
+  --cyan: #06b6d4;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height:100vh; }
+
+/* License gate */
+#license-gate {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 100vh; padding: 2rem;
+}
+#license-gate .gate-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 3rem; max-width: 420px; width: 100%; text-align: center;
+}
+#license-gate h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+#license-gate .subtitle { color: var(--muted); margin-bottom: 2rem; font-size: 0.9rem; }
+#license-gate input {
+  width: 100%; padding: 0.75rem 1rem; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); font-size: 0.95rem; margin-bottom: 1rem;
+  font-family: 'Consolas', monospace;
+}
+#license-gate input:focus { outline: none; border-color: var(--accent); }
+#license-gate button {
+  width: 100%; padding: 0.75rem; background: var(--accent); border: none; border-radius: 6px;
+  color: #fff; font-size: 1rem; cursor: pointer; font-weight: 600;
+}
+#license-gate button:hover { background: #2563eb; }
+#license-error {
+  color: var(--red); margin-top: 1rem; font-size: 0.85rem; display: none;
+}
+
+/* Main app (hidden until licensed) */
+#app { display: none; }
+
+/* Top bar */
+.topbar {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 0.75rem 1.5rem; display: flex; align-items: center; gap: 1rem;
+}
+.topbar .brand { font-weight: 700; font-size: 1.1rem; color: var(--accent); white-space: nowrap; }
+.topbar .brand i { margin-right: 0.4rem; }
+
+/* Country selector */
+.country-select-wrap {
+  display: flex; align-items: center; gap: 0.5rem; flex: 1; max-width: 400px;
+}
+.country-select-wrap select {
+  flex: 1; padding: 0.5rem 0.75rem; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); font-size: 0.9rem;
+}
+.country-select-wrap select:focus { outline: none; border-color: var(--accent); }
+.topbar .status { margin-left: auto; display: flex; align-items: center; gap: 1rem; font-size: 0.85rem; color: var(--muted); }
+.topbar .status .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.topbar .status .dot.ok { background: var(--green); }
+.topbar .status .dot.err { background: var(--red); }
+#btn-logout { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); padding: 0.3rem 0.6rem; cursor: pointer; font-size: 0.8rem; }
+#btn-logout:hover { border-color: var(--red); color: var(--red); }
+
+/* Layout */
+.layout { display: grid; grid-template-columns: 320px 1fr; min-height: calc(100vh - 52px); }
+
+/* Left panel: country intel + assessment builder */
+.left-panel {
+  background: var(--surface); border-right: 1px solid var(--border);
+  overflow-y: auto; max-height: calc(100vh - 52px);
+}
+.panel-section { padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); }
+.panel-section h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 0.75rem; }
+.panel-section h3 i { margin-right: 0.4rem; }
+
+/* Collapsible sections */
+.panel-section.collapsible h3 { cursor: pointer; user-select: none; display: flex; align-items: center; }
+.panel-section.collapsible h3 .collapse-icon { margin-left: auto; font-size: 0.65rem; transition: transform 0.2s; }
+.panel-section.collapsible.collapsed h3 { margin-bottom: 0; }
+.panel-section.collapsible.collapsed .collapse-body { display: none; }
+.panel-section.collapsible h3:hover { color: var(--text); }
+
+/* Country info */
+.country-stat { display: flex; justify-content: space-between; padding: 0.35rem 0; font-size: 0.85rem; }
+.country-stat .label { color: var(--muted); }
+.country-stat .value { font-weight: 600; }
+
+/* Borders / orgs list */
+.tag-list { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.tag {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 4px;
+  padding: 0.2rem 0.5rem; font-size: 0.75rem; color: var(--muted);
+}
+
+/* Assessment builder form */
+.form-group { margin-bottom: 0.75rem; }
+.form-group label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.3rem; }
+.form-group input, .form-group select, .form-group textarea {
+  width: 100%; padding: 0.5rem; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); font-size: 0.85rem; font-family: inherit;
+}
+.form-group textarea { resize: vertical; min-height: 60px; }
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus { outline: none; border-color: var(--accent); }
+#btn-add-assessment {
+  width: 100%; padding: 0.6rem; background: var(--accent2); border: none; border-radius: 6px;
+  color: #fff; font-weight: 600; cursor: pointer; font-size: 0.9rem;
+}
+#btn-add-assessment:hover { background: #4f46e5; }
+
+/* Right panel: predictions + news */
+.right-panel { overflow-y: auto; max-height: calc(100vh - 52px); padding: 1.25rem; }
+
+/* Prediction cards */
+.predictions-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.pred-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 1rem 1.25rem; position: relative; transition: border-color 0.2s;
+  cursor: pointer;
+}
+.pred-card:hover { border-color: var(--accent); }
+.pred-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.pred-card .title { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.5rem; padding-right: 3rem; }
+.pred-card .prob-display { position: absolute; top: 1rem; right: 1.25rem; font-size: 1.4rem; font-weight: 700; }
+.pred-card .prob-bar { height: 6px; background: var(--bg); border-radius: 3px; margin-bottom: 0.5rem; overflow: hidden; }
+.pred-card .prob-bar .fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
+.pred-card .meta { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+.pred-card .cat-tag {
+  font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 3px;
+  text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
+}
+.cat-tag.military { background: #dc262620; color: #ef4444; border: 1px solid #ef444440; }
+.cat-tag.economic { background: #f59e0b20; color: #f59e0b; border: 1px solid #f59e0b40; }
+.cat-tag.conflict { background: #ef444420; color: #f87171; border: 1px solid #f8717140; }
+.cat-tag.diplomatic { background: #3b82f620; color: #60a5fa; border: 1px solid #60a5fa40; }
+.cat-tag.hybrid { background: #8b5cf620; color: #a78bfa; border: 1px solid #a78bfa40; }
+.cat-tag.nuclear { background: #f43f5e20; color: #fb7185; border: 1px solid #fb718540; }
+.cat-tag.energy { background: #06b6d420; color: #22d3ee; border: 1px solid #22d3ee40; }
+.cat-tag.humanitarian { background: #14b8a620; color: #2dd4bf; border: 1px solid #2dd4bf40; }
+.cat-tag.territorial { background: #d946ef20; color: #e879f9; border: 1px solid #e879f940; }
+.cat-tag.political { background: #f9731620; color: #fb923c; border: 1px solid #fb923c40; }
+.cat-tag.default { background: #6b728020; color: #9ca3af; border: 1px solid #9ca3af40; }
+.pred-card .remove-pred {
+  position: absolute; top: 0.6rem; right: 4.5rem; background: none; border: none;
+  color: var(--muted); cursor: pointer; font-size: 0.75rem; padding: 0.2rem;
+  opacity: 0.5; transition: opacity 0.2s;
+}
+.pred-card:hover .remove-pred { opacity: 1; }
+.pred-card .remove-pred:hover { color: var(--red); }
+.pred-card .ev-counts { font-size: 0.75rem; color: var(--muted); margin-left: auto; }
+.pred-card .shift-badge {
+  font-size: 0.75rem; font-weight: 600; padding: 0.15rem 0.4rem; border-radius: 3px;
+  margin-left: 0.3rem;
+}
+.shift-badge.up { background: #22c55e20; color: var(--green); }
+.shift-badge.down { background: #ef444420; color: var(--red); }
+
+/* Detail panel */
+.detail-panel {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 1.25rem; display: none;
+}
+.detail-panel.visible { display: block; }
+.detail-panel h3 { font-size: 0.95rem; margin-bottom: 1rem; }
+.detail-panel h3 i { margin-right: 0.4rem; color: var(--accent); }
+
+/* Evidence list */
+.evidence-list { margin-bottom: 1.5rem; }
+.evidence-list h4 { font-size: 0.8rem; text-transform: uppercase; color: var(--muted); margin-bottom: 0.5rem; letter-spacing: 0.05em; }
+.evidence-list h4 i { margin-right: 0.3rem; }
+.ev-item {
+  display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.75rem;
+  background: var(--bg); border-radius: 4px; margin-bottom: 0.35rem; font-size: 0.85rem;
+}
+.ev-item .conf {
+  font-weight: 700; font-size: 0.8rem; min-width: 40px; text-align: center;
+  padding: 0.15rem 0.3rem; border-radius: 3px;
+}
+.ev-item .conf.high { background: #22c55e20; color: var(--green); }
+.ev-item .conf.mid { background: #f59e0b20; color: var(--orange); }
+.ev-item .conf.low { background: #ef444420; color: var(--red); }
+.ev-item .desc { flex: 1; }
+.ev-item .source { color: var(--muted); font-size: 0.75rem; }
+.ev-item .remove-ev { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.75rem; }
+.ev-item .remove-ev:hover { color: var(--red); }
+
+/* Add evidence inline */
+.add-ev-row { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+.add-ev-row input, .add-ev-row select { padding: 0.4rem; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.8rem; }
+.add-ev-row input { flex: 1; }
+.add-ev-row select { width: 80px; }
+.add-ev-row button {
+  padding: 0.4rem 0.8rem; background: var(--accent); border: none; border-radius: 4px;
+  color: #fff; cursor: pointer; font-size: 0.8rem;
+}
+
+/* News feed */
+.news-section { margin-top: 1.5rem; }
+.news-section h3 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.75rem; }
+.news-section h3 i { margin-right: 0.3rem; }
+.news-item {
+  display: flex; gap: 0.75rem; padding: 0.65rem 0.75rem; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; margin-bottom: 0.5rem;
+  font-size: 0.85rem; align-items: flex-start;
+}
+.news-item .direction { font-weight: 700; font-size: 0.75rem; min-width: 36px; text-align: center; padding: 0.2rem; border-radius: 3px; margin-top: 0.1rem; }
+.news-item .direction.up { background: #22c55e20; color: var(--green); }
+.news-item .direction.down { background: #ef444420; color: var(--red); }
+.news-item .content { flex: 1; }
+.news-item .headline { font-weight: 500; margin-bottom: 0.25rem; }
+.news-item .headline a { color: var(--text); text-decoration: none; }
+.news-item .headline a:hover { color: var(--accent); }
+.news-item .news-meta { font-size: 0.75rem; color: var(--muted); display: flex; gap: 0.75rem; }
+.news-item .topics-list { display: flex; gap: 0.3rem; margin-top: 0.3rem; }
+.news-item .topic-tag { font-size: 0.65rem; background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; padding: 0.1rem 0.35rem; color: var(--muted); }
+
+/* Loading spinner */
+.spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Ingestion controls */
+.ingest-controls { display: flex; gap: 0.5rem; align-items: center; }
+#btn-ingest {
+  padding: 0.5rem 1rem; background: var(--green); border: none; border-radius: 6px;
+  color: #fff; font-weight: 600; cursor: pointer; font-size: 0.85rem;
+}
+#btn-ingest:hover { background: #16a34a; }
+#btn-ingest:disabled { background: var(--border); cursor: not-allowed; }
+#btn-auto-ingest {
+  padding: 0.5rem 0.75rem; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--muted); font-weight: 600; cursor: pointer; font-size: 0.8rem;
+}
+#btn-auto-ingest:hover { border-color: var(--accent); color: var(--text); }
+#btn-auto-ingest.active { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+#btn-auto-ingest:disabled { opacity: 0.5; cursor: not-allowed; }
+#ingest-status { font-size: 0.8rem; color: var(--muted); }
+
+/* Toast notification */
+.toast {
+  position: fixed; bottom: 1.5rem; right: 1.5rem; background: var(--surface2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 1.25rem;
+  font-size: 0.85rem; z-index: 1000; opacity: 0; transform: translateY(10px);
+  transition: opacity 0.3s, transform 0.3s; pointer-events: none;
+}
+.toast.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.toast.success { border-color: var(--green); }
+.toast.error { border-color: var(--red); }
+
+/* Sparkline */
+.sparkline { display: inline-block; vertical-align: middle; }
+
+/* Sort & toolbar controls */
+.pred-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; gap: 0.75rem; flex-wrap: wrap; }
+.pred-toolbar h3 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 0; }
+.pred-toolbar-actions { display: flex; gap: 0.5rem; align-items: center; }
+.sort-select {
+  padding: 0.35rem 0.6rem; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); font-size: 0.75rem; cursor: pointer;
+}
+.sort-select:focus { outline: none; border-color: var(--accent); }
+.toolbar-btn {
+  padding: 0.35rem 0.65rem; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--muted); cursor: pointer; font-size: 0.75rem; transition: all 0.2s;
+}
+.toolbar-btn:hover { border-color: var(--accent); color: var(--text); }
+.toolbar-btn i { margin-right: 0.3rem; }
+
+/* Global Ask bar (cross-assessment) */
+.global-ask {
+  display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem;
+  padding: 0.6rem 0.75rem; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; border-left: 3px solid #a855f7;
+}
+.global-ask input {
+  flex: 1; padding: 0.45rem 0.7rem; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); font-size: 0.85rem;
+}
+.global-ask input:focus { outline: none; border-color: #a855f7; }
+.global-ask input::placeholder { color: var(--muted); }
+.global-ask button {
+  padding: 0.45rem 0.8rem; background: #a855f7; border: none; border-radius: 4px;
+  color: #fff; font-size: 0.8rem; cursor: pointer; font-weight: 600; white-space: nowrap;
+}
+.global-ask button:hover { background: #9333ea; }
+.global-ask button:disabled { opacity: 0.5; cursor: wait; }
+.global-ask-label { font-size: 0.75rem; color: #a855f7; font-weight: 600; white-space: nowrap; }
+#global-ask-output {
+  display: none; margin-bottom: 1rem; padding: 1rem; background: var(--surface2);
+  border: 1px solid #a855f7; border-radius: 8px; font-size: 0.85rem; line-height: 1.6;
+  white-space: pre-wrap; max-height: 600px; overflow-y: auto;
+}
+#global-ask-output.visible { display: block; }
+
+/* Fullscreen modal overlay */
+.modal-overlay {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(10, 14, 23, 0.92); z-index: 2000;
+  display: none; justify-content: center; align-items: flex-start;
+  overflow-y: auto; padding: 2rem;
+}
+.modal-overlay.visible { display: flex; }
+.modal-content {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 2rem; width: 100%; max-width: 960px; position: relative;
+  animation: modalIn 0.25s ease-out;
+}
+@keyframes modalIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+.modal-close {
+  position: absolute; top: 1rem; right: 1rem; background: none; border: none;
+  color: var(--muted); font-size: 1.2rem; cursor: pointer; padding: 0.5rem;
+}
+.modal-close:hover { color: var(--red); }
+.modal-header { display: flex; align-items: flex-start; gap: 1.5rem; margin-bottom: 1.5rem; }
+.modal-prob-big { font-size: 3rem; font-weight: 800; line-height: 1; }
+.modal-meta { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.5rem; }
+.modal-meta-item { display: flex; flex-direction: column; }
+.modal-meta-item .meta-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.modal-meta-item .meta-value { font-size: 0.95rem; font-weight: 600; margin-top: 0.15rem; }
+.modal-section { margin-bottom: 1.5rem; }
+.modal-section h4 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.75rem; }
+.modal-section h4 i { margin-right: 0.3rem; }
+.modal-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+@media (max-width: 700px) { .modal-columns { grid-template-columns: 1fr; } }
+
+/* Sensitivity analysis */
+.sensitivity-section { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1.5rem; }
+.sensitivity-section h4 { font-size: 0.85rem; color: var(--accent); margin-bottom: 1rem; }
+.sensitivity-section h4 i { margin-right: 0.4rem; }
+.sensitivity-row {
+  display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.75rem;
+  background: var(--surface); border-radius: 6px; margin-bottom: 0.5rem; font-size: 0.85rem;
+}
+.sensitivity-row .target-prob { font-weight: 700; min-width: 50px; text-align: center; font-size: 0.9rem; }
+.sensitivity-row .action { flex: 1; }
+.sensitivity-row .action .needed { font-weight: 600; color: var(--accent); }
+.sensitivity-arrow { font-size: 0.9rem; }
+.sensitivity-arrow.up { color: var(--green); }
+.sensitivity-arrow.down { color: var(--red); }
+.sensitivity-divider { display: flex; align-items: center; gap: 0.5rem; margin: 1rem 0 0.75rem; font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.sensitivity-divider::before, .sensitivity-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+/* LLM analysis section */
+.llm-section { background: var(--bg); border: 1px solid var(--accent2); border-radius: 8px; padding: 1.25rem; margin-bottom: 1.5rem; }
+.llm-section h4 { font-size: 0.85rem; color: var(--accent2); margin-bottom: 1rem; }
+.llm-section h4 i { margin-right: 0.4rem; }
+.llm-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.llm-btn {
+  padding: 0.5rem 0.9rem; background: var(--surface); border: 1px solid var(--accent2);
+  border-radius: 6px; color: var(--accent2); cursor: pointer; font-size: 0.8rem; font-weight: 600;
+  transition: all 0.2s;
+}
+.llm-btn:hover { background: var(--accent2); color: #fff; }
+.llm-btn:disabled { opacity: 0.5; cursor: wait; }
+.llm-btn i { margin-right: 0.3rem; }
+.llm-output {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  padding: 1rem; font-size: 0.85rem; line-height: 1.6; white-space: pre-wrap;
+  max-height: 400px; overflow-y: auto; display: none;
+}
+.llm-output.visible { display: block; }
+.llm-output .llm-badge {
+  display: inline-block; font-size: 0.65rem; background: var(--accent2); color: #fff;
+  padding: 0.15rem 0.4rem; border-radius: 3px; margin-bottom: 0.5rem; text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.llm-ask-row { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.llm-ask-row input {
+  flex: 1; padding: 0.5rem 0.75rem; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); font-size: 0.85rem;
+}
+.llm-ask-row input:focus { outline: none; border-color: var(--accent2); }
+.llm-settings { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.75rem; font-size: 0.75rem; color: var(--muted); }
+.llm-settings input, .llm-settings select {
+  padding: 0.3rem 0.5rem; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); font-size: 0.75rem;
+}
+.llm-settings input { width: 200px; }
+.llm-settings select { width: 140px; }
+.llm-settings label { white-space: nowrap; }
+
+/* Threshold alert toast - enhanced */
+.toast.alert { border-color: var(--orange); background: #1a1a0e; }
+.toast.alert .alert-icon { color: var(--orange); margin-right: 0.4rem; }
+
+/* Responsive */
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .left-panel { max-height: none; border-right: none; border-bottom: 1px solid var(--border); }
+  .right-panel { max-height: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- LICENSE GATE -->
+<div id="license-gate">
+  <div class="gate-card">
+    <div style="font-size: 2.5rem; color: var(--accent); margin-bottom: 1rem;">
+      <i class="fa-solid fa-brain"></i>
+    </div>
+    <h1>Engram Intel</h1>
+    <div class="subtitle">Geopolitical Intelligence Platform</div>
+    <div id="locale-block" style="display:none; color: var(--red); margin-bottom: 1rem; font-size: 0.85rem;">
+      <i class="fa-solid fa-ban"></i> Access restricted in your region.
+    </div>
+    <input type="text" id="license-key" placeholder="Enter license key..." autocomplete="off" spellcheck="false">
+    <button id="btn-activate" onclick="activateLicense()">
+      <i class="fa-solid fa-key"></i> Activate
+    </button>
+    <div id="license-error"></div>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app">
+  <!-- Top bar -->
+  <div class="topbar">
+    <div class="brand"><i class="fa-solid fa-brain"></i> Engram Intel</div>
+    <div class="country-select-wrap">
+      <i class="fa-solid fa-globe" style="color: var(--muted);"></i>
+      <select id="country-select" onchange="onCountryChange()">
+        <option value="">-- Select target country --</option>
+      </select>
+    </div>
+    <div class="ingest-controls">
+      <button id="btn-ingest" onclick="runIngestion()" disabled>
+        <i class="fa-solid fa-satellite-dish"></i> Ingest Now
+      </button>
+      <button id="btn-auto-ingest" onclick="toggleAutoIngest()" disabled title="Auto-ingest every 5 minutes">
+        <i class="fa-solid fa-clock"></i> <span id="auto-ingest-label">Auto: Off</span>
+      </button>
+      <span id="ingest-status"></span>
+    </div>
+    <div class="status">
+      <span><span class="dot" id="engram-dot"></span> engram <span id="engram-nodes" style="font-size:0.75rem;"></span></span>
+      <span><span class="dot" id="wasm-dot"></span> wasm</span>
+      <button id="btn-logout" onclick="logout()"><i class="fa-solid fa-right-from-bracket"></i></button>
+    </div>
+  </div>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Left panel -->
+    <div class="left-panel">
+      <!-- Assessment builder (always open, on top) -->
+      <div class="panel-section">
+        <h3><i class="fa-solid fa-plus-circle"></i> New Assessment</h3>
+        <div class="form-group">
+          <label>Hypothesis</label>
+          <input type="text" id="assess-title" placeholder="e.g. Sanctions will collapse ruble">
+        </div>
+        <div class="form-group">
+          <label>Category</label>
+          <select id="assess-category">
+            <option value="political">Political / Regime</option>
+            <option value="military">Military</option>
+            <option value="economic">Economic</option>
+            <option value="conflict">Conflict</option>
+            <option value="diplomatic">Diplomatic</option>
+            <option value="hybrid">Hybrid Warfare</option>
+            <option value="nuclear">Nuclear</option>
+            <option value="energy">Energy</option>
+            <option value="humanitarian">Humanitarian</option>
+            <option value="territorial">Territorial</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Timeframe</label>
+          <select id="assess-timeframe">
+            <option value="30d">30 days</option>
+            <option value="90d" selected>90 days</option>
+            <option value="180d">6 months</option>
+            <option value="1y">1 year</option>
+            <option value="3y">3 years</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Initial evidence (supporting)</label>
+          <textarea id="assess-evidence" placeholder="One piece of evidence per line&#10;e.g. EU 15th sanctions package approved"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Initial confidence (0.0 - 1.0)</label>
+          <input type="number" id="assess-confidence" min="0" max="1" step="0.05" value="0.75">
+        </div>
+        <button id="btn-add-assessment" onclick="addAssessment()">
+          <i class="fa-solid fa-plus"></i> Create Assessment
+        </button>
+      </div>
+
+      <!-- Country profile (collapsible, collapsed by default) -->
+      <div class="panel-section collapsible collapsed" id="country-info" style="display:none;">
+        <h3 onclick="toggleCollapse(this)"><i class="fa-solid fa-flag"></i> Country Profile <i class="fa-solid fa-chevron-down collapse-icon"></i></h3>
+        <div class="collapse-body">
+          <div id="country-stats"></div>
+        </div>
+      </div>
+
+      <div class="panel-section collapsible collapsed" id="borders-section" style="display:none;">
+        <h3 onclick="toggleCollapse(this)"><i class="fa-solid fa-arrows-left-right"></i> Borders <i class="fa-solid fa-chevron-down collapse-icon"></i></h3>
+        <div class="collapse-body">
+          <div class="tag-list" id="country-borders"></div>
+        </div>
+      </div>
+
+      <div class="panel-section collapsible collapsed" id="orgs-section" style="display:none;">
+        <h3 onclick="toggleCollapse(this)"><i class="fa-solid fa-building-columns"></i> Organizations <i class="fa-solid fa-chevron-down collapse-icon"></i></h3>
+        <div class="collapse-body">
+          <div class="tag-list" id="country-orgs"></div>
+        </div>
+      </div>
+
+      <div class="panel-section collapsible collapsed" id="leaders-section" style="display:none;">
+        <h3 onclick="toggleCollapse(this)"><i class="fa-solid fa-user-tie"></i> Leaders <i class="fa-solid fa-chevron-down collapse-icon"></i></h3>
+        <div class="collapse-body">
+          <div class="tag-list" id="country-leaders"></div>
+        </div>
+      </div>
+
+      <div class="panel-section collapsible collapsed" id="econ-section" style="display:none;">
+        <h3 onclick="toggleCollapse(this)"><i class="fa-solid fa-chart-line"></i> Economic Indicators <i class="fa-solid fa-chevron-down collapse-icon"></i></h3>
+        <div class="collapse-body">
+          <div id="econ-data"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right panel -->
+    <div class="right-panel">
+      <div id="no-country" style="text-align:center; padding: 4rem 2rem; color: var(--muted);">
+        <i class="fa-solid fa-crosshairs" style="font-size: 3rem; margin-bottom: 1rem; display: block;"></i>
+        <div style="font-size: 1.1rem; margin-bottom: 0.5rem;">Select a target country to begin analysis</div>
+        <div style="font-size: 0.85rem;">Choose a country from the dropdown above, then create assessments or ingest news.</div>
+      </div>
+
+      <div id="predictions-area" style="display:none;">
+        <div class="pred-toolbar">
+          <h3><i class="fa-solid fa-chart-bar"></i> Predictions <span id="pred-count" style="font-weight: 400;"></span></h3>
+          <div class="pred-toolbar-actions">
+            <select class="sort-select" id="pred-sort" onchange="sortPredictions()">
+              <option value="prob-desc">Probability (high-low)</option>
+              <option value="prob-asc">Probability (low-high)</option>
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+              <option value="changed">Last changed</option>
+              <option value="category">Category</option>
+            </select>
+            <button class="toolbar-btn" onclick="exportToJSON()" title="Export all data as JSON">
+              <i class="fa-solid fa-download"></i> Export
+            </button>
+          </div>
+        </div>
+        <div class="global-ask">
+          <span class="global-ask-label"><i class="fa-solid fa-globe"></i> Cross-Assessment</span>
+          <input type="text" id="global-ask-input" placeholder="How does losing Starlink access impact all assessments?" onkeydown="if(event.key==='Enter')globalAsk()">
+          <button onclick="globalAsk()" id="global-ask-btn"><i class="fa-solid fa-paper-plane"></i> Analyze All</button>
+        </div>
+        <div id="global-ask-output"></div>
+        <div class="predictions-grid" id="predictions-grid"></div>
+
+        <!-- Detail panel -->
+        <div class="detail-panel" id="detail-panel">
+          <h3><i class="fa-solid fa-microscope"></i> <span id="detail-title"></span></h3>
+          <div style="display:flex; gap: 2rem; margin-bottom: 1rem;">
+            <div>
+              <span style="font-size: 0.75rem; color: var(--muted);">PROBABILITY</span>
+              <div style="font-size: 1.8rem; font-weight: 700;" id="detail-prob"></div>
+            </div>
+            <div>
+              <span style="font-size: 0.75rem; color: var(--muted);">TIMEFRAME</span>
+              <div style="font-size: 1rem; font-weight: 500; margin-top: 0.3rem;" id="detail-timeframe"></div>
+            </div>
+            <div>
+              <span style="font-size: 0.75rem; color: var(--muted);">CATEGORY</span>
+              <div style="margin-top: 0.3rem;" id="detail-category"></div>
+            </div>
+          </div>
+
+          <div class="evidence-list">
+            <h4><i class="fa-solid fa-check-circle" style="color: var(--green);"></i> Supporting Evidence</h4>
+            <div id="evidence-for"></div>
+            <div class="add-ev-row">
+              <input type="text" id="new-ev-for" placeholder="Add supporting evidence...">
+              <select id="new-ev-for-conf"><option value="0.90">0.90</option><option value="0.85" selected>0.85</option><option value="0.80">0.80</option><option value="0.75">0.75</option><option value="0.70">0.70</option><option value="0.60">0.60</option></select>
+              <button onclick="addEvidence('for')"><i class="fa-solid fa-plus"></i></button>
+            </div>
+          </div>
+
+          <div class="evidence-list">
+            <h4><i class="fa-solid fa-times-circle" style="color: var(--red);"></i> Contradicting Evidence</h4>
+            <div id="evidence-against"></div>
+            <div class="add-ev-row">
+              <input type="text" id="new-ev-against" placeholder="Add contradicting evidence...">
+              <select id="new-ev-against-conf"><option value="0.90">0.90</option><option value="0.85" selected>0.85</option><option value="0.80">0.80</option><option value="0.75">0.75</option><option value="0.70">0.70</option><option value="0.60">0.60</option></select>
+              <button onclick="addEvidence('against')"><i class="fa-solid fa-plus"></i></button>
+            </div>
+          </div>
+
+          <!-- Sensitivity analysis: what needs to happen -->
+          <div class="sensitivity-section" id="sensitivity-section">
+            <h4><i class="fa-solid fa-sliders"></i> What Needs to Happen</h4>
+            <div id="sensitivity-content"></div>
+          </div>
+
+          <!-- LLM-assisted analysis -->
+          <div class="llm-section" id="llm-section">
+            <h4><i class="fa-solid fa-robot"></i> AI-Assisted Analysis</h4>
+            <div class="llm-actions">
+              <button class="llm-btn" onclick="llmAnalyze('summarize')" id="btn-llm-summarize">
+                <i class="fa-solid fa-file-lines"></i> Summarize
+              </button>
+              <button class="llm-btn" onclick="llmAnalyze('challenge')" id="btn-llm-challenge">
+                <i class="fa-solid fa-scale-balanced"></i> Challenge
+              </button>
+              <button class="llm-btn" onclick="llmAnalyze('sensitivity')" id="btn-llm-sensitivity">
+                <i class="fa-solid fa-lightbulb"></i> What Would Change It
+              </button>
+              <button class="llm-btn" onclick="llmAnalyze('explain_changes')" id="btn-llm-changes">
+                <i class="fa-solid fa-clock-rotate-left"></i> Explain Changes
+              </button>
+            </div>
+            <div class="llm-ask-row">
+              <input type="text" id="llm-question" placeholder="Ask anything... e.g. How is Iran war influencing this?" onkeydown="if(event.key==='Enter')llmAsk()">
+              <button class="llm-btn" onclick="llmAsk()" style="white-space:nowrap;">
+                <i class="fa-solid fa-paper-plane"></i> Ask
+              </button>
+            </div>
+            <div class="llm-output" id="llm-output"></div>
+            <div class="llm-settings">
+              <label><i class="fa-solid fa-gear"></i> LLM:</label>
+              <select id="llm-endpoint-type" onchange="updateLlmSettings()">
+                <option value="engram">Via Engram Proxy</option>
+                <option value="ollama">Ollama Direct</option>
+                <option value="openai">OpenAI API</option>
+              </select>
+              <input type="text" id="llm-model" placeholder="Model name" value="qwen2.5:7b">
+              <input type="password" id="llm-api-key" placeholder="API key (if needed)" style="display:none;">
+            </div>
+          </div>
+
+          <!-- News driving this prediction -->
+          <div class="news-section">
+            <h3><i class="fa-solid fa-newspaper"></i> News Driving This Prediction</h3>
+            <div id="detail-news"></div>
+          </div>
+
+          <div style="margin-top: 1rem; text-align: right;">
+            <button class="toolbar-btn" onclick="openFullscreen()" style="font-size: 0.85rem; padding: 0.5rem 1rem;">
+              <i class="fa-solid fa-expand"></i> Full Analysis View
+            </button>
+          </div>
+        </div>
+
+        <!-- All ingested news -->
+        <div class="news-section" style="margin-top: 2rem;">
+          <h3><i class="fa-solid fa-rss"></i> Latest Ingested News</h3>
+          <div id="all-news"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Fullscreen Modal -->
+<div class="modal-overlay" id="fullscreen-modal">
+  <div class="modal-content">
+    <button class="modal-close" onclick="closeFullscreen()"><i class="fa-solid fa-times"></i></button>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script type="module">
+import init, {
+  calc_probability, calc_shift, assess_source, classify_article,
+  topic_relationship, generate_queries, hypothesis_queries,
+  country_iso3, country_wikidata_id,
+  sparql_borders, sparql_memberships, sparql_leaders,
+  world_bank_indicators, validate_license, check_locale, is_blocked_country,
+  process_articles
+} from './pkg/engram_intel.js';
+
+// ── State ──────────────────────────────────────────────────────────────
+const STATE = {
+  wasmReady: false,
+  licensed: false,
+  licenseKey: '',
+  country: '',
+  countryIso3: '',
+  countryWikidata: '',
+  predictions: [],   // local assessment objects
+  selectedPred: null,
+  ingestedNews: [],
+  engramOnline: false,
+  refreshTimer: null,
+  autoIngestTimer: null,
+  autoIngestActive: false,
+};
+
+const ENGRAM_BASE = 'http://127.0.0.1:3030';
+const GDELT_BASE = 'https://api.gdeltproject.org/api/v2/doc/doc';
+
+// Countries list (matches WASM lookup tables)
+const COUNTRIES = [
+  'Afghanistan','Algeria','Angola','Argentina','Armenia','Australia','Austria',
+  'Azerbaijan','Bahrain','Bangladesh','Belarus','Belgium','Brazil','Bulgaria',
+  'Cambodia','Cameroon','Canada','Chile','China','Colombia','Croatia','Cuba',
+  'Czech Republic','Democratic Republic of Congo','Denmark','Egypt','Estonia',
+  'Ethiopia','Finland','France','Georgia','Germany','Greece','Hungary','India',
+  'Indonesia','Iran','Iraq','Ireland','Israel','Italy','Japan','Jordan',
+  'Kazakhstan','Kenya','Kuwait','Kyrgyzstan','Laos','Latvia','Lebanon','Libya',
+  'Lithuania','Malaysia','Mexico','Moldova','Mongolia','Morocco','Mozambique',
+  'Myanmar','Nepal','Netherlands','New Zealand','Nigeria','North Korea','Norway',
+  'Oman','Pakistan','Peru','Philippines','Poland','Portugal','Qatar','Romania',
+  'Russia','Saudi Arabia','Serbia','Singapore','Slovakia','Somalia','South Africa',
+  'South Korea','South Sudan','Spain','Sri Lanka','Sudan','Sweden','Switzerland',
+  'Syria','Taiwan','Tajikistan','Tanzania','Thailand','Tunisia','Turkey',
+  'Turkmenistan','Uganda','Ukraine','United Arab Emirates','United Kingdom',
+  'United States','Uzbekistan','Venezuela','Vietnam','Yemen'
+];
+
+// ── Init ───────────────────────────────────────────────────────────────
+async function boot() {
+  try {
+    await init();
+    STATE.wasmReady = true;
+    document.getElementById('wasm-dot').classList.add('ok');
+
+    // Check locale
+    const locale = navigator.language || 'en-US';
+    const localeResult = JSON.parse(check_locale(locale));
+    if (localeResult.blocked) {
+      document.getElementById('locale-block').style.display = 'block';
+      document.getElementById('license-key').disabled = true;
+      document.getElementById('btn-activate').disabled = true;
+      return;
+    }
+
+    // Populate country selector (all countries -- blocking is about USER locale, not analysis targets)
+    const sel = document.getElementById('country-select');
+    COUNTRIES.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c;
+      // Show assessment count if any exist for this country
+      const stored = localStorage.getItem(`engram_preds_${c}`);
+      const count = stored ? JSON.parse(stored).length : 0;
+      opt.textContent = count > 0 ? `${c} (${count})` : c;
+      sel.appendChild(opt);
+    });
+
+    // Check saved license
+    const saved = localStorage.getItem('engram_license');
+    if (saved) {
+      const result = JSON.parse(validate_license(saved));
+      if (result.valid) {
+        STATE.licensed = true;
+        STATE.licenseKey = saved;
+        showApp();
+      }
+    }
+
+    // Check engram connectivity
+    checkEngram();
+  } catch (e) {
+    console.error('WASM init failed:', e);
+    document.getElementById('wasm-dot').classList.add('err');
+  }
+}
+
+function isCountryBlocked(name) {
+  // Map country names to 2-letter codes for blocking check
+  const map = {
+    'Russia': 'RU', 'Belarus': 'BY', 'North Korea': 'KP',
+    'Syria': 'SY', 'Iran': 'IR', 'Cuba': 'CU'
+  };
+  const code = map[name];
+  return code ? is_blocked_country(code) : false;
+}
+
+// ── License ────────────────────────────────────────────────────────────
+window.activateLicense = function() {
+  const key = document.getElementById('license-key').value.trim();
+  if (!key) return;
+  if (!STATE.wasmReady) { showLicenseError('WASM not loaded'); return; }
+
+  const result = JSON.parse(validate_license(key));
+  if (result.valid) {
+    STATE.licensed = true;
+    STATE.licenseKey = key;
+    localStorage.setItem('engram_license', key);
+    showApp();
+  } else {
+    showLicenseError(result.reason);
+  }
+};
+
+window.logout = function() {
+  STATE.licensed = false;
+  STATE.licenseKey = '';
+  localStorage.removeItem('engram_license');
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('license-gate').style.display = 'flex';
+  if (STATE.refreshTimer) clearInterval(STATE.refreshTimer);
+};
+
+function showLicenseError(msg) {
+  const el = document.getElementById('license-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 4000);
+}
+
+function showApp() {
+  document.getElementById('license-gate').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+}
+
+// ── Collapsible sections ──────────────────────────────────────────────
+window.toggleCollapse = function(h3El) {
+  const section = h3El.closest('.collapsible');
+  section.classList.toggle('collapsed');
+};
+
+// ── Engram connectivity ────────────────────────────────────────────────
+async function checkEngram() {
+  try {
+    const r = await fetch(`${ENGRAM_BASE}/health`, { signal: AbortSignal.timeout(2000) });
+    STATE.engramOnline = r.ok;
+  } catch { STATE.engramOnline = false; }
+  const dot = document.getElementById('engram-dot');
+  dot.classList.toggle('ok', STATE.engramOnline);
+  dot.classList.toggle('err', !STATE.engramOnline);
+
+  // Fetch node count
+  if (STATE.engramOnline) {
+    try {
+      const r = await fetch(`${ENGRAM_BASE}/stats`, { signal: AbortSignal.timeout(2000) });
+      if (r.ok) {
+        const data = await r.json();
+        document.getElementById('engram-nodes').textContent = `(${data.nodes} nodes)`;
+      }
+    } catch {}
+  } else {
+    document.getElementById('engram-nodes').textContent = '';
+  }
+}
+
+// ── Country change ─────────────────────────────────────────────────────
+window.onCountryChange = async function() {
+  const country = document.getElementById('country-select').value;
+  if (!country) {
+    document.getElementById('no-country').style.display = 'block';
+    document.getElementById('predictions-area').style.display = 'none';
+    for (const id of ['country-info','borders-section','orgs-section','leaders-section','econ-section']) {
+      document.getElementById(id).style.display = 'none';
+    }
+    document.getElementById('btn-ingest').disabled = true;
+    return;
+  }
+
+  STATE.country = country;
+  STATE.countryIso3 = country_iso3(country);
+  STATE.countryWikidata = country_wikidata_id(country);
+  STATE.predictions = loadPredictions(country);
+  STATE.ingestedNews = loadNews(country);
+  STATE.selectedPred = null;
+
+  document.getElementById('no-country').style.display = 'none';
+  document.getElementById('predictions-area').style.display = 'block';
+  for (const id of ['country-info','borders-section','orgs-section','leaders-section']) {
+    document.getElementById(id).style.display = 'block';
+  }
+  document.getElementById('btn-ingest').disabled = false;
+  document.getElementById('btn-auto-ingest').disabled = false;
+
+  // Load country profile
+  loadCountryProfile();
+  loadEconomicData();
+  renderPredictions();
+  renderAllNews();
+  checkEngram();
+};
+
+// ── Country profile via Wikidata ───────────────────────────────────────
+async function loadCountryProfile() {
+  const statsEl = document.getElementById('country-stats');
+  const bordersEl = document.getElementById('country-borders');
+  const orgsEl = document.getElementById('country-orgs');
+  const leadersEl = document.getElementById('country-leaders');
+
+  statsEl.innerHTML = `
+    <div class="country-stat"><span class="label">ISO-3</span><span class="value">${STATE.countryIso3 || 'N/A'}</span></div>
+    <div class="country-stat"><span class="label">Wikidata</span><span class="value">${STATE.countryWikidata || 'N/A'}</span></div>
+  `;
+
+  if (!STATE.countryWikidata) {
+    bordersEl.innerHTML = '<span class="tag">No data</span>';
+    orgsEl.innerHTML = '<span class="tag">No data</span>';
+    leadersEl.innerHTML = '<span class="tag">No data</span>';
+    return;
+  }
+
+  // Fetch borders, orgs, leaders from Wikidata
+  const wikidataEndpoint = 'https://query.wikidata.org/sparql';
+  const headers = { 'Accept': 'application/sparql-results+json' };
+
+  const fetchSparql = async (query) => {
+    try {
+      const url = `${wikidataEndpoint}?query=${encodeURIComponent(query.trim())}`;
+      const r = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
+      if (!r.ok) return [];
+      const data = await r.json();
+      return data.results.bindings;
+    } catch { return []; }
+  };
+
+  // Parallel fetches
+  const [borders, orgs, leaders] = await Promise.all([
+    fetchSparql(sparql_borders(STATE.countryWikidata)),
+    fetchSparql(sparql_memberships(STATE.countryWikidata)),
+    fetchSparql(sparql_leaders(STATE.countryWikidata)),
+  ]);
+
+  bordersEl.innerHTML = borders.length
+    ? borders.map(b => `<span class="tag">${b.borderLabel?.value || '?'}</span>`).join('')
+    : '<span class="tag">No data</span>';
+
+  orgsEl.innerHTML = orgs.length
+    ? orgs.map(o => `<span class="tag">${o.orgLabel?.value || '?'}</span>`).join('')
+    : '<span class="tag">No data</span>';
+
+  leadersEl.innerHTML = leaders.length
+    ? leaders.map(l => {
+        const name = l.leaderLabel?.value || '?';
+        const pos = l.positionLabel?.value || '';
+        return `<span class="tag">${name}${pos ? ' (' + pos + ')' : ''}</span>`;
+      }).join('')
+    : '<span class="tag">No data</span>';
+}
+
+// ── Economic data via World Bank ───────────────────────────────────────
+async function loadEconomicData() {
+  const section = document.getElementById('econ-section');
+  const container = document.getElementById('econ-data');
+  if (!STATE.countryIso3) { section.style.display = 'none'; return; }
+
+  section.style.display = 'block';
+  container.innerHTML = '<div class="spinner"></div>';
+
+  const indicators = JSON.parse(world_bank_indicators());
+  const results = await Promise.all(indicators.map(async (ind) => {
+    try {
+      const url = `https://api.worldbank.org/v2/country/${STATE.countryIso3}/indicator/${ind.code}?format=json&per_page=1&mrv=1`;
+      const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      if (!r.ok) return { name: ind.name, value: 'N/A', format: ind.format };
+      const data = await r.json();
+      const val = data[1]?.[0]?.value;
+      return { name: ind.name, value: val, format: ind.format };
+    } catch { return { name: ind.name, value: null, format: ind.format }; }
+  }));
+
+  container.innerHTML = results.map(r => {
+    let display = 'N/A';
+    if (r.value != null) {
+      if (r.format === 'currency') display = '$' + formatNum(r.value);
+      else if (r.format === 'percent') display = r.value.toFixed(1) + '%';
+      else display = formatNum(r.value);
+    }
+    return `<div class="country-stat"><span class="label">${r.name}</span><span class="value">${display}</span></div>`;
+  }).join('');
+}
+
+function formatNum(n) {
+  if (Math.abs(n) >= 1e12) return (n/1e12).toFixed(1) + 'T';
+  if (Math.abs(n) >= 1e9) return (n/1e9).toFixed(1) + 'B';
+  if (Math.abs(n) >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (Math.abs(n) >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return n.toFixed(1);
+}
+
+// ── Predictions (local storage) ────────────────────────────────────────
+function loadPredictions(country) {
+  try {
+    const data = JSON.parse(localStorage.getItem(`engram_preds_${country}`) || '[]');
+    return data;
+  } catch { return []; }
+}
+
+function savePredictions() {
+  localStorage.setItem(`engram_preds_${STATE.country}`, JSON.stringify(STATE.predictions));
+  // Update dropdown count for current country
+  const sel = document.getElementById('country-select');
+  for (const opt of sel.options) {
+    if (opt.value === STATE.country) {
+      const count = STATE.predictions.length;
+      opt.textContent = count > 0 ? `${STATE.country} (${count})` : STATE.country;
+      break;
+    }
+  }
+}
+
+function loadNews(country) {
+  try { return JSON.parse(localStorage.getItem(`engram_news_${country}`) || '[]'); }
+  catch { return []; }
+}
+
+function saveNews() {
+  localStorage.setItem(`engram_news_${STATE.country}`, JSON.stringify(STATE.ingestedNews.slice(0, 200)));
+}
+
+// ── Add assessment ─────────────────────────────────────────────────────
+window.addAssessment = async function() {
+  const title = document.getElementById('assess-title').value.trim();
+  const category = document.getElementById('assess-category').value;
+  const timeframe = document.getElementById('assess-timeframe').value;
+  const evidenceText = document.getElementById('assess-evidence').value.trim();
+  const confidence = parseFloat(document.getElementById('assess-confidence').value) || 0.75;
+
+  if (!title) { toast('Enter a hypothesis', 'error'); return; }
+  if (!STATE.country) { toast('Select a country first', 'error'); return; }
+
+  // Prevent duplicate assessments
+  if (STATE.predictions.some(p => p.title === title)) {
+    toast('An assessment with this title already exists', 'error'); return;
+  }
+
+  // Parse manual evidence lines
+  const evidenceLines = evidenceText ? evidenceText.split('\n').filter(l => l.trim()) : [];
+  const evidenceFor = evidenceLines.map(line => ({
+    desc: line.trim(),
+    confidence: confidence,
+    source: 'analyst',
+  }));
+
+  // If no manual evidence, add a placeholder so we don't start at 50%
+  if (evidenceFor.length === 0) {
+    evidenceFor.push({
+      desc: `Analyst hypothesis: ${title}`,
+      confidence: confidence,
+      source: 'analyst',
+    });
+  }
+
+  const confValues = evidenceFor.map(e => e.confidence);
+  const prob = calc_probability(JSON.stringify(confValues), '[]');
+
+  const pred = {
+    id: 'pred_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    title,
+    category,
+    timeframe,
+    country: STATE.country,
+    probability: Math.round(prob * 1000) / 1000,
+    evidenceFor,
+    evidenceAgainst: [],
+    news: [],
+    history: [{ time: Date.now(), prob: Math.round(prob * 1000) / 1000 }],
+    created: Date.now(),
+  };
+
+  STATE.predictions.push(pred);
+  savePredictions();
+  renderPredictions();
+
+  // Clear form
+  document.getElementById('assess-title').value = '';
+  document.getElementById('assess-evidence').value = '';
+  toast('Assessment created -- searching for evidence...');
+
+  // Store in engram if online
+  if (STATE.engramOnline) storeInEngram(pred);
+
+  // ── Quick search: Wikipedia + Google News RSS (fast, no GDELT delays) ──
+  await quickSearchForPrediction(pred);
+};
+
+async function storeInEngram(pred) {
+  try {
+    const label = `Prediction:${pred.id}`;
+    await fetch(`${ENGRAM_BASE}/store`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        entity: label,
+        type: 'prediction',
+        properties: {
+          title: pred.title,
+          category: pred.category,
+          timeframe: pred.timeframe,
+          country: pred.country,
+          probability: pred.probability.toString(),
+        },
+      }),
+    });
+  } catch {}
+}
+
+// ── Quick search on assessment creation (Wikipedia context only -- fast) ──
+async function quickSearchForPrediction(pred) {
+  const status = document.getElementById('ingest-status');
+
+  try {
+    status.innerHTML = `<span class="spinner"></span> Fetching Wikipedia context...`;
+    const wikiContext = await fetchWikipediaContext(STATE.country, pred.category, pred.title);
+    if (wikiContext.length > 0) {
+      for (const ctx of wikiContext) {
+        pred.evidenceFor.push({
+          desc: ctx.summary,
+          confidence: 0.35,
+          source: `Wikipedia: ${ctx.article}`,
+        });
+      }
+      recalcProbability(pred);
+      savePredictions();
+      renderPredictions();
+      renderDetail();
+    }
+    status.textContent = `${wikiContext.length} wiki refs. Click "Ingest Now" or enable Auto for GDELT news.`;
+  } catch (e) {
+    status.textContent = 'Quick search error: ' + e.message;
+  }
+}
+
+// ── Wikipedia context fetching ───────────────────────────────────────
+async function fetchWikipediaContext(country, category, title) {
+  const results = [];
+
+  // Build Wikipedia search queries based on category
+  const wikiQueries = [];
+  switch (category) {
+    case 'political':
+      wikiQueries.push(`${country} politics`, `${country} protests`, `${country} political opposition`, `${country} government`);
+      break;
+    case 'military':
+      wikiQueries.push(`${country} military`, `${country} armed forces`);
+      break;
+    case 'economic':
+      wikiQueries.push(`Economy of ${country}`, `${country} sanctions`);
+      break;
+    case 'conflict':
+      wikiQueries.push(`${country} conflict`, `${country} war`);
+      break;
+    case 'nuclear':
+      wikiQueries.push(`${country} nuclear program`, `${country} nuclear weapons`);
+      break;
+    case 'territorial':
+      wikiQueries.push(`${country} territorial disputes`);
+      break;
+    default:
+      wikiQueries.push(`${country} ${category}`);
+  }
+
+  // Also search for key terms from the hypothesis title
+  const titleWords = title.toLowerCase().split(/\s+/).filter(w => w.length > 4 && w !== country.toLowerCase());
+  if (titleWords.length > 0) {
+    wikiQueries.push(`${country} ${titleWords.slice(0, 3).join(' ')}`);
+  }
+
+  for (const query of wikiQueries.slice(0, 4)) {
+    try {
+      // Wikipedia search API
+      const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&srlimit=2&format=json&origin=*`;
+      const r = await fetch(searchUrl, { signal: AbortSignal.timeout(5000) });
+      if (!r.ok) continue;
+      const data = await r.json();
+
+      for (const result of (data.query?.search || [])) {
+        // Get article extract
+        try {
+          const extractUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(result.title)}&prop=extracts&exintro=1&explaintext=1&exsentences=3&format=json&origin=*`;
+          const er = await fetch(extractUrl, { signal: AbortSignal.timeout(5000) });
+          if (!er.ok) continue;
+          const edata = await er.json();
+          const pages = edata.query?.pages || {};
+          for (const pageId of Object.keys(pages)) {
+            const extract = pages[pageId]?.extract;
+            if (extract && extract.length > 30) {
+              // Avoid duplicates
+              if (!results.find(r => r.article === result.title)) {
+                results.push({
+                  article: result.title,
+                  summary: extract.slice(0, 200) + (extract.length > 200 ? '...' : ''),
+                  url: `https://en.wikipedia.org/wiki/${encodeURIComponent(result.title.replace(/ /g, '_'))}`,
+                });
+              }
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  return results.slice(0, 5); // Max 5 Wikipedia references
+}
+
+// ── Render predictions ─────────────────────────────────────────────────
+function renderPredictions() {
+  const grid = document.getElementById('predictions-grid');
+  const count = document.getElementById('pred-count');
+  count.textContent = `${STATE.predictions.length} assessment${STATE.predictions.length !== 1 ? 's' : ''}`;
+
+  if (STATE.predictions.length === 0) {
+    grid.innerHTML = `<div style="grid-column: 1/-1; text-align:center; padding: 2rem; color: var(--muted); font-size: 0.9rem;">
+      <i class="fa-solid fa-clipboard-list" style="font-size: 2rem; margin-bottom: 0.75rem; display: block;"></i>
+      No assessments yet. Create one using the form on the left.
+    </div>`;
+    return;
+  }
+
+  grid.innerHTML = STATE.predictions.map((p, i) => {
+    const pct = Math.round(p.probability * 100);
+    const color = probColor(p.probability);
+    const catClass = categoryClass(p.category);
+    const lastShift = p.history.length > 1
+      ? p.history[p.history.length-1].prob - p.history[p.history.length-2].prob
+      : 0;
+    const shiftHtml = Math.abs(lastShift) > 0.001
+      ? `<span class="shift-badge ${lastShift > 0 ? 'up' : 'down'}">
+           <i class="fa-solid fa-arrow-${lastShift > 0 ? 'up' : 'down'}"></i>
+           ${lastShift > 0 ? '+' : ''}${(lastShift*100).toFixed(1)}%
+         </span>`
+      : '';
+    const sparkHtml = renderSparkline(p.history.map(h => h.prob));
+
+    return `<div class="pred-card ${STATE.selectedPred === i ? 'selected' : ''}" onclick="selectPrediction(${i})">
+      <div class="title">${escHtml(p.title)}</div>
+      <div class="prob-display" style="color: ${color}">${pct}%</div>
+      <button class="remove-pred" onclick="event.stopPropagation(); removePrediction(${i})" title="Remove assessment"><i class="fa-solid fa-trash-can"></i></button>
+      <div class="prob-bar"><div class="fill" style="width:${pct}%; background:${color}"></div></div>
+      <div class="meta">
+        <span class="cat-tag ${catClass}">${p.category}</span>
+        <span class="cat-tag default">${p.timeframe}</span>
+        ${shiftHtml}
+        ${sparkHtml}
+        <span class="ev-counts">
+          <i class="fa-solid fa-check" style="color:var(--green);"></i>${p.evidenceFor.length}
+          <i class="fa-solid fa-times" style="color:var(--red); margin-left:0.3rem;"></i>${p.evidenceAgainst.length}
+        </span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderSparkline(values) {
+  if (values.length < 2) return '';
+  const w = 50, h = 18;
+  const min = Math.min(...values) - 0.02;
+  const max = Math.max(...values) + 0.02;
+  const range = max - min || 1;
+  const points = values.map((v, i) => {
+    const x = (i / (values.length - 1)) * w;
+    const y = h - ((v - min) / range) * h;
+    return `${x},${y}`;
+  }).join(' ');
+  const last = values[values.length-1];
+  const color = probColor(last);
+  return `<svg class="sparkline" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+    <polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.5"/>
+  </svg>`;
+}
+
+function probColor(p) {
+  if (p >= 0.7) return '#22c55e';
+  if (p >= 0.5) return '#f59e0b';
+  if (p >= 0.3) return '#fb923c';
+  return '#ef4444';
+}
+
+function categoryClass(cat) {
+  const map = { political:'political', military:'military', economic:'economic', conflict:'conflict',
+    diplomatic:'diplomatic', hybrid:'hybrid', nuclear:'nuclear', energy:'energy',
+    humanitarian:'humanitarian', territorial:'territorial' };
+  return map[cat] || 'default';
+}
+
+// ── Select prediction ──────────────────────────────────────────────────
+window.selectPrediction = function(idx) {
+  STATE.selectedPred = idx;
+  renderPredictions();
+  renderDetail();
+};
+
+window.removePrediction = function(idx) {
+  if (!confirm('Remove this assessment? This cannot be undone.')) return;
+  STATE.predictions.splice(idx, 1);
+  if (STATE.selectedPred === idx) STATE.selectedPred = null;
+  else if (STATE.selectedPred > idx) STATE.selectedPred--;
+  savePredictions();
+  renderPredictions();
+  renderDetail();
+  toast('Assessment removed');
+};
+
+function renderDetail() {
+  const panel = document.getElementById('detail-panel');
+  if (STATE.selectedPred === null || !STATE.predictions[STATE.selectedPred]) {
+    panel.classList.remove('visible');
+    renderSensitivity(null);
+    return;
+  }
+  panel.classList.add('visible');
+  const p = STATE.predictions[STATE.selectedPred];
+  renderSensitivity(p);
+
+  document.getElementById('detail-title').textContent = p.title;
+  document.getElementById('detail-prob').textContent = Math.round(p.probability * 100) + '%';
+  document.getElementById('detail-prob').style.color = probColor(p.probability);
+  document.getElementById('detail-timeframe').textContent = p.timeframe;
+  document.getElementById('detail-category').innerHTML = `<span class="cat-tag ${categoryClass(p.category)}">${p.category}</span>`;
+
+  // Evidence for
+  document.getElementById('evidence-for').innerHTML = p.evidenceFor.map((e, i) =>
+    `<div class="ev-item">
+      <span class="conf ${confClass(e.confidence)}">${e.confidence.toFixed(2)}</span>
+      <span class="desc">${escHtml(e.desc)}</span>
+      <span class="source">${e.source || ''}</span>
+      <button class="remove-ev" onclick="removeEvidence('for',${i})"><i class="fa-solid fa-trash"></i></button>
+    </div>`
+  ).join('') || '<div style="color:var(--muted); font-size:0.85rem; padding:0.5rem;">No supporting evidence</div>';
+
+  // Evidence against
+  document.getElementById('evidence-against').innerHTML = p.evidenceAgainst.map((e, i) =>
+    `<div class="ev-item">
+      <span class="conf ${confClass(e.confidence)}">${e.confidence.toFixed(2)}</span>
+      <span class="desc">${escHtml(e.desc)}</span>
+      <span class="source">${e.source || ''}</span>
+      <button class="remove-ev" onclick="removeEvidence('against',${i})"><i class="fa-solid fa-trash"></i></button>
+    </div>`
+  ).join('') || '<div style="color:var(--muted); font-size:0.85rem; padding:0.5rem;">No contradicting evidence</div>';
+
+  // News linked to this prediction
+  const newsEl = document.getElementById('detail-news');
+  if (p.news && p.news.length > 0) {
+    newsEl.innerHTML = p.news.slice(0, 20).map(n => `
+      <div class="news-item">
+        <div class="direction ${n.direction === 'supports' ? 'up' : 'down'}">
+          <i class="fa-solid fa-arrow-${n.direction === 'supports' ? 'up' : 'down'}"></i>
+        </div>
+        <div class="content">
+          <div class="headline"><a href="${escHtml(n.url)}" target="_blank" rel="noopener">${escHtml(n.title)}</a></div>
+          <div class="news-meta">
+            <span><i class="fa-solid fa-globe"></i> ${escHtml(n.domain)}</span>
+            <span><i class="fa-solid fa-signal"></i> ${n.confidence.toFixed(2)}</span>
+          </div>
+        </div>
+      </div>
+    `).join('');
+  } else {
+    newsEl.innerHTML = '<div style="color:var(--muted); font-size:0.85rem; padding:0.5rem;">No news linked yet. Run ingestion to fetch GDELT data.</div>';
+  }
+}
+
+function confClass(c) {
+  if (c >= 0.80) return 'high';
+  if (c >= 0.60) return 'mid';
+  return 'low';
+}
+
+// ── Add / remove evidence ──────────────────────────────────────────────
+window.addEvidence = function(side) {
+  if (STATE.selectedPred === null) return;
+  const p = STATE.predictions[STATE.selectedPred];
+  const inputId = side === 'for' ? 'new-ev-for' : 'new-ev-against';
+  const confId = side === 'for' ? 'new-ev-for-conf' : 'new-ev-against-conf';
+  const desc = document.getElementById(inputId).value.trim();
+  if (!desc) return;
+  const confidence = parseFloat(document.getElementById(confId).value);
+
+  const ev = { desc, confidence, source: 'analyst' };
+  if (side === 'for') p.evidenceFor.push(ev);
+  else p.evidenceAgainst.push(ev);
+
+  recalcProbability(p);
+  savePredictions();
+  renderPredictions();
+  renderDetail();
+  document.getElementById(inputId).value = '';
+};
+
+window.removeEvidence = function(side, idx) {
+  if (STATE.selectedPred === null) return;
+  const p = STATE.predictions[STATE.selectedPred];
+  if (side === 'for') p.evidenceFor.splice(idx, 1);
+  else p.evidenceAgainst.splice(idx, 1);
+  recalcProbability(p);
+  savePredictions();
+  renderPredictions();
+  renderDetail();
+};
+
+function recalcProbability(pred) {
+  const oldProb = pred.probability;
+  const forConfs = pred.evidenceFor.map(e => e.confidence);
+  const againstConfs = pred.evidenceAgainst.map(e => e.confidence);
+  const newProb = calc_probability(JSON.stringify(forConfs), JSON.stringify(againstConfs));
+  const rounded = Math.round(newProb * 1000) / 1000;
+  pred.probability = rounded;
+  pred.history.push({ time: Date.now(), prob: rounded });
+  // Threshold crossing alert
+  checkThresholdCrossing(pred, oldProb, rounded);
+}
+
+// ── News ingestion ─────────────────────────────────────────────────────
+window.toggleAutoIngest = function() {
+  if (STATE.autoIngestActive) {
+    // Turn off
+    clearInterval(STATE.autoIngestTimer);
+    STATE.autoIngestTimer = null;
+    STATE.autoIngestActive = false;
+    document.getElementById('btn-auto-ingest').classList.remove('active');
+    document.getElementById('auto-ingest-label').textContent = 'Auto: Off';
+    toast('Auto-ingestion stopped');
+  } else {
+    // Turn on -- run immediately, then every 5 minutes
+    if (!STATE.country) { toast('Select a country first', 'error'); return; }
+    STATE.autoIngestActive = true;
+    document.getElementById('btn-auto-ingest').classList.add('active');
+    document.getElementById('auto-ingest-label').textContent = 'Auto: 5m';
+    toast('Auto-ingestion started (every 5 min)');
+    runIngestion(); // run immediately
+    STATE.autoIngestTimer = setInterval(() => {
+      if (STATE.country && !document.getElementById('btn-ingest').disabled) {
+        runIngestion();
+      }
+    }, 5 * 60 * 1000);
+  }
+};
+
+window.runIngestion = async function() {
+  if (!STATE.country) return;
+  const btn = document.getElementById('btn-ingest');
+  const status = document.getElementById('ingest-status');
+  btn.disabled = true;
+  status.innerHTML = '<span class="spinner"></span> Fetching GDELT...';
+
+  try {
+    // Get queries from WASM: generic country queries + prediction-specific queries
+    const genericQueries = JSON.parse(generate_queries(STATE.country));
+    let predQueries = [];
+    for (const pred of STATE.predictions) {
+      const pq = JSON.parse(hypothesis_queries(STATE.country, pred.title, pred.category));
+      predQueries.push(...pq.slice(0, 3)); // top 3 per prediction
+    }
+    // Combine and deduplicate
+    const allQueryStrings = new Set();
+    const queries = [];
+    for (const q of genericQueries) {
+      if (!allQueryStrings.has(q.query)) { allQueryStrings.add(q.query); queries.push(q); }
+    }
+    for (const q of predQueries) {
+      if (!allQueryStrings.has(q)) { allQueryStrings.add(q); queries.push({ query: q, topics: [] }); }
+    }
+
+    let allArticles = [];
+    const subset = queries.slice(0, 10);
+
+    // Source 1: GDELT (via engram proxy to bypass CORS, fallback to direct)
+    for (const q of subset) {
+      try {
+        status.innerHTML = `<span class="spinner"></span> GDELT: ${q.query.slice(0, 30)}...`;
+        let data = null;
+
+        // Try engram proxy first (no CORS issues)
+        if (STATE.engramOnline) {
+          try {
+            const proxyUrl = `${ENGRAM_BASE}/proxy/gdelt?query=${encodeURIComponent(q.query)}&mode=artlist&maxrecords=20&format=json&timespan=90d`;
+            const r = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
+            if (r.ok) data = await r.json();
+          } catch {}
+        }
+
+        // Fallback to direct (works if no CORS or same-origin)
+        if (!data) {
+          try {
+            const url = `${GDELT_BASE}?query=${encodeURIComponent(q.query)}&mode=artlist&maxrecords=20&format=json&timespan=90d`;
+            const r = await fetch(url, { signal: AbortSignal.timeout(6000) });
+            if (r.ok) data = await r.json();
+          } catch {}
+        }
+
+        if (data && data.articles) allArticles.push(...data.articles);
+      } catch {}
+      await new Promise(resolve => setTimeout(resolve, 7000));
+    }
+
+    // Source 2: Google News RSS (via engram proxy)
+    const rssQueries = [
+      `${STATE.country} military`,
+      `${STATE.country} sanctions economy`,
+      `${STATE.country} conflict war`,
+      `${STATE.country} diplomacy negotiations`,
+      `${STATE.country} territory dispute`,
+    ];
+    if (STATE.engramOnline) {
+      for (const rq of rssQueries) {
+        try {
+          const apiUrl = `${ENGRAM_BASE}/proxy/rss?q=${encodeURIComponent(rq)}`;
+          status.innerHTML = `<span class="spinner"></span> Google News: ${rq.slice(0, 30)}...`;
+          const r = await fetch(apiUrl, { signal: AbortSignal.timeout(10000) });
+          if (r.ok) {
+            const data = await r.json();
+            if (data.items) {
+              for (const item of data.items) {
+                allArticles.push({
+                  title: item.title || '',
+                  url: item.link || '',
+                  domain: item.domain || '',
+                  seendate: (item.pubDate || '').replace(/[-T:]/g, '').slice(0, 8),
+                });
+              }
+            }
+          }
+        } catch {}
+      await new Promise(resolve => setTimeout(resolve, 300));
+      }
+    }
+
+    // Source 3: Web search (SearXNG via engram proxy)
+    if (STATE.engramOnline) {
+      const webSearchQueries = [
+        `${STATE.country} latest news`,
+        `${STATE.country} military conflict`,
+        `${STATE.country} sanctions economy 2026`,
+        `${STATE.country} war Ukraine`,
+        ...STATE.predictions.slice(0, 3).map(p => {
+          const keywords = p.title.split(/\s+/).filter(w => w.length > 4 && w[0] === w[0].toUpperCase()).slice(0, 3);
+          return `${STATE.country} ${keywords.join(' ')}`;
+        }),
+      ];
+      for (const wq of webSearchQueries.slice(0, 6)) {
+        try {
+          status.innerHTML = `<span class="spinner"></span> Web: ${wq.slice(0, 35)}...`;
+          const r = await fetch(`${ENGRAM_BASE}/proxy/search?q=${encodeURIComponent(wq)}&time_range=month`, { signal: AbortSignal.timeout(10000) });
+          if (r.ok) {
+            const data = await r.json();
+            for (const result of (data.results || []).slice(0, 20)) {
+              if (result.title && result.url) {
+                allArticles.push({
+                  title: result.title,
+                  url: result.url,
+                  domain: result.domain || '',
+                  seendate: '',
+                  source: 'Web Search',
+                });
+              }
+            }
+          }
+        } catch {}
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    if (allArticles.length === 0) {
+      status.textContent = 'No articles found';
+      btn.disabled = false;
+      return;
+    }
+
+    // Deduplicate by URL
+    const seen = new Set();
+    allArticles = allArticles.filter(a => {
+      if (seen.has(a.url)) return false;
+      seen.add(a.url);
+      return true;
+    });
+
+    status.innerHTML = `<span class="spinner"></span> Classifying ${allArticles.length} articles...`;
+
+    // Process through WASM classifier
+    const processed = JSON.parse(process_articles(JSON.stringify(allArticles), STATE.country));
+
+    // Link articles to predictions
+    let linkedCount = 0;
+    for (const article of processed) {
+      const newsItem = {
+        title: article.properties.title,
+        url: article.properties.url,
+        domain: article.properties.domain,
+        date: article.properties.date,
+        topics: article.topics,
+        confidence: article.confidence,
+        tier: article.tier,
+      };
+
+      // Add to global news
+      STATE.ingestedNews.unshift(newsItem);
+
+      // Match to predictions
+      for (const pred of STATE.predictions) {
+        for (const topic of article.topics) {
+          const rel = topic_relationship(topic, pred.category);
+          if (topicMatchesCategory(topic, pred.category)) {
+            // Add as evidence
+            const direction = rel;
+            const ev = {
+              desc: article.properties.title,
+              confidence: article.confidence,
+              source: article.properties.domain,
+            };
+
+            if (direction === 'supports') {
+              pred.evidenceFor.push(ev);
+            } else {
+              pred.evidenceAgainst.push(ev);
+            }
+
+            // Link news to prediction
+            if (!pred.news) pred.news = [];
+            pred.news.unshift({
+              ...newsItem,
+              direction,
+            });
+
+            linkedCount++;
+            break; // one link per article per prediction
+          }
+        }
+      }
+    }
+
+    // Recalculate all probabilities
+    for (const pred of STATE.predictions) {
+      recalcProbability(pred);
+    }
+
+    savePredictions();
+    saveNews();
+    renderPredictions();
+    renderDetail();
+    renderAllNews();
+
+    status.textContent = `Done: ${processed.length} classified, ${linkedCount} linked`;
+    toast(`Ingested ${processed.length} articles, linked ${linkedCount} to predictions`);
+
+    // Store in engram if online
+    if (STATE.engramOnline) {
+      storeArticlesInEngram(processed);
+    }
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+    toast('Ingestion failed: ' + e.message, 'error');
+  }
+  btn.disabled = false;
+};
+
+function topicMatchesCategory(topic, category) {
+  const mapping = {
+    political: ['regime_change', 'hybrid_warfare', 'intelligence'],
+    military: ['military_buildup', 'arms_transfer', 'naval'],
+    economic: ['sanctions', 'economic', 'trade', 'energy'],
+    conflict: ['conflict', 'territorial', 'cyber'],
+    diplomatic: ['negotiations', 'ceasefire', 'alliance'],
+    hybrid: ['hybrid_warfare', 'cyber', 'intelligence'],
+    nuclear: ['nuclear'],
+    energy: ['energy', 'trade'],
+    humanitarian: ['humanitarian', 'conflict'],
+    territorial: ['territorial', 'conflict'],
+  };
+  return (mapping[category] || []).includes(topic);
+}
+
+async function storeArticlesInEngram(articles) {
+  const entities = articles.slice(0, 200).map(art => ({
+    entity: art.label,
+    type: art.type || 'news_article',
+    properties: art.properties,
+  }));
+  if (entities.length === 0) return;
+  try {
+    const batchSize = 50;
+    let stored = 0;
+    for (let i = 0; i < entities.length; i += batchSize) {
+      const batch = entities.slice(i, i + batchSize);
+      const resp = await fetch(`${ENGRAM_BASE}/batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entities: batch, relationships: [] }),
+      });
+      if (resp.ok) stored += batch.length;
+    }
+    console.log(`[engram-store] Ingest: ${stored}/${entities.length} articles stored`);
+    // Refresh node count
+    const stats = await fetch(`${ENGRAM_BASE}/stats`).then(r => r.json());
+    const nodesEl = document.getElementById('engram-nodes');
+    if (nodesEl) nodesEl.textContent = `(${stats.nodes || 0} nodes)`;
+  } catch (e) { console.log(`[engram-store] Ingest error: ${e.message}`); }
+}
+
+// ── Store investigation dossier to engram (background, non-blocking) ──
+async function storeDossierToEngram(dossier, question) {
+  if (!STATE.engramOnline) return;
+  const stored = new Set();
+  let storedCount = 0, failCount = 0, skipCount = 0;
+  // Store news articles as nodes (batch via /batch endpoint for speed)
+  const newsToStore = [];
+  for (const n of dossier.news.slice(0, 200)) {
+    const label = n.title.slice(0, 120).replace(/[^a-zA-Z0-9 .,!?'-]/g, '').trim();
+    if (!label || label.length < 5 || stored.has(label)) { skipCount++; continue; }
+    stored.add(label);
+    newsToStore.push({
+      entity: label,
+      type: 'news_article',
+      properties: {
+        url: n.url || '',
+        domain: n.domain || '',
+        date: n.date || '',
+        source: n.source || '',
+        investigation: question.slice(0, 100),
+      },
+    });
+  }
+  // Use batch endpoint for bulk storage
+  if (newsToStore.length > 0) {
+    try {
+      const batchSize = 50;
+      for (let i = 0; i < newsToStore.length; i += batchSize) {
+        const batch = newsToStore.slice(i, i + batchSize);
+        const resp = await fetch(`${ENGRAM_BASE}/batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entities: batch, relationships: [] }),
+        });
+        if (resp.ok) { storedCount += batch.length; }
+        else { failCount += batch.length; }
+      }
+    } catch { failCount += newsToStore.length; }
+  }
+  console.log(`[engram-store] News: ${storedCount} stored, ${failCount} failed, ${skipCount} skipped (dedup/empty)`);
+  // Store wiki references via batch
+  const wikiToStore = [];
+  for (const w of dossier.wiki.slice(0, 50)) {
+    const label = `Wiki:${w.title.slice(0, 80)}`;
+    if (stored.has(label)) continue;
+    stored.add(label);
+    wikiToStore.push({
+      entity: label,
+      type: 'reference',
+      properties: {
+        summary: w.text.slice(0, 300),
+        source: w.source || 'Wikipedia',
+        url: w.url || '',
+      },
+    });
+  }
+  if (wikiToStore.length > 0) {
+    try {
+      const resp = await fetch(`${ENGRAM_BASE}/batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entities: wikiToStore, relationships: [] }),
+      });
+      if (resp.ok) storedCount += wikiToStore.length;
+      else failCount += wikiToStore.length;
+    } catch { failCount += wikiToStore.length; }
+  }
+  console.log(`[engram-store] Wiki: ${wikiToStore.length} refs stored`);
+  // Relate entities to their investigation
+  for (const ent of (dossier.entities || []).slice(0, 5)) {
+    try {
+      await fetch(`${ENGRAM_BASE}/store`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entity: ent, type: 'entity' }),
+      });
+    } catch {}
+    // Relate entity to top news
+    for (const n of dossier.news.slice(0, 5)) {
+      const newsLabel = n.title.slice(0, 120).replace(/[^a-zA-Z0-9 .,!?'-]/g, '');
+      if (!newsLabel) continue;
+      try {
+        await fetch(`${ENGRAM_BASE}/relate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: ent, relationship: 'mentioned_in', to: newsLabel }),
+        });
+      } catch {}
+    }
+  }
+  // Update status
+  try {
+    const resp = await fetch(`${ENGRAM_BASE}/stats`);
+    if (resp.ok) {
+      const stats = await resp.json();
+      const nodeCount = stats.nodes || stats.node_count || 0;
+      const edgeCount = stats.edges || stats.edge_count || 0;
+      const nodesEl = document.getElementById('engram-nodes');
+      if (nodesEl) nodesEl.textContent = `(${nodeCount} nodes)`;
+      console.log(`[engram-store] TOTAL: ${storedCount} stored, ${failCount} failed. Graph: ${nodeCount} nodes, ${edgeCount} edges`);
+    }
+  } catch {}
+}
+
+// ── Render all news ────────────────────────────────────────────────────
+function renderAllNews() {
+  const el = document.getElementById('all-news');
+  if (STATE.ingestedNews.length === 0) {
+    el.innerHTML = '<div style="color:var(--muted); font-size:0.85rem; padding:0.5rem;">No news ingested yet. Click "Ingest News" to fetch from GDELT.</div>';
+    return;
+  }
+  // Sort by date, newest first
+  STATE.ingestedNews.sort((a, b) => {
+    const da = a.date || a.seendate || '';
+    const db = b.date || b.seendate || '';
+    return db.localeCompare(da);
+  });
+  el.innerHTML = STATE.ingestedNews.slice(0, 30).map(n => {
+    const topicHtml = (n.topics || []).map(t => `<span class="topic-tag">${t}</span>`).join('');
+    const sourceInfo = JSON.parse(assess_source(n.domain || ''));
+    return `<div class="news-item">
+      <div class="direction ${sourceInfo.tier <= 2 ? 'up' : 'down'}">T${sourceInfo.tier}</div>
+      <div class="content">
+        <div class="headline"><a href="${escHtml(n.url)}" target="_blank" rel="noopener">${escHtml(n.title)}</a></div>
+        <div class="news-meta">
+          <span><i class="fa-solid fa-globe"></i> ${escHtml(n.domain)}</span>
+          <span><i class="fa-solid fa-signal"></i> ${(n.confidence || 0).toFixed(2)}</span>
+          <span>${n.date || ''}</span>
+        </div>
+        <div class="topics-list">${topicHtml}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Utils ──────────────────────────────────────────────────────────────
+function escHtml(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function toast(msg, type = 'success') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast ' + type + ' visible';
+  setTimeout(() => el.classList.remove('visible'), 3000);
+}
+
+// ── Prediction sorting ──────────────────────────────────────────────────
+window.sortPredictions = function() {
+  const mode = document.getElementById('pred-sort').value;
+  const preds = STATE.predictions;
+  switch (mode) {
+    case 'prob-desc': preds.sort((a, b) => b.probability - a.probability); break;
+    case 'prob-asc': preds.sort((a, b) => a.probability - b.probability); break;
+    case 'newest': preds.sort((a, b) => (b.created || 0) - (a.created || 0)); break;
+    case 'oldest': preds.sort((a, b) => (a.created || 0) - (b.created || 0)); break;
+    case 'changed':
+      preds.sort((a, b) => {
+        const aLast = a.history.length ? a.history[a.history.length-1].time : 0;
+        const bLast = b.history.length ? b.history[b.history.length-1].time : 0;
+        return bLast - aLast;
+      });
+      break;
+    case 'category': preds.sort((a, b) => a.category.localeCompare(b.category)); break;
+  }
+  STATE.selectedPred = null;
+  savePredictions();
+  renderPredictions();
+  renderDetail();
+};
+
+// ── Export to JSON ──────────────────────────────────────────────────────
+window.exportToJSON = function() {
+  if (!STATE.country) { toast('Select a country first', 'error'); return; }
+  const data = {
+    country: STATE.country,
+    exportedAt: new Date().toISOString(),
+    predictions: STATE.predictions,
+    ingestedNews: STATE.ingestedNews,
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `engram-intel-${STATE.country.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast(`Exported ${STATE.predictions.length} predictions + ${STATE.ingestedNews.length} articles`);
+};
+
+// ── Probability threshold alerts ────────────────────────────────────────
+const THRESHOLDS = [0.3, 0.5, 0.7, 0.9];
+function checkThresholdCrossing(pred, oldProb, newProb) {
+  for (const t of THRESHOLDS) {
+    if ((oldProb < t && newProb >= t) || (oldProb >= t && newProb < t)) {
+      const pct = Math.round(t * 100);
+      const dir = newProb >= t ? 'crossed above' : 'dropped below';
+      const icon = '<i class="fa-solid fa-triangle-exclamation alert-icon"></i>';
+      const el = document.getElementById('toast');
+      el.innerHTML = `${icon} <strong>${escHtml(pred.title)}</strong> ${dir} ${pct}% (now ${Math.round(newProb * 100)}%)`;
+      el.className = 'toast alert visible';
+      setTimeout(() => el.classList.remove('visible'), 5000);
+      return; // only one alert per recalc
+    }
+  }
+}
+
+// ── Sensitivity analysis ────────────────────────────────────────────────
+function renderSensitivity(pred) {
+  const container = document.getElementById('sensitivity-content');
+  if (!pred) { container.innerHTML = ''; return; }
+
+  const currentProb = pred.probability;
+  const forConfs = pred.evidenceFor.map(e => e.confidence);
+  const againstConfs = pred.evidenceAgainst.map(e => e.confidence);
+
+  // Calculate: how many pieces of evidence at 0.80 confidence to reach each target?
+  const targets = [0.90, 0.80, 0.70, 0.60, 0.50, 0.40, 0.30, 0.20, 0.10];
+  const rows = [];
+
+  for (const target of targets) {
+    if (Math.abs(target - currentProb) < 0.02) continue; // skip if already there
+
+    const needsIncrease = target > currentProb;
+    const testConf = 0.80; // standard evidence confidence
+
+    // Binary search: how many pieces of evidence at testConf needed?
+    let count = 0;
+    let simProb = currentProb;
+    const maxIter = 50;
+
+    if (needsIncrease) {
+      // Add supporting evidence
+      const simFor = [...forConfs];
+      while (simProb < target && count < maxIter) {
+        simFor.push(testConf);
+        count++;
+        simProb = calc_probability(JSON.stringify(simFor), JSON.stringify(againstConfs));
+      }
+    } else {
+      // Add contradicting evidence
+      const simAgainst = [...againstConfs];
+      while (simProb > target && count < maxIter) {
+        simAgainst.push(testConf);
+        count++;
+        simProb = calc_probability(JSON.stringify(forConfs), JSON.stringify(simAgainst));
+      }
+    }
+
+    if (count > 0 && count < maxIter) {
+      rows.push({
+        target,
+        count,
+        direction: needsIncrease ? 'up' : 'down',
+        type: needsIncrease ? 'supporting' : 'contradicting',
+      });
+    }
+  }
+
+  // Split into increase and decrease
+  const increase = rows.filter(r => r.direction === 'up');
+  const decrease = rows.filter(r => r.direction === 'down');
+
+  let html = `<div style="font-size: 0.8rem; color: var(--muted); margin-bottom: 1rem;">
+    Current probability: <strong style="color: ${probColor(currentProb)}; font-size: 1rem;">${Math.round(currentProb * 100)}%</strong>
+    &nbsp; | &nbsp; Evidence: ${forConfs.length} supporting, ${againstConfs.length} contradicting
+  </div>`;
+
+  if (increase.length > 0) {
+    html += `<div class="sensitivity-divider"><i class="fa-solid fa-arrow-up" style="color:var(--green);"></i> To increase probability</div>`;
+    for (const r of increase) {
+      const tpct = Math.round(r.target * 100);
+      html += `<div class="sensitivity-row">
+        <span class="sensitivity-arrow up"><i class="fa-solid fa-arrow-up"></i></span>
+        <span class="target-prob" style="color: ${probColor(r.target)}">${tpct}%</span>
+        <span class="action">Add <span class="needed">${r.count}</span> ${r.type} evidence (at 0.80 confidence each)</span>
+      </div>`;
+    }
+  }
+
+  if (decrease.length > 0) {
+    html += `<div class="sensitivity-divider"><i class="fa-solid fa-arrow-down" style="color:var(--red);"></i> To decrease probability</div>`;
+    for (const r of decrease) {
+      const tpct = Math.round(r.target * 100);
+      html += `<div class="sensitivity-row">
+        <span class="sensitivity-arrow down"><i class="fa-solid fa-arrow-down"></i></span>
+        <span class="target-prob" style="color: ${probColor(r.target)}">${tpct}%</span>
+        <span class="action">Add <span class="needed">${r.count}</span> ${r.type} evidence (at 0.80 confidence each)</span>
+      </div>`;
+    }
+  }
+
+  if (rows.length === 0) {
+    html += '<div style="color: var(--muted); font-size: 0.85rem;">Probability is at an extreme -- large evidence changes needed.</div>';
+  }
+
+  container.innerHTML = html;
+}
+
+// ── Fullscreen analysis modal ───────────────────────────────────────────
+window.openFullscreen = function() {
+  if (STATE.selectedPred === null) return;
+  const p = STATE.predictions[STATE.selectedPred];
+  const pct = Math.round(p.probability * 100);
+  const color = probColor(p.probability);
+
+  const forConfs = p.evidenceFor.map(e => e.confidence);
+  const againstConfs = p.evidenceAgainst.map(e => e.confidence);
+
+  // Build sparkline SVG (larger)
+  let sparkSvg = '';
+  if (p.history.length >= 2) {
+    const w = 200, h = 60;
+    const vals = p.history.map(h => h.prob);
+    const min = Math.min(...vals) - 0.02;
+    const max = Math.max(...vals) + 0.02;
+    const range = max - min || 1;
+    const points = vals.map((v, i) => {
+      const x = (i / (vals.length - 1)) * w;
+      const y = h - ((v - min) / range) * h;
+      return `${x},${y}`;
+    }).join(' ');
+    sparkSvg = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="margin-top: 0.5rem;">
+      <polyline points="${points}" fill="none" stroke="${color}" stroke-width="2"/>
+    </svg>`;
+  }
+
+  // Build sensitivity analysis for modal
+  const sensitivityHtml = buildSensitivityHtml(p);
+
+  const modal = document.getElementById('modal-body');
+  modal.innerHTML = `
+    <div class="modal-header">
+      <div>
+        <div class="modal-prob-big" style="color: ${color}">${pct}%</div>
+        <div style="font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem;">Assessed probability</div>
+      </div>
+      <div style="flex: 1;">
+        <h2 style="font-size: 1.3rem; margin-bottom: 0.5rem;">${escHtml(p.title)}</h2>
+        <div class="modal-meta">
+          <div class="modal-meta-item"><span class="meta-label">Category</span><span class="meta-value"><span class="cat-tag ${categoryClass(p.category)}">${p.category}</span></span></div>
+          <div class="modal-meta-item"><span class="meta-label">Timeframe</span><span class="meta-value">${escHtml(p.timeframe)}</span></div>
+          <div class="modal-meta-item"><span class="meta-label">Country</span><span class="meta-value">${escHtml(p.country)}</span></div>
+          <div class="modal-meta-item"><span class="meta-label">Created</span><span class="meta-value">${new Date(p.created).toLocaleDateString()}</span></div>
+          <div class="modal-meta-item"><span class="meta-label">Evidence</span><span class="meta-value">${forConfs.length} for / ${againstConfs.length} against</span></div>
+        </div>
+        ${sparkSvg}
+      </div>
+    </div>
+
+    ${sensitivityHtml}
+
+    <div class="modal-columns">
+      <div class="modal-section">
+        <h4><i class="fa-solid fa-check-circle" style="color: var(--green);"></i> Supporting Evidence (${p.evidenceFor.length})</h4>
+        ${p.evidenceFor.map(e => `<div class="ev-item">
+          <span class="conf ${confClass(e.confidence)}">${e.confidence.toFixed(2)}</span>
+          <span class="desc">${escHtml(e.desc)}</span>
+          <span class="source">${escHtml(e.source || '')}</span>
+        </div>`).join('') || '<div style="color:var(--muted); font-size:0.85rem;">None</div>'}
+      </div>
+      <div class="modal-section">
+        <h4><i class="fa-solid fa-times-circle" style="color: var(--red);"></i> Contradicting Evidence (${p.evidenceAgainst.length})</h4>
+        ${p.evidenceAgainst.map(e => `<div class="ev-item">
+          <span class="conf ${confClass(e.confidence)}">${e.confidence.toFixed(2)}</span>
+          <span class="desc">${escHtml(e.desc)}</span>
+          <span class="source">${escHtml(e.source || '')}</span>
+        </div>`).join('') || '<div style="color:var(--muted); font-size:0.85rem;">None</div>'}
+      </div>
+    </div>
+
+    <div class="modal-section">
+      <h4><i class="fa-solid fa-newspaper"></i> Linked News (${(p.news || []).length})</h4>
+      ${(p.news || []).slice(0, 30).map(n => `<div class="news-item">
+        <div class="direction ${n.direction === 'supports' ? 'up' : 'down'}">
+          <i class="fa-solid fa-arrow-${n.direction === 'supports' ? 'up' : 'down'}"></i>
+        </div>
+        <div class="content">
+          <div class="headline"><a href="${escHtml(n.url)}" target="_blank" rel="noopener">${escHtml(n.title)}</a></div>
+          <div class="news-meta">
+            <span><i class="fa-solid fa-globe"></i> ${escHtml(n.domain)}</span>
+            <span><i class="fa-solid fa-signal"></i> ${(n.confidence || 0).toFixed(2)}</span>
+          </div>
+        </div>
+      </div>`).join('') || '<div style="color:var(--muted); font-size:0.85rem;">No news linked yet.</div>'}
+    </div>
+
+    <div class="modal-section" style="margin-top: 1rem;">
+      <h4><i class="fa-solid fa-clock-rotate-left"></i> Probability History</h4>
+      <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+        ${p.history.map(h => `<span class="tag" style="font-size: 0.75rem;">
+          ${new Date(h.time).toLocaleString()} -- <strong style="color: ${probColor(h.prob)}">${Math.round(h.prob * 100)}%</strong>
+        </span>`).join('')}
+      </div>
+    </div>
+  `;
+
+  document.getElementById('fullscreen-modal').classList.add('visible');
+  document.addEventListener('keydown', closeFullscreenOnEsc);
+};
+
+function buildSensitivityHtml(pred) {
+  const currentProb = pred.probability;
+  const forConfs = pred.evidenceFor.map(e => e.confidence);
+  const againstConfs = pred.evidenceAgainst.map(e => e.confidence);
+  const targets = [0.90, 0.80, 0.70, 0.60, 0.50, 0.40, 0.30, 0.20, 0.10];
+  const rows = [];
+
+  for (const target of targets) {
+    if (Math.abs(target - currentProb) < 0.02) continue;
+    const needsIncrease = target > currentProb;
+    const testConf = 0.80;
+    let count = 0, simProb = currentProb;
+    if (needsIncrease) {
+      const simFor = [...forConfs];
+      while (simProb < target && count < 50) { simFor.push(testConf); count++; simProb = calc_probability(JSON.stringify(simFor), JSON.stringify(againstConfs)); }
+    } else {
+      const simAgainst = [...againstConfs];
+      while (simProb > target && count < 50) { simAgainst.push(testConf); count++; simProb = calc_probability(JSON.stringify(forConfs), JSON.stringify(simAgainst)); }
+    }
+    if (count > 0 && count < 50) {
+      rows.push({ target, count, direction: needsIncrease ? 'up' : 'down', type: needsIncrease ? 'supporting' : 'contradicting' });
+    }
+  }
+
+  const increase = rows.filter(r => r.direction === 'up');
+  const decrease = rows.filter(r => r.direction === 'down');
+  let html = `<div class="sensitivity-section"><h4><i class="fa-solid fa-sliders"></i> What Needs to Happen</h4>`;
+
+  if (increase.length > 0) {
+    html += `<div class="sensitivity-divider"><i class="fa-solid fa-arrow-up" style="color:var(--green);"></i> To increase</div>`;
+    for (const r of increase) {
+      html += `<div class="sensitivity-row"><span class="sensitivity-arrow up"><i class="fa-solid fa-arrow-up"></i></span>
+        <span class="target-prob" style="color:${probColor(r.target)}">${Math.round(r.target*100)}%</span>
+        <span class="action">Add <span class="needed">${r.count}</span> ${r.type} evidence (0.80 conf)</span></div>`;
+    }
+  }
+  if (decrease.length > 0) {
+    html += `<div class="sensitivity-divider"><i class="fa-solid fa-arrow-down" style="color:var(--red);"></i> To decrease</div>`;
+    for (const r of decrease) {
+      html += `<div class="sensitivity-row"><span class="sensitivity-arrow down"><i class="fa-solid fa-arrow-down"></i></span>
+        <span class="target-prob" style="color:${probColor(r.target)}">${Math.round(r.target*100)}%</span>
+        <span class="action">Add <span class="needed">${r.count}</span> ${r.type} evidence (0.80 conf)</span></div>`;
+    }
+  }
+  html += '</div>';
+  return html;
+}
+
+window.closeFullscreen = function() {
+  document.getElementById('fullscreen-modal').classList.remove('visible');
+  document.removeEventListener('keydown', closeFullscreenOnEsc);
+};
+
+function closeFullscreenOnEsc(e) {
+  if (e.key === 'Escape') window.closeFullscreen();
+}
+
+// Click overlay background to close
+document.getElementById('fullscreen-modal').addEventListener('click', function(e) {
+  if (e.target === this) window.closeFullscreen();
+});
+
+// ── LLM-assisted analysis ───────────────────────────────────────────────
+const LLM_CONFIG = {
+  type: 'engram',   // 'engram' | 'ollama' | 'openai'
+  model: 'qwen2.5:7b',
+  apiKey: '',
+  endpoints: {
+    engram: `${ENGRAM_BASE}/proxy/llm`,
+    ollama: 'http://localhost:11434/v1/chat/completions',
+    openai: 'https://api.openai.com/v1/chat/completions',
+  },
+};
+
+window.updateLlmSettings = function() {
+  const type = document.getElementById('llm-endpoint-type').value;
+  LLM_CONFIG.type = type;
+  const keyInput = document.getElementById('llm-api-key');
+  keyInput.style.display = (type === 'openai') ? 'block' : 'none';
+  // Set default model based on endpoint type
+  const modelInput = document.getElementById('llm-model');
+  if (type === 'openai' && modelInput.value === 'qwen2.5:7b') {
+    modelInput.value = 'gpt-4o-mini';
+  } else if (type !== 'openai' && modelInput.value === 'gpt-4o-mini') {
+    modelInput.value = 'qwen2.5:7b';
+  }
+};
+
+async function callLLM(messages) {
+  const model = document.getElementById('llm-model').value || LLM_CONFIG.model;
+  const apiKey = document.getElementById('llm-api-key').value || LLM_CONFIG.apiKey;
+  const endpoint = LLM_CONFIG.endpoints[LLM_CONFIG.type];
+
+  const body = {
+    model,
+    messages,
+    temperature: 0.7,
+    max_tokens: 1024,
+    stream: false,
+  };
+
+  const headers = { 'Content-Type': 'application/json' };
+  if (LLM_CONFIG.type === 'openai' && apiKey) {
+    headers['Authorization'] = `Bearer ${apiKey}`;
+  }
+
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60000),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => 'Unknown error');
+    throw new Error(`LLM returned ${resp.status}: ${text.slice(0, 200)}`);
+  }
+
+  const data = await resp.json();
+  return data.choices?.[0]?.message?.content || data.message?.content || 'No response';
+}
+
+function buildPredContext(pred) {
+  const lines = [];
+  lines.push(`ASSESSMENT: "${pred.title}"`);
+  lines.push(`Country: ${pred.country}`);
+  lines.push(`Category: ${pred.category}`);
+  lines.push(`Timeframe: ${pred.timeframe}`);
+  lines.push(`Current probability: ${Math.round(pred.probability * 100)}%`);
+  lines.push('');
+  lines.push(`SUPPORTING EVIDENCE (${pred.evidenceFor.length}):`);
+  for (const e of pred.evidenceFor) {
+    lines.push(`  [${e.confidence.toFixed(2)}] ${e.desc} (source: ${e.source || 'analyst'})`);
+  }
+  lines.push('');
+  lines.push(`CONTRADICTING EVIDENCE (${pred.evidenceAgainst.length}):`);
+  if (pred.evidenceAgainst.length === 0) {
+    lines.push('  (none)');
+  } else {
+    for (const e of pred.evidenceAgainst) {
+      lines.push(`  [${e.confidence.toFixed(2)}] ${e.desc} (source: ${e.source || 'analyst'})`);
+    }
+  }
+  if (pred.news && pred.news.length > 0) {
+    lines.push('');
+    lines.push(`LINKED NEWS (${pred.news.length}):`);
+    for (const n of pred.news.slice(0, 10)) {
+      lines.push(`  [${n.direction}] ${n.title} (${n.domain})`);
+    }
+  }
+  return lines.join('\n');
+}
+
+const LLM_PROMPTS = {
+  summarize: (ctx) => [
+    { role: 'system', content: 'You are an intelligence analyst writing a concise assessment brief. Be direct, analytical, and cite specific evidence. Use professional intelligence language. Keep it under 300 words. NOTE: Assessment titles may use historical analogies (e.g. "Korea-style armistice" means a frozen conflict like the 1953 Korean War outcome, NOT involving Korea). Focus on the actual conflict indicated by the Country field.' },
+    { role: 'user', content: `Write a concise intelligence assessment based on the following data:\n\n${ctx}\n\nProvide: 1) Key judgment with confidence level, 2) Summary of evidence balance, 3) Key indicators to watch.` },
+  ],
+  challenge: (ctx) => [
+    { role: 'system', content: 'You are a senior intelligence analyst conducting a Red Team challenge / devil\'s advocate analysis. Your job is to find weaknesses, biases, and alternative explanations. Be rigorous and constructive. Keep it under 300 words. NOTE: Assessment titles may use historical analogies (e.g. "Korea-style armistice" means a frozen conflict like the 1953 Korean War outcome, NOT involving Korea). Focus on the actual conflict indicated by the Country field.' },
+    { role: 'user', content: `Challenge the following assessment. Identify analytical blind spots, missing evidence, alternative hypotheses, and potential biases:\n\n${ctx}\n\nProvide: 1) Key assumptions that could be wrong, 2) Alternative explanations for the evidence, 3) Missing evidence that would change the assessment, 4) Potential analytical biases.` },
+  ],
+  sensitivity: (ctx) => [
+    { role: 'system', content: `You are a geopolitical analyst explaining what real-world events would change an assessment's probability. Be specific about actors, actions, and mechanisms. Keep it under 300 words.
+
+CRITICAL CONTEXT RULES:
+- The "Country" field in the assessment tells you WHICH CONFLICT or situation is being analyzed. Focus ALL analysis on that country and its actual conflict.
+- Assessment titles may use HISTORICAL ANALOGIES. For example, "Korea-style armistice" means "a frozen conflict outcome similar to the 1953 Korean War armistice" -- it does NOT mean North Korea is involved in this conflict. "DMZ along current frontlines" means a demilitarized zone between the actual belligerents, NOT the Korean DMZ.
+- Always identify the actual parties to the conflict from the country context and evidence, then analyze events involving THOSE parties only.
+- Never introduce unrelated countries or conflicts just because they appear in a metaphor or analogy in the title.` },
+    { role: 'user', content: `For the following assessment, explain what specific real-world events or developments would INCREASE or DECREASE the probability:\n\n${ctx}\n\nProvide:\n1) "To increase probability" -- list 3-4 specific events/actions that would make this more likely\n2) "To decrease probability" -- list 3-4 specific events/actions that would make this less likely\n3) "Key trigger events" -- what single development would most dramatically shift the assessment?\n\nIMPORTANT: Focus on the actual conflict parties indicated by the Country field. If the title uses a historical analogy (e.g. "Korea-style"), explain what that outcome would look like for the ACTUAL conflict, not for Korea.` },
+  ],
+  explain_changes: (ctx, history) => [
+    { role: 'system', content: 'You are an intelligence analyst explaining why an assessment\'s probability changed over time. Be specific about which evidence caused each shift. Keep it under 300 words.' },
+    { role: 'user', content: `Explain the probability changes for this assessment:\n\n${ctx}\n\nPROBABILITY HISTORY:\n${history}\n\nFor each significant shift, explain:\n1) What evidence was likely added or removed to cause this change\n2) Whether the shift was justified given the evidence quality\n3) The overall trajectory -- is confidence growing, declining, or oscillating?\n4) Any concerns about the pattern (e.g. all evidence from one source type, no contradicting evidence tested)` },
+  ],
+};
+
+window.llmAnalyze = async function(mode) {
+  if (STATE.selectedPred === null) return;
+  const pred = STATE.predictions[STATE.selectedPred];
+  const output = document.getElementById('llm-output');
+  const btns = document.querySelectorAll('.llm-btn');
+
+  // Disable buttons while loading
+  btns.forEach(b => b.disabled = true);
+  output.className = 'llm-output visible';
+  output.innerHTML = '<span class="spinner"></span> Generating analysis...';
+
+  try {
+    const ctx = buildPredContext(pred);
+    let messages;
+    if (mode === 'explain_changes') {
+      const historyLines = pred.history.map((h, i) => {
+        const date = new Date(h.time).toLocaleString();
+        const pct = Math.round(h.prob * 100);
+        const delta = i > 0 ? ((h.prob - pred.history[i-1].prob) * 100).toFixed(1) : '0.0';
+        return `  ${date}: ${pct}% (${delta >= 0 ? '+' : ''}${delta}%)`;
+      }).join('\n');
+      messages = LLM_PROMPTS[mode](ctx, historyLines);
+    } else {
+      messages = LLM_PROMPTS[mode](ctx);
+    }
+    const response = await callLLM(messages);
+
+    const modeLabel = { summarize: 'Assessment Brief', challenge: 'Red Team Analysis', sensitivity: 'Sensitivity Analysis', explain_changes: 'Change Explanation' }[mode];
+    output.innerHTML = `<div class="llm-badge"><i class="fa-solid fa-robot" style="margin-right:0.3rem;"></i> LLM-Generated -- ${modeLabel}</div>\n${escHtml(response)}`;
+  } catch (e) {
+    output.innerHTML = `<div style="color:var(--red);"><i class="fa-solid fa-triangle-exclamation"></i> ${escHtml(e.message)}</div>
+<div style="color:var(--muted); font-size:0.8rem; margin-top:0.5rem;">
+Check that your LLM endpoint is running. Settings: ${LLM_CONFIG.type} / ${document.getElementById('llm-model').value}
+${LLM_CONFIG.type === 'engram' ? 'Engram proxy requires ENGRAM_LLM_ENDPOINT or Ollama on localhost:11434' : ''}
+</div>`;
+  }
+
+  btns.forEach(b => b.disabled = false);
+};
+
+// ── Deep Investigation Pipeline ─────────────────────────────────────────
+// Extracts entities + topics -> fetches fresh news (GDELT + RSS) -> Wikipedia
+// -> open web search -> engram graph -> compiles dossier with sources -> LLM
+
+window.llmAsk = async function() {
+  if (STATE.selectedPred === null) { toast('Select a prediction first', 'error'); return; }
+  const question = document.getElementById('llm-question').value.trim();
+  if (!question) return;
+
+  const pred = STATE.predictions[STATE.selectedPred];
+  const output = document.getElementById('llm-output');
+  const btns = document.querySelectorAll('.llm-btn');
+  btns.forEach(b => b.disabled = true);
+  output.className = 'llm-output visible';
+
+  const log = (msg) => { output.innerHTML = `<span class="spinner"></span> ${msg}`; };
+  const dossier = { news: [], wiki: [], graph: [], entities: [], topics: [] };
+
+  try {
+    // ── Phase 1: Entity + topic extraction ──
+    log('Phase 1/6: Extracting entities and topics...');
+    const entities = extractEntities(question, pred);
+    const topics = extractTopics(question);
+    dossier.entities = entities;
+    dossier.topics = topics;
+    log(`Phase 1/6: Entities: ${entities.join(', ')} | Topics: ${topics.join(', ')}`);
+    await sleep(100);
+
+    // ── Phase 2: Fresh GDELT news (last 30 days) ──
+    log(`Phase 2/6: Fetching GDELT news...`);
+    const gdeltQueries = buildGdeltQueries(entities, pred, topics);
+    let newsCount = 0;
+    for (const q of gdeltQueries) {
+      log(`Phase 2/6: GDELT [${newsCount} articles] -- ${q.slice(0, 50)}...`);
+      try {
+        if (STATE.engramOnline) {
+          const url = `${ENGRAM_BASE}/proxy/gdelt?query=${encodeURIComponent(q)}&mode=artlist&maxrecords=30&format=json&timespan=30d`;
+          const r = await fetch(url, { signal: AbortSignal.timeout(12000) });
+          if (r.ok) {
+            const data = await r.json();
+            if (data.articles) {
+              for (const art of data.articles) {
+                if (art.title && !dossier.news.find(n => n.url === art.url)) {
+                  dossier.news.push({ title: art.title, url: art.url, domain: art.domain || '', date: art.seendate || '', source: 'GDELT' });
+                  newsCount++;
+                }
+              }
+            }
+          }
+        }
+      } catch {}
+      await sleep(7000); // GDELT rate limit
+    }
+
+    // ── Phase 3: Google News RSS (current headlines) ──
+    log(`Phase 3/6: Fetching Google News headlines...`);
+    const rssQueries = buildRssQueries(entities, pred, topics);
+    for (const q of rssQueries) {
+      log(`Phase 3/6: RSS [${newsCount} articles] -- ${q.slice(0, 50)}...`);
+      try {
+        if (STATE.engramOnline) {
+          const url = `${ENGRAM_BASE}/proxy/rss?q=${encodeURIComponent(q)}`;
+          const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+          if (r.ok) {
+            const data = await r.json();
+            for (const item of (data.items || [])) {
+              if (item.title && !dossier.news.find(n => n.title === item.title)) {
+                dossier.news.push({ title: item.title, url: item.link || '', domain: item.domain || '', date: item.pubDate || '', source: 'Google News' });
+                newsCount++;
+              }
+            }
+          }
+        }
+      } catch {}
+      await sleep(300);
+    }
+
+    // ── Phase 4: Wikipedia deep dive ──
+    log(`Phase 4/6: Wikipedia deep research...`);
+    const wikiQueries = buildWikiQueries(entities, pred, topics);
+    for (const q of wikiQueries) {
+      log(`Phase 4/6: Wikipedia [${dossier.wiki.length} articles] -- ${q.slice(0, 50)}...`);
+      try {
+        const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&srlimit=3&format=json&origin=*`;
+        const r = await fetch(searchUrl, { signal: AbortSignal.timeout(6000) });
+        if (!r.ok) continue;
+        const data = await r.json();
+        for (const result of (data.query?.search || []).slice(0, 2)) {
+          if (dossier.wiki.find(w => w.title === result.title)) continue;
+          try {
+            const extractUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(result.title)}&prop=extracts&exintro=1&explaintext=1&exsentences=6&format=json&origin=*`;
+            const er = await fetch(extractUrl, { signal: AbortSignal.timeout(5000) });
+            if (!er.ok) continue;
+            const edata = await er.json();
+            const pages = edata.query?.pages || {};
+            for (const pageId of Object.keys(pages)) {
+              const extract = pages[pageId]?.extract;
+              if (extract && extract.length > 50) {
+                dossier.wiki.push({
+                  title: result.title,
+                  text: extract.slice(0, 500) + (extract.length > 500 ? '...' : ''),
+                });
+              }
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+
+    // ── Phase 5: Web search (SearXNG via engram proxy) ──
+    log(`Phase 5/6: Web search for current context...`);
+    const webQueries = [
+      ...entities.slice(0, 4).map(e => `${e} ${topics[0] ? topics[0].split(' ').slice(0, 3).join(' ') : question.split(' ').slice(0, 4).join(' ')}`),
+      ...entities.slice(0, 3).map(e => `${e} ${pred.country} 2026`),
+      entities.length >= 2 ? `${entities[0]} ${entities[1]} ${pred.category}` : null,
+    ].filter(Boolean);
+    let webCount = 0;
+    for (const q of webQueries.slice(0, 6)) {
+      log(`Phase 5/6: Web [${webCount} results] -- ${q.slice(0, 50)}...`);
+      try {
+        if (STATE.engramOnline) {
+          const url = `${ENGRAM_BASE}/proxy/search?q=${encodeURIComponent(q)}&time_range=month`;
+          const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
+          if (r.ok) {
+            const data = await r.json();
+            for (const result of (data.results || []).slice(0, 20)) {
+              if (result.title && result.snippet && !dossier.news.find(n => n.url === result.url)) {
+                dossier.news.push({
+                  title: result.title,
+                  url: result.url || '',
+                  domain: result.domain || '',
+                  date: '',
+                  source: 'Web Search',
+                });
+                // Also add snippet as wiki-style context
+                if (result.snippet.length > 40 && !dossier.wiki.find(w => w.title === result.title)) {
+                  dossier.wiki.push({
+                    title: result.title,
+                    text: result.snippet.slice(0, 400),
+                    source: 'Web Search',
+                    url: result.url || '',
+                  });
+                }
+                webCount++;
+              }
+            }
+          }
+        }
+      } catch {}
+      await sleep(500);
+    }
+
+    // ── Phase 6: Engram graph traversal ──
+    log(`Phase 6/6: Searching engram knowledge graph...`);
+    if (STATE.engramOnline) {
+      const searchTerms = [...entities.slice(0, 6), ...topics.slice(0, 3)];
+      for (const term of searchTerms) {
+        try {
+          const sr = await fetch(`${ENGRAM_BASE}/search`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: term, limit: 10 }),
+            signal: AbortSignal.timeout(3000),
+          });
+          if (sr.ok) {
+            const data = await sr.json();
+            const results = data.results || data;
+            if (Array.isArray(results)) {
+              for (const node of results.slice(0, 5)) {
+                const label = node.label || node.entity || '';
+                if (label && !dossier.graph.find(g => g.label === label)) {
+                  dossier.graph.push({ type: 'node', label, confidence: node.confidence || 0 });
+                }
+              }
+            }
+          }
+        } catch {}
+        try {
+          const qr = await fetch(`${ENGRAM_BASE}/query`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ entity: term, depth: 2 }),
+            signal: AbortSignal.timeout(3000),
+          });
+          if (qr.ok) {
+            const data = await qr.json();
+            for (const edge of (data.edges || []).slice(0, 8)) {
+              if (!dossier.graph.find(g => g.type === 'edge' && g.from === edge.from && g.to === edge.to)) {
+                dossier.graph.push({ type: 'edge', from: edge.from, relationship: edge.relationship, to: edge.to, confidence: edge.confidence || 0 });
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // ── Compile research dossier ──
+    const totalFacts = dossier.news.length + dossier.wiki.length + dossier.graph.length;
+    log(`Compiling dossier: ${dossier.news.length} news + ${dossier.wiki.length} wiki + ${dossier.graph.length} graph = ${totalFacts} facts. Storing to engram...`);
+
+    // Store findings to engram in background (non-blocking)
+    storeDossierToEngram(dossier, question);
+
+    log(`Compiling dossier: ${totalFacts} facts. Sending to LLM...`);
+    const { text: dossierText, sources } = compileDossier(dossier, pred);
+    const ctx = buildPredContext(pred);
+
+    const messages = [
+      { role: 'system', content: `You are a senior geopolitical intelligence analyst. You have received a comprehensive research dossier compiled from multiple sources: live GDELT news feeds, Google News RSS, Wikipedia, DuckDuckGo web search, and an internal knowledge graph.
+
+RULES:
+- Base your analysis ONLY on facts in the dossier. ALWAYS cite source numbers in brackets like [3], [17], [42].
+- Cross-reference multiple sources. If only one source reports something, note it as unconfirmed.
+- Distinguish clearly between: verified facts, corroborated reports, single-source claims, and your analytical inferences.
+- When fact-checking a claim, explicitly state: CONFIRMED (multiple sources), PARTIALLY CONFIRMED (some evidence), UNCONFIRMED (single source), or CONTRADICTED (conflicting evidence).
+- Identify patterns across multiple articles (e.g., repeated themes, escalation/de-escalation trends).
+- If the dossier lacks data on an aspect of the question, say so explicitly.
+- Structure: Key Findings (with verdicts), Evidence Chain, Cross-Source Patterns, Gaps & Uncertainties, Assessment Impact.
+- Keep it under 600 words.` },
+      { role: 'user', content: `ASSESSMENT UNDER ANALYSIS:\n${ctx}\n\nRESEARCH DOSSIER (${totalFacts} facts from ${new Set(sources.map(s => s.source)).size} sources):\n${dossierText}\n\nANALYST QUESTION: ${question}` },
+    ];
+    const response = await callLLM(messages);
+
+    // ── Build clickable source references ──
+    // Extract cited source numbers from the LLM response
+    const citedNums = new Set();
+    const citeMatches = response.match(/\[(\d+)\]/g);
+    if (citeMatches) for (const m of citeMatches) citedNums.add(parseInt(m.replace(/[\[\]]/g, '')));
+
+    const citedSources = sources.filter(s => citedNums.has(s.num));
+    let sourcesHtml = '';
+    if (citedSources.length > 0) {
+      sourcesHtml = `<div style="margin-top:1rem; padding-top:0.75rem; border-top:1px solid var(--border);">
+        <div style="font-size:0.8rem; font-weight:600; color:var(--accent); margin-bottom:0.5rem;">
+          <i class="fa-solid fa-link"></i> Sources Cited (${citedSources.length})
+        </div>
+        <div style="font-size:0.75rem; color:var(--muted); max-height:200px; overflow-y:auto;">
+          ${citedSources.map(s => {
+            const icon = s.source === 'Wikipedia' ? 'fa-brands fa-wikipedia-w' : s.source === 'engram' ? 'fa-solid fa-brain' : s.source === 'DuckDuckGo' ? 'fa-solid fa-magnifying-glass' : 'fa-solid fa-newspaper';
+            const link = s.url ? `<a href="${escHtml(s.url)}" target="_blank" rel="noopener" style="color:var(--cyan); text-decoration:none;">${escHtml(s.title.slice(0, 100))}</a>` : escHtml(s.title.slice(0, 100));
+            const dateStr = s.date ? ` <span style="color:var(--muted);">(${s.date.slice(0, 10)})</span>` : '';
+            return `<div style="margin-bottom:0.3rem; line-height:1.4;"><span style="color:var(--accent); font-weight:600;">[${s.num}]</span> <i class="${icon}" style="width:14px; text-align:center; margin-right:3px;"></i> ${link}${dateStr} <span style="opacity:0.5;">${s.domain}</span></div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    }
+
+    // Also show all uncited sources as expandable
+    const uncitedSources = sources.filter(s => !citedNums.has(s.num) && s.url);
+    let uncitedHtml = '';
+    if (uncitedSources.length > 0) {
+      uncitedHtml = `<details style="margin-top:0.5rem; font-size:0.75rem;">
+        <summary style="cursor:pointer; color:var(--muted);"><i class="fa-solid fa-folder-open"></i> All sources collected (${sources.length} total)</summary>
+        <div style="max-height:300px; overflow-y:auto; margin-top:0.3rem; padding:0.5rem; background:var(--bg); border-radius:4px;">
+          ${sources.filter(s => s.url).map(s => {
+            const icon = s.source === 'Wikipedia' ? 'fa-brands fa-wikipedia-w' : s.source === 'engram' ? 'fa-solid fa-brain' : 'fa-solid fa-newspaper';
+            return `<div style="margin-bottom:0.2rem;"><span style="color:var(--accent);">[${s.num}]</span> <i class="${icon}" style="width:14px;"></i> <a href="${escHtml(s.url)}" target="_blank" rel="noopener" style="color:var(--muted); text-decoration:none;">${escHtml(s.title.slice(0, 90))}</a> <span style="opacity:0.4;">${s.domain}</span></div>`;
+          }).join('')}
+        </div>
+      </details>`;
+    }
+
+    // ── Display result ──
+    const sourceBreakdown = `<div style="font-size:0.75rem; color:var(--muted); margin-bottom:0.75rem; padding:0.5rem; background:var(--bg); border-radius:4px;">
+      <i class="fa-solid fa-database"></i> <strong>Research dossier:</strong>
+      ${dossier.news.length} news articles (GDELT + Google News)
+      &bull; ${dossier.wiki.length} Wikipedia + web references
+      &bull; ${dossier.graph.length} engram graph entries
+      &bull; Entities: ${entities.join(', ')}
+      ${topics.length ? `&bull; Topics: ${topics.join(', ')}` : ''}
+    </div>`;
+
+    // Convert [N] references in response to styled spans
+    const styledResponse = escHtml(response).replace(/\[(\d+)\]/g, '<span style="color:var(--cyan); font-weight:600; cursor:pointer;" title="Click to see source">[$1]</span>');
+
+    output.innerHTML = `<div class="llm-badge"><i class="fa-solid fa-robot" style="margin-right:0.3rem;"></i> LLM-Generated -- Deep Investigation</div>\n${sourceBreakdown}<strong>Q: ${escHtml(question)}</strong>\n\n${styledResponse}${sourcesHtml}${uncitedHtml}`;
+  } catch (e) {
+    output.innerHTML = `<div style="color:var(--red);"><i class="fa-solid fa-triangle-exclamation"></i> ${escHtml(e.message)}</div>`;
+  }
+  btns.forEach(b => b.disabled = false);
+};
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── Global Cross-Assessment Analysis ────────────────────────────────────
+window.globalAsk = async function() {
+  const question = document.getElementById('global-ask-input').value.trim();
+  if (!question) return;
+  if (!STATE.predictions.length) { toast('Create assessments first', 'error'); return; }
+
+  const output = document.getElementById('global-ask-output');
+  const btn = document.getElementById('global-ask-btn');
+  btn.disabled = true;
+  output.className = 'visible';
+
+  const log = (msg) => { output.innerHTML = `<span class="spinner"></span> ${msg}`; };
+  const dossier = { news: [], wiki: [], graph: [], entities: [], topics: [] };
+
+  try {
+    // Build a synthetic "pred" that covers all assessments for query building
+    const allTitles = STATE.predictions.map(p => p.title).join(' ');
+    const allCategories = [...new Set(STATE.predictions.map(p => p.category))].join(' ');
+    const synthPred = { country: STATE.country, title: allTitles, category: allCategories };
+
+    // Phase 1: Extract entities + topics
+    log('Phase 1/6: Extracting entities and topics across all assessments...');
+    const entities = extractEntities(question, synthPred);
+    const topics = extractTopics(question);
+    // Also add key terms from each assessment title
+    for (const pred of STATE.predictions) {
+      const words = pred.title.split(/\s+/).filter(w => w.length > 4 && w[0] === w[0].toUpperCase());
+      words.forEach(w => { if (!entities.includes(w)) entities.push(w); });
+    }
+    dossier.entities = entities.slice(0, 8);
+    dossier.topics = topics;
+    log(`Phase 1/6: Entities: ${dossier.entities.join(', ')} | Topics: ${topics.join(', ')}`);
+    await sleep(100);
+
+    // Phase 2: GDELT
+    log('Phase 2/6: Fetching GDELT news...');
+    const gdeltQueries = buildGdeltQueries(dossier.entities, synthPred, topics);
+    let newsCount = 0;
+    for (const q of gdeltQueries) {
+      log(`Phase 2/6: GDELT [${newsCount} articles] -- ${q.slice(0, 50)}...`);
+      try {
+        if (STATE.engramOnline) {
+          const url = `${ENGRAM_BASE}/proxy/gdelt?query=${encodeURIComponent(q)}&mode=artlist&maxrecords=30&format=json&timespan=30d`;
+          const r = await fetch(url, { signal: AbortSignal.timeout(12000) });
+          if (r.ok) {
+            const data = await r.json();
+            if (data.articles) {
+              for (const art of data.articles) {
+                if (art.title && !dossier.news.find(n => n.url === art.url)) {
+                  dossier.news.push({ title: art.title, url: art.url, domain: art.domain || '', date: art.seendate || '', source: 'GDELT' });
+                  newsCount++;
+                }
+              }
+            }
+          }
+        }
+      } catch {}
+      await sleep(7000);
+    }
+
+    // Phase 3: RSS
+    log('Phase 3/6: Fetching Google News headlines...');
+    const rssQueries = buildRssQueries(dossier.entities, synthPred, topics);
+    for (const q of rssQueries) {
+      log(`Phase 3/6: RSS [${newsCount} articles] -- ${q.slice(0, 50)}...`);
+      try {
+        if (STATE.engramOnline) {
+          const url = `${ENGRAM_BASE}/proxy/rss?q=${encodeURIComponent(q)}`;
+          const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+          if (r.ok) {
+            const data = await r.json();
+            for (const item of (data.items || [])) {
+              if (item.title && !dossier.news.find(n => n.title === item.title)) {
+                dossier.news.push({ title: item.title, url: item.link || '', domain: item.domain || '', date: item.pubDate || '', source: 'Google News' });
+                newsCount++;
+              }
+            }
+          }
+        }
+      } catch {}
+      await sleep(300);
+    }
+
+    // Phase 4: Wikipedia
+    log('Phase 4/6: Wikipedia deep research...');
+    const wikiQueries = buildWikiQueries(dossier.entities, synthPred, topics);
+    for (const q of wikiQueries) {
+      log(`Phase 4/6: Wikipedia [${dossier.wiki.length} articles] -- ${q.slice(0, 50)}...`);
+      try {
+        const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&srlimit=3&format=json&origin=*`;
+        const r = await fetch(searchUrl, { signal: AbortSignal.timeout(6000) });
+        if (!r.ok) continue;
+        const data = await r.json();
+        for (const result of (data.query?.search || []).slice(0, 2)) {
+          if (dossier.wiki.find(w => w.title === result.title)) continue;
+          try {
+            const extractUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(result.title)}&prop=extracts&exintro=1&explaintext=1&exsentences=6&format=json&origin=*`;
+            const er = await fetch(extractUrl, { signal: AbortSignal.timeout(5000) });
+            if (!er.ok) continue;
+            const edata = await er.json();
+            const pages = edata.query?.pages || {};
+            for (const pageId of Object.keys(pages)) {
+              const extract = pages[pageId]?.extract;
+              if (extract && extract.length > 50) {
+                dossier.wiki.push({ title: result.title, text: extract.slice(0, 500) + (extract.length > 500 ? '...' : '') });
+              }
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+
+    // Phase 5: Web search (SearXNG via engram proxy)
+    log('Phase 5/6: Web search for current context...');
+    // Build focused search queries (not full sentences)
+    const webQueries = [
+      // Entity pairs + key terms from the question
+      ...dossier.entities.slice(0, 4).map(e => `${e} ${topics[0] ? topics[0].split(' ').slice(0, 3).join(' ') : question.split(' ').slice(0, 4).join(' ')}`),
+      // Direct entity + context queries
+      ...dossier.entities.slice(0, 3).map(e => `${e} ${STATE.country} 2026`),
+      // Combine top 2 entities
+      dossier.entities.length >= 2 ? `${dossier.entities[0]} ${dossier.entities[1]} impact` : null,
+    ].filter(Boolean);
+    let webCount = 0;
+    for (const q of webQueries.slice(0, 6)) {
+      log(`Phase 5/6: Web [${webCount} results] -- ${q.slice(0, 50)}...`);
+      try {
+        if (STATE.engramOnline) {
+          const url = `${ENGRAM_BASE}/proxy/search?q=${encodeURIComponent(q)}&time_range=month`;
+          const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
+          if (r.ok) {
+            const data = await r.json();
+            for (const result of (data.results || []).slice(0, 20)) {
+              if (result.title && result.snippet && !dossier.news.find(n => n.url === result.url)) {
+                dossier.news.push({
+                  title: result.title,
+                  url: result.url || '',
+                  domain: result.domain || '',
+                  date: '',
+                  source: 'Web Search',
+                });
+                if (result.snippet.length > 40 && !dossier.wiki.find(w => w.title === result.title)) {
+                  dossier.wiki.push({
+                    title: result.title,
+                    text: result.snippet.slice(0, 400),
+                    source: 'Web Search',
+                    url: result.url || '',
+                  });
+                }
+                webCount++;
+              }
+            }
+          }
+        }
+      } catch {}
+      await sleep(500);
+    }
+
+    // Phase 6: Engram graph
+    log('Phase 6/6: Searching engram knowledge graph...');
+    if (STATE.engramOnline) {
+      const searchTerms = [...dossier.entities.slice(0, 6), ...topics.slice(0, 3)];
+      for (const term of searchTerms) {
+        try {
+          const sr = await fetch(`${ENGRAM_BASE}/search`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: term, limit: 10 }),
+            signal: AbortSignal.timeout(3000),
+          });
+          if (sr.ok) {
+            const data = await sr.json();
+            const results = data.results || data;
+            if (Array.isArray(results)) {
+              for (const node of results.slice(0, 5)) {
+                const label = node.label || node.entity || '';
+                if (label && !dossier.graph.find(g => g.label === label)) {
+                  dossier.graph.push({ type: 'node', label, confidence: node.confidence || 0 });
+                }
+              }
+            }
+          }
+        } catch {}
+        try {
+          const qr = await fetch(`${ENGRAM_BASE}/query`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ entity: term, depth: 2 }),
+            signal: AbortSignal.timeout(3000),
+          });
+          if (qr.ok) {
+            const data = await qr.json();
+            for (const edge of (data.edges || []).slice(0, 8)) {
+              if (!dossier.graph.find(g => g.type === 'edge' && g.from === edge.from && g.to === edge.to)) {
+                dossier.graph.push({ type: 'edge', from: edge.from, relationship: edge.relationship, to: edge.to, confidence: edge.confidence || 0 });
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // Compile dossier
+    const totalFacts = dossier.news.length + dossier.wiki.length + dossier.graph.length;
+    log(`Compiling dossier: ${dossier.news.length} news + ${dossier.wiki.length} wiki + ${dossier.graph.length} graph = ${totalFacts} facts. Storing to engram...`);
+
+    // Store findings to engram in background (non-blocking)
+    storeDossierToEngram(dossier, question);
+
+    log(`Compiling dossier: ${totalFacts} facts. Sending to LLM...`);
+    const { text: dossierText, sources } = compileDossier(dossier, synthPred);
+
+    // Build assessment context for ALL predictions
+    const assessmentsCtx = STATE.predictions.map((p, i) => {
+      const prob = Math.round(p.probability * 100);
+      const forCount = p.evidenceFor.length;
+      const againstCount = p.evidenceAgainst.length;
+      const forSummary = p.evidenceFor.slice(0, 3).map(e => `"${e.desc.slice(0, 60)}"`).join(', ');
+      const againstSummary = p.evidenceAgainst.slice(0, 3).map(e => `"${e.desc.slice(0, 60)}"`).join(', ');
+      return `ASSESSMENT ${i+1}: "${p.title}"
+  Current probability: ${prob}% | Category: ${p.category} | Timeframe: ${p.timeframe}
+  Supporting evidence (${forCount}): ${forSummary || 'none'}
+  Contradicting evidence (${againstCount}): ${againstSummary || 'none'}`;
+    }).join('\n\n');
+
+    const messages = [
+      { role: 'system', content: `You are a senior geopolitical intelligence analyst. You are conducting a cross-assessment impact analysis for ${STATE.country}.
+
+CRITICAL: Each assessment MUST be analyzed INDEPENDENTLY. The same event can INCREASE one assessment's probability while DECREASING another. Think about WHO benefits and WHO is harmed.
+
+For example: "Russia loses Starlink access" HURTS Russia's military capability, so:
+- Scenarios favorable to Russia (frozen conflict, armistice on current lines) = probability DECREASES
+- Scenarios favorable to Ukraine (full territorial recovery) = probability INCREASES
+
+RULES:
+- For EACH assessment: independently determine whether the event INCREASES (+) or DECREASES (-) probability, with specific percentage point change and evidence.
+- Cite dossier fact numbers in brackets [3], [17].
+- Think step by step: (1) Who does this event help/hurt? (2) How does each assessment outcome relate to that actor's goals? (3) Therefore, does probability go up or down?
+- Distinguish verified facts from inference. Single-source = unconfirmed.
+- Identify cascade effects between assessments.
+- State evidence gaps explicitly.
+- Structure with a clear section per assessment.
+- Keep analysis under 600 words.` },
+      { role: 'user', content: `ACTIVE ASSESSMENTS FOR ${STATE.country.toUpperCase()}:\n${assessmentsCtx}\n\nRESEARCH DOSSIER (${totalFacts} facts):\n${dossierText}\n\nCROSS-ASSESSMENT QUESTION: ${question}` },
+    ];
+    const response = await callLLM(messages);
+    const analysisText = response;
+
+    // Second quick LLM call to extract structured impact numbers
+    log('Extracting impact numbers...');
+    const impactPrompt = [
+      { role: 'system', content: 'You extract probability impact data. Respond with ONLY a JSON array, nothing else.' },
+      { role: 'user', content: `Based on this analysis, output a JSON array with the probability impact on each assessment.
+Format: [{"assessment":1,"delta":-5,"magnitude":"moderate"},{"assessment":2,"delta":3,"magnitude":"weak"}]
+- delta is percentage points change: POSITIVE means probability INCREASES, NEGATIVE means it DECREASES
+- IMPORTANT: Different assessments can have OPPOSITE directions. An event hurting Russia can DECREASE pro-Russian outcomes but INCREASE pro-Ukrainian outcomes.
+- magnitude is "strong" (>10%), "moderate" (5-10%), or "weak" (<5%)
+
+The assessments are:
+${STATE.predictions.map((p,i) => `${i+1}. "${p.title}" (currently ${Math.round(p.probability*100)}%)`).join('\n')}
+
+Analysis to extract from:
+${response.slice(0, 2000)}
+
+Respond with ONLY the JSON array:` },
+    ];
+    let impacts = [];
+    try {
+      const impactResp = await callLLM(impactPrompt);
+      // Extract JSON array from response
+      const cleaned = impactResp.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      const arrMatch = cleaned.match(/\[[\s\S]*\]/);
+      if (arrMatch) impacts = JSON.parse(arrMatch[0]);
+    } catch {}
+
+    // Build impact cards HTML
+    let impactCardsHtml = '';
+    if (impacts.length > 0) {
+      impactCardsHtml = `<div style="display:flex; flex-wrap:wrap; gap:0.75rem; margin:1rem 0;">`;
+      for (const imp of impacts) {
+        const predIdx = (imp.assessment || 1) - 1;
+        const pred = STATE.predictions[predIdx];
+        if (!pred) continue;
+        const currentPct = Math.round(pred.probability * 100);
+        const delta = imp.delta || 0;
+        const projected = Math.max(0, Math.min(100, currentPct + delta));
+        const deltaStr = delta >= 0 ? `+${delta}%` : `${delta}%`;
+        const deltaColor = delta > 0 ? 'var(--green)' : delta < 0 ? 'var(--red)' : 'var(--muted)';
+        const arrow = delta > 0 ? 'fa-arrow-up' : delta < 0 ? 'fa-arrow-down' : 'fa-minus';
+        const magnitude = imp.magnitude || 'moderate';
+        const magColor = magnitude === 'strong' ? '#ef4444' : magnitude === 'moderate' ? '#f59e0b' : '#6b7280';
+        impactCardsHtml += `<div style="flex:1; min-width:200px; padding:0.75rem; background:var(--bg); border:1px solid var(--border); border-radius:8px; border-left:3px solid ${deltaColor};">
+          <div style="font-size:0.75rem; color:var(--muted); margin-bottom:0.4rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escHtml(pred.title)}">${escHtml(pred.title.slice(0, 45))}</div>
+          <div style="display:flex; align-items:center; gap:0.75rem;">
+            <span style="font-size:1.3rem; color:var(--muted);">${currentPct}%</span>
+            <i class="fa-solid fa-arrow-right" style="color:var(--muted); font-size:0.7rem;"></i>
+            <span style="font-size:1.5rem; font-weight:700; color:${deltaColor};">${projected}%</span>
+            <span style="font-size:0.9rem; color:${deltaColor};"><i class="fa-solid ${arrow}"></i> ${deltaStr}</span>
+          </div>
+          <div style="margin-top:0.3rem;"><span style="font-size:0.65rem; padding:0.15rem 0.4rem; background:${magColor}22; color:${magColor}; border-radius:3px; font-weight:600; text-transform:uppercase;">${magnitude} impact</span></div>
+        </div>`;
+      }
+      impactCardsHtml += `</div>`;
+    }
+
+    // Build source references
+    const citedNums = new Set();
+    const citeMatches = analysisText.match(/\[(\d+)\]/g);
+    if (citeMatches) for (const m of citeMatches) citedNums.add(parseInt(m.replace(/[\[\]]/g, '')));
+    const citedSources = sources.filter(s => citedNums.has(s.num));
+
+    let sourcesHtml = '';
+    if (citedSources.length > 0) {
+      sourcesHtml = `<div style="margin-top:1rem; padding-top:0.75rem; border-top:1px solid var(--border);">
+        <div style="font-size:0.8rem; font-weight:600; color:#a855f7; margin-bottom:0.5rem;">
+          <i class="fa-solid fa-link"></i> Sources Cited (${citedSources.length})
+        </div>
+        <div style="font-size:0.75rem; color:var(--muted); max-height:200px; overflow-y:auto;">
+          ${citedSources.map(s => {
+            const icon = s.source === 'Wikipedia' ? 'fa-brands fa-wikipedia-w' : s.source === 'engram' ? 'fa-solid fa-brain' : s.source === 'DuckDuckGo' ? 'fa-solid fa-magnifying-glass' : 'fa-solid fa-newspaper';
+            const link = s.url ? `<a href="${escHtml(s.url)}" target="_blank" rel="noopener" style="color:var(--cyan); text-decoration:none;">${escHtml(s.title.slice(0, 100))}</a>` : escHtml(s.title.slice(0, 100));
+            const dateStr = s.date ? ` <span style="color:var(--muted);">(${s.date.slice(0, 10)})</span>` : '';
+            return `<div style="margin-bottom:0.3rem; line-height:1.4;"><span style="color:#a855f7; font-weight:600;">[${s.num}]</span> <i class="${icon}" style="width:14px; text-align:center; margin-right:3px;"></i> ${link}${dateStr} <span style="opacity:0.5;">${s.domain}</span></div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    }
+
+    let uncitedHtml = '';
+    const uncitedWithUrl = sources.filter(s => !citedNums.has(s.num) && s.url);
+    if (uncitedWithUrl.length > 0) {
+      uncitedHtml = `<details style="margin-top:0.5rem; font-size:0.75rem;">
+        <summary style="cursor:pointer; color:var(--muted);"><i class="fa-solid fa-folder-open"></i> All sources collected (${sources.length} total)</summary>
+        <div style="max-height:300px; overflow-y:auto; margin-top:0.3rem; padding:0.5rem; background:var(--bg); border-radius:4px;">
+          ${sources.filter(s => s.url).map(s => {
+            const icon = s.source === 'Wikipedia' ? 'fa-brands fa-wikipedia-w' : 'fa-solid fa-newspaper';
+            return `<div style="margin-bottom:0.2rem;"><span style="color:#a855f7;">[${s.num}]</span> <i class="${icon}" style="width:14px;"></i> <a href="${escHtml(s.url)}" target="_blank" rel="noopener" style="color:var(--muted); text-decoration:none;">${escHtml(s.title.slice(0, 90))}</a> <span style="opacity:0.4;">${s.domain}</span></div>`;
+          }).join('')}
+        </div>
+      </details>`;
+    }
+
+    const sourceBreakdown = `<div style="font-size:0.75rem; color:var(--muted); margin-bottom:0.75rem; padding:0.5rem; background:var(--bg); border-radius:4px;">
+      <i class="fa-solid fa-database"></i> <strong>Research dossier:</strong>
+      ${dossier.news.length} news articles &bull; ${dossier.wiki.length} wiki + web refs &bull; ${dossier.graph.length} graph entries
+      &bull; Entities: ${dossier.entities.join(', ')}
+      ${topics.length ? `&bull; Topics: ${topics.join(', ')}` : ''}
+    </div>`;
+
+    const styledResponse = escHtml(analysisText).replace(/\[(\d+)\]/g, '<span style="color:var(--cyan); font-weight:600;">[$1]</span>');
+
+    output.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+      <div class="llm-badge" style="border-left-color:#a855f7;"><i class="fa-solid fa-globe" style="margin-right:0.3rem;"></i> Cross-Assessment Impact Analysis</div>
+      <button onclick="document.getElementById('global-ask-output').className=''" style="background:none; border:none; color:var(--muted); cursor:pointer; font-size:0.8rem;"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    ${sourceBreakdown}<strong>Q: ${escHtml(question)}</strong>${impactCardsHtml}\n${styledResponse}${sourcesHtml}${uncitedHtml}`;
+  } catch (e) {
+    output.innerHTML = `<div style="color:var(--red);"><i class="fa-solid fa-triangle-exclamation"></i> ${escHtml(e.message)}</div>`;
+  }
+  btn.disabled = false;
+};
+
+// ── Entity extraction ───────────────────────────────────────────────────
+function extractEntities(question, pred) {
+  const entities = new Set();
+  entities.add(pred.country);
+  const knownEntities = [
+    ...COUNTRIES,
+    'NATO', 'EU', 'UN', 'BRICS', 'OPEC', 'G7', 'G20', 'IMF', 'World Bank',
+    'SCO', 'CSTO', 'IAEA', 'SWIFT', 'Kremlin', 'Pentagon', 'White House',
+    'Wagner', 'Hezbollah', 'Hamas', 'ISIS', 'Taliban', 'Houthis',
+    'Putin', 'Zelensky', 'Biden', 'Trump', 'Xi', 'Erdogan', 'Khamenei', 'Modi',
+    'Lavrov', 'Shoigu', 'Raisi', 'Netanyahu', 'Macron', 'Scholz',
+  ];
+  const qLower = question.toLowerCase();
+  for (const ent of knownEntities) {
+    if (qLower.includes(ent.toLowerCase())) entities.add(ent);
+  }
+  // Grab capitalized multi-word phrases and single words
+  const commonWords = new Set(['how','what','when','where','why','does','will','could','would','should','this','that','with','from','have','been','were','their','about','which','there','these','some','more','very','just','than','them','into','over','after','also','many','before','between','being','through','other','most','then','like','only','each','much','both','well','back','even','want','give','find','here','thing','things','influence','influencing','affecting','impact','affect','change','changing','assessment','recent','current','actual']);
+  const words = question.match(/[A-Z][a-z]{2,}/g) || [];
+  for (const w of words) {
+    if (!commonWords.has(w.toLowerCase())) entities.add(w);
+  }
+  return [...entities];
+}
+
+// Extract specific topics/claims from the question for targeted searches
+function extractTopics(question) {
+  const topics = [];
+  // Extract noun phrases: sequences of capitalized or important words
+  const stopwords = new Set(['how','what','when','where','why','does','will','could','would','should','this','that','with','from','have','been','were','their','about','which','there','these','the','and','are','for','not','but','had','has','was','all','can','her','his','its','may','new','now','old','see','way','who','did','got','let','say','she','too','use','is','it','of','to','a','an','in','on','at','by','or','so','if','do','no','up','be','he','we','my','am','go','me','us','our','get','assess','impact','impacts','influence','influencing','affecting','fact','check','patterns','emerging']);
+  // First try to extract the core claim/topic (remove question words)
+  let cleaned = question
+    .replace(/^(how|what|why|when|where|does|will|could|would|can|is|are)\s+(is|are|does|will|could|would|the|this|that|it)?\s*/i, '')
+    .replace(/\s*(influencing|affecting|impacting|influence|affect|impact)\s+(this|that|the|our|assessment)?\s*\??$/i, '')
+    .replace(/\?$/, '').trim();
+  if (cleaned.length > 5) topics.push(cleaned);
+  // Extract quoted phrases
+  const quoted = question.match(/"([^"]+)"/g);
+  if (quoted) for (const q of quoted) topics.push(q.replace(/"/g, ''));
+  // Extract multi-word noun phrases (adjacent non-stopwords of 3+ chars)
+  const words = question.split(/\s+/);
+  let phrase = [];
+  for (const w of words) {
+    const clean = w.replace(/[^a-zA-Z0-9-]/g, '');
+    if (clean.length >= 3 && !stopwords.has(clean.toLowerCase())) {
+      phrase.push(clean);
+    } else {
+      if (phrase.length >= 2) topics.push(phrase.join(' '));
+      phrase = [];
+    }
+  }
+  if (phrase.length >= 2) topics.push(phrase.join(' '));
+  return [...new Set(topics)];
+}
+
+// ── Query builders ──────────────────────────────────────────────────────
+function buildGdeltQueries(entities, pred, topics) {
+  const queries = [];
+  // Priority 1: Direct topic/claim queries (the actual question substance)
+  for (const topic of (topics || [])) {
+    queries.push(topic);
+    // Topic + main entity
+    if (!topic.toLowerCase().includes(entities[0].toLowerCase())) {
+      queries.push(`${entities[0]} ${topic}`);
+    }
+  }
+  // Priority 2: Cross-entity queries
+  for (let i = 0; i < entities.length && i < 4; i++) {
+    for (let j = i + 1; j < entities.length && j < 5; j++) {
+      queries.push(`${entities[i]} ${entities[j]}`);
+    }
+  }
+  // Priority 3: Entity + domain-specific topics
+  const domainTopics = ['sanctions', 'military', 'economic', 'war', 'conflict', 'energy', 'weapons', 'trade', 'losses', 'casualties', 'equipment', 'supply', 'defense', 'offensive'];
+  for (const ent of entities.slice(0, 3)) {
+    for (const topic of domainTopics) {
+      if (pred.title.toLowerCase().includes(topic) || pred.category.includes(topic)) {
+        queries.push(`${ent} ${topic}`);
+      }
+    }
+  }
+  // Priority 4: Entity-specific current events
+  for (const ent of entities) {
+    queries.push(ent);
+  }
+  // Deduplicate and limit
+  const seen = new Set();
+  return queries.filter(q => { if (seen.has(q)) return false; seen.add(q); return true; }).slice(0, 12);
+}
+
+function buildRssQueries(entities, pred, topics) {
+  const queries = [];
+  // Priority 1: Direct topic queries
+  for (const topic of (topics || [])) {
+    queries.push(topic);
+  }
+  // Cross-entity
+  for (let i = 0; i < entities.length && i < 3; i++) {
+    for (let j = i + 1; j < entities.length && j < 4; j++) {
+      queries.push(`${entities[i]} ${entities[j]}`);
+    }
+  }
+  // Each entity + category
+  for (const ent of entities.slice(0, 4)) {
+    queries.push(`${ent} ${pred.category}`);
+  }
+  // Entity + key terms from prediction title
+  const titleWords = pred.title.split(/\s+/).filter(w => w.length > 4).slice(0, 3);
+  for (const ent of entities.slice(0, 2)) {
+    if (titleWords.length) queries.push(`${ent} ${titleWords.join(' ')}`);
+  }
+  // Entity + topic combinations
+  for (const ent of entities.slice(0, 2)) {
+    for (const topic of (topics || []).slice(0, 2)) {
+      if (!topic.toLowerCase().includes(ent.toLowerCase())) {
+        queries.push(`${ent} ${topic}`);
+      }
+    }
+  }
+  const seen = new Set();
+  return queries.filter(q => { if (seen.has(q)) return false; seen.add(q); return true; }).slice(0, 12);
+}
+
+function buildWikiQueries(entities, pred, topics) {
+  const queries = [];
+  // Priority 1: Direct topic queries for background context
+  for (const topic of (topics || [])) {
+    queries.push(topic);
+  }
+  // Bilateral relations between all entity pairs
+  for (let i = 0; i < entities.length && i < 4; i++) {
+    for (let j = i + 1; j < entities.length && j < 5; j++) {
+      queries.push(`${entities[i]} ${entities[j]} relations`);
+      queries.push(`${entities[i]} ${entities[j]} ${pred.category}`);
+    }
+  }
+  // Each entity's current situation
+  for (const ent of entities) {
+    if (COUNTRIES.includes(ent)) {
+      queries.push(`${ent} foreign relations`);
+      queries.push(`${ent} ${pred.category}`);
+      queries.push(`${ent} sanctions`);
+      queries.push(`${ent} military`);
+    }
+  }
+  // Entity + topic combos
+  for (const ent of entities.slice(0, 2)) {
+    for (const topic of (topics || []).slice(0, 2)) {
+      queries.push(`${ent} ${topic}`);
+    }
+  }
+  // Specific topic deep dives
+  queries.push(`${pred.title}`);
+  const seen = new Set();
+  return queries.filter(q => { if (seen.has(q)) return false; seen.add(q); return true; }).slice(0, 15);
+}
+
+// ── Compile dossier into structured text ────────────────────────────────
+// Returns { text, sources } where sources is an array of { num, title, url, source, date, domain }
+function compileDossier(dossier, pred) {
+  const lines = [];
+  const sources = []; // Numbered source references
+  let factNum = 1;
+
+  if (dossier.graph.length > 0) {
+    lines.push('=== ENGRAM KNOWLEDGE GRAPH ===');
+    for (const g of dossier.graph) {
+      if (g.type === 'node') {
+        lines.push(`  [${factNum}] Node: ${g.label} (confidence: ${g.confidence.toFixed(2)})`);
+        sources.push({ num: factNum, title: `Engram: ${g.label}`, url: '', source: 'engram', date: '', domain: 'knowledge graph' });
+      } else {
+        lines.push(`  [${factNum}] Edge: ${g.from} --[${g.relationship}]--> ${g.to} (confidence: ${g.confidence.toFixed(2)})`);
+        sources.push({ num: factNum, title: `Engram: ${g.from} -> ${g.to}`, url: '', source: 'engram', date: '', domain: 'knowledge graph' });
+      }
+      factNum++;
+    }
+    lines.push('');
+  }
+
+  if (dossier.wiki.length > 0) {
+    lines.push('=== REFERENCE CONTEXT (Wikipedia + Web) ===');
+    for (const w of dossier.wiki) {
+      const src = w.source || 'Wikipedia';
+      lines.push(`  [${factNum}] [${src}] ${w.title}: ${w.text}`);
+      const wikiUrl = w.url || `https://en.wikipedia.org/wiki/${encodeURIComponent(w.title.replace(/ /g,'_'))}`;
+      sources.push({ num: factNum, title: w.title, url: wikiUrl, source: src, date: '', domain: src === 'DuckDuckGo' ? 'duckduckgo.com' : 'wikipedia.org' });
+      factNum++;
+    }
+    lines.push('');
+  }
+
+  if (dossier.news.length > 0) {
+    lines.push(`=== CURRENT NEWS (${dossier.news.length} articles, last 30 days) ===`);
+    // Sort by date, newest first
+    const sorted = [...dossier.news].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    for (const n of sorted.slice(0, 60)) {
+      lines.push(`  [${factNum}] [${n.source}] ${n.title} (${n.domain}, ${n.date || 'undated'})`);
+      sources.push({ num: factNum, title: n.title, url: n.url, source: n.source, date: n.date || '', domain: n.domain });
+      factNum++;
+    }
+    if (dossier.news.length > 60) {
+      lines.push(`  ... and ${dossier.news.length - 60} more articles omitted for brevity`);
+    }
+  }
+
+  return { text: lines.join('\n'), sources };
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────
+boot();
+</script>
+</body>
+</html>

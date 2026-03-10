@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Engram -- Geopolitical Intelligence Dashboard</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<style>
+:root {
+    --bg: #0a0e17;
+    --bg-card: #111827;
+    --bg-card-hover: #1a2332;
+    --border: #1e2d3d;
+    --text: #e2e8f0;
+    --text-dim: #8899aa;
+    --accent: #3b82f6;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --orange: #f97316;
+    --purple: #a855f7;
+    --cyan: #06b6d4;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+}
+
+.header {
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.header h1 span { color: var(--accent); }
+
+.header-status {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+}
+
+.status-dot.live { background: var(--green); animation: pulse 2s infinite; }
+.status-dot.offline { background: var(--red); }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.main {
+    display: grid;
+    grid-template-columns: 1fr 400px;
+    gap: 0;
+    height: calc(100vh - 56px);
+}
+
+/* --- Predictions panel --- */
+.predictions-panel {
+    padding: 20px;
+    overflow-y: auto;
+}
+
+.section-title {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.prediction-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.pred-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.pred-card:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--accent);
+}
+
+.pred-card.selected {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+}
+
+.pred-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 10px;
+}
+
+.pred-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    flex: 1;
+}
+
+.pred-category {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+}
+
+.cat-military { background: #3b1818; color: var(--red); }
+.cat-economic { background: #1a2e1a; color: var(--green); }
+.cat-hybrid_warfare { background: #2e2a1a; color: var(--yellow); }
+.cat-conflict { background: #1a1a2e; color: var(--purple); }
+
+.pred-prob {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.prob-value {
+    font-size: 28px;
+    font-weight: 700;
+    min-width: 70px;
+}
+
+.prob-bar-bg {
+    flex: 1;
+    height: 8px;
+    background: #1e293b;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.prob-bar {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.5s ease;
+}
+
+.pred-shift {
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.shift-up { color: var(--red); }
+.shift-down { color: var(--green); }
+.shift-neutral { color: var(--text-dim); }
+
+.pred-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 8px;
+}
+
+.evidence-count {
+    display: flex;
+    gap: 12px;
+    margin-top: 6px;
+    font-size: 11px;
+}
+
+.ev-for { color: var(--red); }
+.ev-against { color: var(--green); }
+
+/* --- History sparkline --- */
+.sparkline-container {
+    margin-top: 10px;
+    height: 30px;
+}
+
+.sparkline-container canvas {
+    width: 100%;
+    height: 30px;
+}
+
+/* --- Detail panel --- */
+.detail-panel {
+    background: var(--bg-card);
+    border-left: 1px solid var(--border);
+    padding: 20px;
+    overflow-y: auto;
+}
+
+.detail-title {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    color: var(--text);
+}
+
+.detail-hypothesis {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+
+.evidence-list {
+    margin-bottom: 20px;
+}
+
+.evidence-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid #1e293b;
+    font-size: 11px;
+}
+
+.evidence-item:last-child { border-bottom: none; }
+
+.ev-icon { width: 16px; text-align: center; }
+.ev-icon.support { color: var(--red); }
+.ev-icon.weaken { color: var(--green); }
+
+.ev-conf {
+    font-weight: 600;
+    min-width: 40px;
+    text-align: right;
+}
+
+.ev-desc {
+    color: var(--text-dim);
+    flex: 1;
+}
+
+.ev-source {
+    font-size: 10px;
+    color: #556677;
+}
+
+/* --- News feed --- */
+.news-feed {
+    margin-top: 20px;
+}
+
+.news-item {
+    padding: 8px 0;
+    border-bottom: 1px solid #1e293b;
+    font-size: 11px;
+}
+
+.news-item:last-child { border-bottom: none; }
+
+.news-title {
+    color: var(--text);
+    margin-bottom: 4px;
+}
+
+.news-meta {
+    color: var(--text-dim);
+    font-size: 10px;
+    display: flex;
+    gap: 12px;
+}
+
+.news-conf {
+    font-weight: 600;
+}
+
+/* --- Exchange rate widget --- */
+.exchange-widget {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.exchange-label {
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.exchange-value {
+    font-size: 20px;
+    font-weight: 700;
+}
+
+/* --- Graph stats --- */
+.graph-stats {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.stat-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    flex: 1;
+    text-align: center;
+}
+
+.stat-value {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.stat-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.empty-state {
+    color: var(--text-dim);
+    font-size: 12px;
+    text-align: center;
+    padding: 40px 20px;
+}
+
+/* --- History chart --- */
+.history-section {
+    margin-top: 24px;
+}
+
+#historyChart {
+    width: 100%;
+    height: 200px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+    <div class="header-left">
+        <h1><i class="fa-solid fa-brain"></i> <span>engram</span> // Geopolitical Intelligence</h1>
+    </div>
+    <div class="header-status">
+        <span><span class="status-dot" id="statusDot"></span><span id="statusText">Connecting...</span></span>
+        <span id="graphStats"></span>
+        <span id="lastUpdate"></span>
+        <span>Refresh: <span id="refreshInterval">--</span>s</span>
+    </div>
+</div>
+
+<div class="main">
+    <div class="predictions-panel">
+        <div class="graph-stats" id="statsBar"></div>
+
+        <div class="section-title">
+            <i class="fa-solid fa-chart-line"></i> Intelligence Assessments
+        </div>
+        <div class="prediction-grid" id="predGrid"></div>
+
+        <div class="section-title">
+            <i class="fa-solid fa-clock-rotate-left"></i> Prediction History
+        </div>
+        <div class="history-section">
+            <canvas id="historyChart"></canvas>
+        </div>
+    </div>
+
+    <div class="detail-panel" id="detailPanel">
+        <div class="empty-state">
+            <i class="fa-solid fa-crosshairs" style="font-size:24px;margin-bottom:12px;display:block;"></i>
+            Select a prediction to view evidence chain
+        </div>
+    </div>
+</div>
+
+<script>
+const API = 'http://127.0.0.1:3030';
+const REFRESH_INTERVAL = 15; // seconds
+const PREDICTIONS = [
+    'Prediction:BalticProvocation',
+    'Prediction:TurkeySanctionEvasion',
+    'Prediction:MoldovaDestabilization',
+    'Prediction:RubleInstability',
+    'Prediction:BRICSCurrency',
+    'Prediction:NKRussiaAxis',
+    'Prediction:FrozenConflict',
+    'Prediction:UkraineFrontlineFreeze',
+    'Prediction:UkraineFullRecovery',
+];
+
+let predictionHistory = {};  // label -> [{time, prob}]
+let previousProbs = {};      // label -> last known prob
+let selectedPred = null;
+
+// --- API ---
+async function apiFetch(path) {
+    try {
+        const r = await fetch(`${API}${path}`);
+        if (!r.ok) return null;
+        return await r.json();
+    } catch {
+        return null;
+    }
+}
+
+// --- Color helpers ---
+function probColor(p) {
+    if (p >= 0.65) return 'var(--red)';
+    if (p >= 0.50) return 'var(--orange)';
+    if (p >= 0.35) return 'var(--yellow)';
+    return 'var(--green)';
+}
+
+function catClass(cat) {
+    return `cat-${(cat || 'conflict').replace(/\s/g, '_')}`;
+}
+
+function shortName(label) {
+    return label.replace('Prediction:', '');
+}
+
+// --- Render predictions ---
+async function loadPredictions() {
+    const health = await apiFetch('/health');
+    const dot = document.getElementById('statusDot');
+    const text = document.getElementById('statusText');
+
+    if (!health) {
+        dot.className = 'status-dot offline';
+        text.textContent = 'Offline';
+        return;
+    }
+
+    dot.className = 'status-dot live';
+    text.textContent = 'Live';
+
+    // Stats
+    const st = await apiFetch('/stats');
+    if (st) {
+        document.getElementById('statsBar').innerHTML = `
+            <div class="stat-box"><div class="stat-value">${st.nodes || 0}</div><div class="stat-label">Nodes</div></div>
+            <div class="stat-box"><div class="stat-value">${st.edges || 0}</div><div class="stat-label">Edges</div></div>
+            <div class="stat-box"><div class="stat-value">${PREDICTIONS.length}</div><div class="stat-label">Predictions</div></div>
+        `;
+        document.getElementById('graphStats').textContent = `${st.nodes} nodes / ${st.edges} edges`;
+    }
+
+    const grid = document.getElementById('predGrid');
+    grid.innerHTML = '';
+
+    for (const label of PREDICTIONS) {
+        const info = await apiFetch(`/explain/${encodeURIComponent(label)}`);
+        if (!info || !info.entity) continue;
+
+        const prob = info.confidence || 0;
+        const props = info.properties || {};
+        const category = props.category || 'unknown';
+        const hypothesis = props.hypothesis || label;
+        const edgesTo = info.edges_to || [];
+
+        // Count evidence
+        const nFor = edgesTo.filter(e => e.relationship === 'supports').length;
+        const nAgainst = edgesTo.filter(e => e.relationship === 'weakens').length;
+
+        // Shift from previous
+        const prevProb = previousProbs[label];
+        const shift = prevProb !== undefined ? prob - prevProb : 0;
+        previousProbs[label] = prob;
+
+        // Find most recent news article driving this prediction
+        const recentNews = edgesTo
+            .filter(e => e.from && e.from.startsWith('News:'))
+            .slice(-1);
+        let shiftSourceHtml = '';
+        if (recentNews.length > 0 && Math.abs(shift) > 0.005) {
+            const newsLabel = recentNews[0].from;
+            const newsInfo = await apiFetch(`/explain/${encodeURIComponent(newsLabel)}`);
+            if (newsInfo && newsInfo.properties) {
+                const newsTitle = (newsInfo.properties.title || '').substring(0, 50);
+                const newsDomain = newsInfo.properties.domain || '';
+                const newsRel = recentNews[0].relationship;
+                const arrow = newsRel === 'supports' ? 'fa-arrow-trend-up' : 'fa-arrow-trend-down';
+                const arrowColor = newsRel === 'supports' ? 'var(--red)' : 'var(--green)';
+                shiftSourceHtml = `<div class="pred-meta" style="margin-top:6px;color:${arrowColor}"><i class="fa-solid ${arrow}"></i> ${newsTitle}... <span style="color:var(--text-dim)">(${newsDomain})</span></div>`;
+            }
+        }
+
+        // History
+        if (!predictionHistory[label]) predictionHistory[label] = [];
+        predictionHistory[label].push({ time: Date.now(), prob });
+        // Keep last 100
+        if (predictionHistory[label].length > 100) predictionHistory[label].shift();
+
+        const card = document.createElement('div');
+        card.className = `pred-card${selectedPred === label ? ' selected' : ''}`;
+        card.onclick = () => selectPrediction(label);
+
+        let shiftHtml = '';
+        if (shift > 0.005) {
+            shiftHtml = `<span class="pred-shift shift-up"><i class="fa-solid fa-arrow-up"></i> +${(shift*100).toFixed(1)}%</span>`;
+        } else if (shift < -0.005) {
+            shiftHtml = `<span class="pred-shift shift-down"><i class="fa-solid fa-arrow-down"></i> ${(shift*100).toFixed(1)}%</span>`;
+        } else {
+            shiftHtml = `<span class="pred-shift shift-neutral"><i class="fa-solid fa-minus"></i> stable</span>`;
+        }
+
+        card.innerHTML = `
+            <div class="pred-header">
+                <div class="pred-name">${shortName(label)}</div>
+                <span class="pred-category ${catClass(category)}">${category}</span>
+            </div>
+            <div class="pred-prob">
+                <div class="prob-value" style="color:${probColor(prob)}">${Math.round(prob*100)}%</div>
+                <div class="prob-bar-bg">
+                    <div class="prob-bar" style="width:${prob*100}%;background:${probColor(prob)}"></div>
+                </div>
+            </div>
+            ${shiftHtml}
+            <div class="evidence-count">
+                <span class="ev-for"><i class="fa-solid fa-arrow-up"></i> ${nFor} supporting</span>
+                <span class="ev-against"><i class="fa-solid fa-arrow-down"></i> ${nAgainst} contradicting</span>
+            </div>
+            <div class="pred-meta">${hypothesis.substring(0, 80)}${hypothesis.length > 80 ? '...' : ''}</div>
+            ${shiftSourceHtml}
+            <div class="sparkline-container"><canvas id="spark-${shortName(label)}"></canvas></div>
+        `;
+
+        grid.appendChild(card);
+    }
+
+    // Draw sparklines
+    for (const label of PREDICTIONS) {
+        const hist = predictionHistory[label] || [];
+        if (hist.length < 2) continue;
+        const canvasId = `spark-${shortName(label)}`;
+        const canvas = document.getElementById(canvasId);
+        if (!canvas) continue;
+        drawSparkline(canvas, hist.map(h => h.prob));
+    }
+
+    // Update selected detail
+    if (selectedPred) selectPrediction(selectedPred);
+
+    // Draw history chart
+    drawHistoryChart();
+
+    document.getElementById('lastUpdate').textContent =
+        `Updated: ${new Date().toLocaleTimeString()}`;
+    document.getElementById('refreshInterval').textContent = REFRESH_INTERVAL;
+}
+
+function drawSparkline(canvas, values) {
+    const ctx = canvas.getContext('2d');
+    const w = canvas.parentElement.clientWidth;
+    const h = 30;
+    canvas.width = w;
+    canvas.height = h;
+
+    ctx.clearRect(0, 0, w, h);
+
+    const min = Math.min(...values) - 0.05;
+    const max = Math.max(...values) + 0.05;
+    const range = max - min || 0.1;
+
+    ctx.beginPath();
+    ctx.strokeStyle = '#3b82f6';
+    ctx.lineWidth = 1.5;
+
+    values.forEach((v, i) => {
+        const x = (i / (values.length - 1)) * w;
+        const y = h - ((v - min) / range) * h;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Endpoint dot
+    const lastX = w;
+    const lastY = h - ((values[values.length - 1] - min) / range) * h;
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
+    ctx.fillStyle = probColor(values[values.length - 1]);
+    ctx.fill();
+}
+
+// --- Detail panel ---
+async function selectPrediction(label) {
+    selectedPred = label;
+
+    // Update card selection
+    document.querySelectorAll('.pred-card').forEach(c => c.classList.remove('selected'));
+    const cards = document.querySelectorAll('.pred-card');
+    const idx = PREDICTIONS.indexOf(label);
+    if (idx >= 0 && cards[idx]) cards[idx].classList.add('selected');
+
+    const info = await apiFetch(`/explain/${encodeURIComponent(label)}`);
+    const panel = document.getElementById('detailPanel');
+
+    if (!info || !info.entity) {
+        panel.innerHTML = '<div class="empty-state">Could not load prediction details</div>';
+        return;
+    }
+
+    const prob = info.confidence || 0;
+    const props = info.properties || {};
+    const edgesTo = info.edges_to || [];
+    const category = props.category || 'unknown';
+
+    // Separate and sort evidence
+    const supporting = edgesTo
+        .filter(e => e.relationship === 'supports')
+        .sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+    const weakening = edgesTo
+        .filter(e => e.relationship === 'weakens')
+        .sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+
+    let html = `
+        <div class="detail-title">
+            <span class="pred-category ${catClass(category)}" style="margin-right:8px">${category}</span>
+            ${shortName(label)}
+        </div>
+        <div class="pred-prob" style="margin-bottom:16px">
+            <div class="prob-value" style="color:${probColor(prob)};font-size:36px">${Math.round(prob*100)}%</div>
+            <div class="prob-bar-bg" style="height:12px">
+                <div class="prob-bar" style="width:${prob*100}%;background:${probColor(prob)};height:12px"></div>
+            </div>
+        </div>
+        <div class="detail-hypothesis">${props.hypothesis || ''}</div>
+        <div class="pred-meta">Timeframe: ${props.timeframe || '?'} | Methodology: Bayesian evidence aggregation</div>
+    `;
+
+    // Supporting evidence
+    html += `
+        <div class="section-title" style="margin-top:20px">
+            <i class="fa-solid fa-arrow-up" style="color:var(--red)"></i>
+            Supporting Evidence (${supporting.length})
+        </div>
+        <div class="evidence-list">
+    `;
+
+    for (const e of supporting.slice(0, 20)) {
+        const from = e.from || '';
+        const conf = e.confidence || 0;
+        // Try to get the evidence node info for description
+        const fromInfo = await apiFetch(`/explain/${encodeURIComponent(from)}`);
+        const desc = fromInfo?.properties?.description || fromInfo?.properties?.title || from;
+        const source = fromInfo?.properties?.source || '';
+
+        html += `
+            <div class="evidence-item">
+                <span class="ev-icon support"><i class="fa-solid fa-plus"></i></span>
+                <span class="ev-conf" style="color:${probColor(conf)}">${(conf*100).toFixed(0)}%</span>
+                <span class="ev-desc">${desc.substring(0, 70)}${desc.length > 70 ? '...' : ''}</span>
+            </div>
+        `;
+    }
+    if (supporting.length > 20) {
+        html += `<div class="evidence-item"><span class="ev-desc">... and ${supporting.length - 20} more</span></div>`;
+    }
+    html += '</div>';
+
+    // Weakening evidence
+    html += `
+        <div class="section-title">
+            <i class="fa-solid fa-arrow-down" style="color:var(--green)"></i>
+            Contradicting Evidence (${weakening.length})
+        </div>
+        <div class="evidence-list">
+    `;
+
+    for (const e of weakening.slice(0, 20)) {
+        const from = e.from || '';
+        const conf = e.confidence || 0;
+        const fromInfo = await apiFetch(`/explain/${encodeURIComponent(from)}`);
+        const desc = fromInfo?.properties?.description || fromInfo?.properties?.title || from;
+
+        html += `
+            <div class="evidence-item">
+                <span class="ev-icon weaken"><i class="fa-solid fa-minus"></i></span>
+                <span class="ev-conf" style="color:${probColor(conf)}">${(conf*100).toFixed(0)}%</span>
+                <span class="ev-desc">${desc.substring(0, 70)}${desc.length > 70 ? '...' : ''}</span>
+            </div>
+        `;
+    }
+    if (weakening.length > 20) {
+        html += `<div class="evidence-item"><span class="ev-desc">... and ${weakening.length - 20} more</span></div>`;
+    }
+    html += '</div>';
+
+    // Recent news articles that linked to this prediction
+    const newsArticles = [];
+    for (const e of [...supporting, ...weakening]) {
+        const from = e.from || '';
+        if (from.startsWith('News:')) {
+            const ni = await apiFetch(`/explain/${encodeURIComponent(from)}`);
+            if (ni && ni.properties) {
+                newsArticles.push({
+                    title: ni.properties.title || from,
+                    domain: ni.properties.domain || '?',
+                    date: ni.properties.date || '',
+                    url: ni.properties.url || '',
+                    confidence: e.confidence || 0,
+                    relationship: e.relationship,
+                    topics: ni.properties.topics || '',
+                });
+            }
+        }
+    }
+
+    if (newsArticles.length > 0) {
+        html += `
+            <div class="section-title" style="margin-top:20px">
+                <i class="fa-solid fa-newspaper"></i>
+                News Driving This Prediction (${newsArticles.length})
+            </div>
+            <div class="news-feed">
+        `;
+
+        // Sort by date descending
+        newsArticles.sort((a, b) => b.date.localeCompare(a.date));
+
+        for (const art of newsArticles.slice(0, 15)) {
+            const arrow = art.relationship === 'supports'
+                ? '<i class="fa-solid fa-arrow-trend-up" style="color:var(--red)"></i> pushes UP'
+                : '<i class="fa-solid fa-arrow-trend-down" style="color:var(--green)"></i> pushes DOWN';
+            const confColor = probColor(art.confidence);
+
+            html += `
+                <div class="news-item">
+                    <div class="news-title">
+                        ${art.url ? `<a href="${art.url}" target="_blank" style="color:var(--text);text-decoration:none">${art.title.substring(0, 80)}</a>` : art.title.substring(0, 80)}
+                    </div>
+                    <div class="news-meta">
+                        <span>${art.date}</span>
+                        <span>${art.domain}</span>
+                        <span class="news-conf" style="color:${confColor}">${Math.round(art.confidence*100)}% conf</span>
+                        <span>${arrow}</span>
+                    </div>
+                </div>
+            `;
+        }
+        if (newsArticles.length > 15) {
+            html += `<div class="news-item"><span class="news-title" style="color:var(--text-dim)">... and ${newsArticles.length - 15} more articles</span></div>`;
+        }
+        html += '</div>';
+    }
+
+    panel.innerHTML = html;
+}
+
+// --- History chart ---
+function drawHistoryChart() {
+    const canvas = document.getElementById('historyChart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.parentElement.clientWidth;
+    const h = 200;
+    canvas.width = w;
+    canvas.height = h;
+
+    ctx.fillStyle = '#111827';
+    ctx.fillRect(0, 0, w, h);
+
+    // Grid lines
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 0.5;
+    for (let p = 0; p <= 100; p += 20) {
+        const y = h - (p / 100) * h;
+        ctx.beginPath();
+        ctx.moveTo(40, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+        ctx.fillStyle = '#556677';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(`${p}%`, 35, y + 3);
+    }
+
+    const colors = ['#ef4444', '#3b82f6', '#eab308', '#22c55e', '#06b6d4',
+                     '#f97316', '#a855f7', '#ec4899', '#14b8a6'];
+
+    // Find max data points
+    let maxLen = 0;
+    for (const label of PREDICTIONS) {
+        const hist = predictionHistory[label] || [];
+        maxLen = Math.max(maxLen, hist.length);
+    }
+    if (maxLen < 2) return;
+
+    PREDICTIONS.forEach((label, idx) => {
+        const hist = predictionHistory[label] || [];
+        if (hist.length < 2) return;
+
+        ctx.beginPath();
+        ctx.strokeStyle = colors[idx % colors.length];
+        ctx.lineWidth = 1.5;
+
+        hist.forEach((h, i) => {
+            const x = 40 + (i / (maxLen - 1)) * (w - 50);
+            const y = canvas.height - h.prob * canvas.height;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+
+        // Label at last point
+        const last = hist[hist.length - 1];
+        const lx = 40 + ((hist.length - 1) / (maxLen - 1)) * (w - 50);
+        const ly = canvas.height - last.prob * canvas.height;
+        ctx.fillStyle = colors[idx % colors.length];
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(shortName(label).substring(0, 12), lx + 5, ly + 3);
+    });
+}
+
+// --- Auto-refresh ---
+setInterval(loadPredictions, REFRESH_INTERVAL * 1000);
+loadPredictions();
+</script>
+</body>
+</html>

@@ -11,4 +11,10 @@
 *.jsonld
 __pycache__/
 *.log
+*.o
 e5-small-onnx/
+crates/engram-ui/target/
+crates/engram-ui/Cargo.lock
+crates/engram-intel/target/
+crates/engram-intel/Cargo.lock
+frontend/dist/
