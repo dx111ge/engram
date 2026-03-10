@@ -521,6 +521,293 @@ mod stream_service {
     }
 }
 
+// ── Assessment gRPC service (v1.1.0) ──
+
+#[cfg(all(feature = "grpc", feature = "assess"))]
+mod assess_service {
+    use super::proto;
+    use super::proto::engram_assess_service_server::EngramAssessService;
+    use crate::state::AppState;
+    use engram_core::graph::Provenance;
+    use tonic::{Request, Response, Status};
+
+    pub struct EngramAssessGrpc {
+        pub state: AppState,
+    }
+
+    fn internal(e: impl std::fmt::Display) -> Status {
+        Status::internal(e.to_string())
+    }
+
+    #[tonic::async_trait]
+    impl EngramAssessService for EngramAssessGrpc {
+        async fn create_assessment(
+            &self,
+            request: Request<proto::CreateAssessmentRequest>,
+        ) -> Result<Response<proto::AssessmentResponse>, Status> {
+            let req = request.into_inner();
+            let label = format!("Assessment:{}", req.title.to_lowercase().replace(' ', "-"));
+            let initial_prob = if req.initial_probability > 0.0 { req.initial_probability } else { 0.50 };
+
+            // Create graph node
+            {
+                let mut g = self.state.graph.write().map_err(|_| internal("lock"))?;
+                let prov = Provenance::user("grpc");
+                let _ = g.store_with_confidence(&label, initial_prob, &prov).map_err(internal)?;
+                let _ = g.set_node_type(&label, "assessment");
+                let _ = g.set_property(&label, "title", &req.title);
+                let _ = g.set_property(&label, "category", &req.category);
+                let _ = g.set_property(&label, "status", "active");
+                let _ = g.set_property(&label, "current_probability", &initial_prob.to_string());
+                if !req.description.is_empty() {
+                    let _ = g.set_property(&label, "description", &req.description);
+                }
+                if !req.timeframe.is_empty() {
+                    let _ = g.set_property(&label, "timeframe", &req.timeframe);
+                }
+
+                // Create watch edges
+                for entity in &req.watches {
+                    let _ = g.relate_with_confidence(&label, entity, "watches", 1.0, &prov);
+                }
+            }
+
+            // Create sidecar record
+            {
+                let mut store = self.state.assessments.write().map_err(|_| internal("lock"))?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+
+                let record = engram_assess::AssessmentRecord {
+                    label: label.clone(),
+                    node_id: 0,
+                    history: vec![engram_assess::ScorePoint {
+                        timestamp: now,
+                        probability: initial_prob,
+                        shift: 0.0,
+                        trigger: engram_assess::ScoreTrigger::Created,
+                        reason: "Assessment created".to_string(),
+                        path: None,
+                    }],
+                    evidence_for: vec![],
+                    evidence_against: vec![],
+                };
+                store.insert(record);
+            }
+
+            self.state.mark_dirty();
+
+            Ok(Response::new(proto::AssessmentResponse {
+                label,
+                probability: initial_prob,
+                status: "active".to_string(),
+            }))
+        }
+
+        async fn get_assessment(
+            &self,
+            request: Request<proto::GetAssessmentRequest>,
+        ) -> Result<Response<proto::AssessmentDetailResponse>, Status> {
+            let label = request.into_inner().label;
+
+            let g = self.state.graph.read().map_err(|_| internal("lock"))?;
+            let props = g.get_properties(&label).map_err(internal)?.unwrap_or_default();
+
+            // Get watches
+            let watches: Vec<String> = g.edges_from(&label).unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.relationship == "watches")
+                .map(|e| e.to)
+                .collect();
+            drop(g);
+
+            let store = self.state.assessments.read().map_err(|_| internal("lock"))?;
+            let record = store.get(&label)
+                .ok_or_else(|| Status::not_found(format!("assessment not found: {}", label)))?;
+
+            let history: Vec<proto::ScorePointMessage> = record.history.iter().map(|p| {
+                proto::ScorePointMessage {
+                    timestamp: p.timestamp,
+                    probability: p.probability,
+                    shift: p.shift,
+                    trigger: format!("{:?}", p.trigger),
+                    reason: p.reason.clone(),
+                }
+            }).collect();
+
+            Ok(Response::new(proto::AssessmentDetailResponse {
+                label: label.clone(),
+                title: props.get("title").cloned().unwrap_or_default(),
+                category: props.get("category").cloned().unwrap_or_default(),
+                status: props.get("status").cloned().unwrap_or_else(|| "active".to_string()),
+                description: props.get("description").cloned().unwrap_or_default(),
+                timeframe: props.get("timeframe").cloned().unwrap_or_default(),
+                current_probability: record.history.last().map(|p| p.probability).unwrap_or(0.5),
+                last_evaluated: record.history.last().map(|p| p.timestamp).unwrap_or(0),
+                history,
+                watches,
+            }))
+        }
+
+        async fn list_assessments(
+            &self,
+            request: Request<proto::ListAssessmentsRequest>,
+        ) -> Result<Response<proto::ListAssessmentsResponse>, Status> {
+            let req = request.into_inner();
+            let g = self.state.graph.read().map_err(|_| internal("lock"))?;
+            let store = self.state.assessments.read().map_err(|_| internal("lock"))?;
+
+            let mut assessments = Vec::new();
+            for record in store.all() {
+                let props = g.get_properties(&record.label).ok().flatten().unwrap_or_default();
+                let category = props.get("category").cloned().unwrap_or_default();
+                let status = props.get("status").cloned().unwrap_or_else(|| "active".to_string());
+
+                if !req.category.is_empty() && category != req.category {
+                    continue;
+                }
+                if !req.status.is_empty() && status != req.status {
+                    continue;
+                }
+
+                let watch_count = g.edges_from(&record.label).unwrap_or_default()
+                    .iter().filter(|e| e.relationship == "watches").count() as u32;
+
+                assessments.push(proto::AssessmentSummaryMessage {
+                    label: record.label.clone(),
+                    title: props.get("title").cloned().unwrap_or_default(),
+                    category,
+                    status,
+                    current_probability: record.history.last().map(|p| p.probability).unwrap_or(0.5),
+                    last_evaluated: record.history.last().map(|p| p.timestamp).unwrap_or(0),
+                    evidence_count: (record.evidence_for.len() + record.evidence_against.len()) as u32,
+                    watch_count,
+                    last_shift: record.history.last().map(|p| p.shift).unwrap_or(0.0),
+                });
+            }
+
+            Ok(Response::new(proto::ListAssessmentsResponse { assessments }))
+        }
+
+        async fn evaluate_assessment(
+            &self,
+            request: Request<proto::EvaluateAssessmentRequest>,
+        ) -> Result<Response<proto::EvaluationResponse>, Status> {
+            let label = request.into_inner().label;
+
+            let mut store = self.state.assessments.write().map_err(|_| internal("lock"))?;
+            let record = store.get_mut(&label)
+                .ok_or_else(|| Status::not_found(format!("assessment not found: {}", label)))?;
+
+            let old_prob = record.history.last().map(|p| p.probability).unwrap_or(0.5);
+            let point = engram_assess::evaluate(record);
+
+            Ok(Response::new(proto::EvaluationResponse {
+                label,
+                old_probability: old_prob,
+                new_probability: point.probability,
+                shift: point.shift,
+            }))
+        }
+
+        async fn add_evidence(
+            &self,
+            request: Request<proto::AddEvidenceRequest>,
+        ) -> Result<Response<proto::EvidenceResponse>, Status> {
+            let req = request.into_inner();
+            let supports = req.direction != "contradicts";
+
+            let mut store = self.state.assessments.write().map_err(|_| internal("lock"))?;
+            let record = store.get_mut(&req.assessment_label)
+                .ok_or_else(|| Status::not_found(format!("assessment not found: {}", req.assessment_label)))?;
+
+            let point = engram_assess::add_evidence(
+                record,
+                req.confidence,
+                supports,
+                engram_assess::ScoreTrigger::Manual,
+                format!("gRPC evidence: {}", req.node_label),
+                None,
+            );
+
+            Ok(Response::new(proto::EvidenceResponse {
+                added: true,
+                new_probability: point.probability,
+            }))
+        }
+
+        async fn add_watch(
+            &self,
+            request: Request<proto::AddWatchRequest>,
+        ) -> Result<Response<proto::WatchResponse>, Status> {
+            let req = request.into_inner();
+            let mut g = self.state.graph.write().map_err(|_| internal("lock"))?;
+            let prov = Provenance::user("grpc");
+
+            g.relate_with_confidence(&req.assessment_label, &req.entity_label, "watches", 1.0, &prov)
+                .map_err(internal)?;
+
+            drop(g);
+            self.state.mark_dirty();
+
+            Ok(Response::new(proto::WatchResponse { added: true }))
+        }
+
+        type AssessmentStreamStream = std::pin::Pin<Box<dyn futures::Stream<Item = Result<proto::ScoreUpdate, Status>> + Send>>;
+
+        async fn assessment_stream(
+            &self,
+            request: Request<proto::AssessmentStreamRequest>,
+        ) -> Result<Response<Self::AssessmentStreamStream>, Status> {
+            use tokio_stream::StreamExt;
+            use tokio_stream::wrappers::BroadcastStream;
+
+            let labels = request.into_inner().labels;
+            let rx = self.state.event_bus.subscribe();
+
+            let stream = BroadcastStream::new(rx)
+                .filter_map(move |result| {
+                    match result {
+                        Ok(engram_core::events::GraphEvent::PropertyChanged { label, key, value, .. }) => {
+                            if key.as_ref() != "current_probability" {
+                                return None;
+                            }
+                            if !labels.is_empty() && !labels.iter().any(|l| l == label.as_ref()) {
+                                return None;
+                            }
+
+                            let (prob, shift) = if let Some(shift_str) = value.split('|').nth(1) {
+                                let prob = value.split('|').next().unwrap_or("0.5").parse().unwrap_or(0.5);
+                                let shift = shift_str.parse().unwrap_or(0.0);
+                                (prob, shift)
+                            } else {
+                                (value.parse().unwrap_or(0.5), 0.0)
+                            };
+
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+
+                            Some(Ok(proto::ScoreUpdate {
+                                label: label.to_string(),
+                                probability: prob,
+                                shift,
+                                trigger: "graph_propagation".to_string(),
+                                timestamp,
+                            }))
+                        }
+                        _ => None,
+                    }
+                });
+
+            Ok(Response::new(Box::pin(stream)))
+        }
+    }
+}
+
 /// Start the real gRPC server (protobuf binary, tonic).
 #[cfg(feature = "grpc")]
 pub async fn serve_grpc(state: crate::state::AppState, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -528,15 +815,22 @@ pub async fn serve_grpc(state: crate::state::AppState, addr: &str) -> Result<(),
     use proto::engram_stream_service_server::EngramStreamServiceServer;
 
     let svc = service::EngramGrpc { state: state.clone() };
-    let stream_svc = stream_service::EngramStreamGrpc { state };
+    let stream_svc = stream_service::EngramStreamGrpc { state: state.clone() };
     let addr = addr.parse().map_err(|e| format!("invalid gRPC address: {e}"))?;
 
     tracing::info!("engram gRPC service (tonic) listening on {}", addr);
-    tonic::transport::Server::builder()
+    let mut builder = tonic::transport::Server::builder()
         .add_service(EngramServiceServer::new(svc))
-        .add_service(EngramStreamServiceServer::new(stream_svc))
-        .serve(addr)
-        .await?;
+        .add_service(EngramStreamServiceServer::new(stream_svc));
+
+    #[cfg(feature = "assess")]
+    {
+        use proto::engram_assess_service_server::EngramAssessServiceServer;
+        let assess_svc = assess_service::EngramAssessGrpc { state };
+        builder = builder.add_service(EngramAssessServiceServer::new(assess_svc));
+    }
+
+    builder.serve(addr).await?;
     Ok(())
 }
 

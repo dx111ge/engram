@@ -28,6 +28,7 @@ pub fn route_task(
         "analyze-gaps" => handle_analyze_gaps(task_id, &text, graph),
         "federated-search" => handle_federated_search(task_id, &text, graph),
         "suggest-investigations" => handle_suggest_investigations(task_id, &text, graph),
+        "assess-knowledge" => handle_assess(task_id, &request.message, graph),
         other => TaskResponse::failed(task_id, &format!("Unknown skill: {other}")),
     }
 }
@@ -358,6 +359,52 @@ fn handle_suggest_investigations(task_id: &str, text: &str, graph: &Arc<RwLock<G
         }
         Err(e) => TaskResponse::failed(task_id, &e.to_string()),
     }
+}
+
+/// Assessment & hypothesis tracking — create, evaluate, and query assessments.
+fn handle_assess(task_id: &str, message: &TaskMessage, graph: &Arc<RwLock<Graph>>) -> TaskResponse {
+    let text = message.text();
+    let g = match graph.read() {
+        Ok(g) => g,
+        Err(_) => return TaskResponse::failed(task_id, "graph read lock poisoned"),
+    };
+
+    let lower = text.to_lowercase();
+
+    // Try to find assessment nodes via search
+    let query = if lower.contains("assess") || lower.contains("predict") || lower.contains("hypothesis") {
+        "Assessment:"
+    } else {
+        &text
+    };
+
+    let results = g.search(query, 20).unwrap_or_default();
+    let assessments: Vec<_> = results.iter()
+        .filter(|r| r.label.starts_with("Assessment:"))
+        .collect();
+
+    if lower.starts_with("create") || lower.starts_with("new") {
+        return TaskResponse::completed(task_id, vec![
+            Artifact::json(serde_json::json!({
+                "action": "assess_create",
+                "hint": "Use POST /assessments to create. Provide title, watches, and initial_probability.",
+                "query": text,
+            })),
+        ]);
+    }
+
+    TaskResponse::completed(task_id, vec![
+        Artifact::json(serde_json::json!({
+            "action": "assess_list",
+            "query": text,
+            "assessments": assessments.iter().map(|r| serde_json::json!({
+                "label": r.label,
+                "confidence": r.confidence,
+                "score": r.score,
+            })).collect::<Vec<_>>(),
+            "total": assessments.len(),
+        })),
+    ])
 }
 
 /// Analyze knowledge gaps — uses engram-reason to detect black areas.

@@ -312,6 +312,80 @@ Returns:
 {"loaded": 1, "rule_ids": ["high-severity-alert"]}
 ```
 
+### engram_assess_create
+
+Create an assessment (hypothesis) with watched entities and initial probability.
+
+Parameters:
+- `title` (required) -- assessment title/hypothesis
+- `category` -- category label (financial, security, geopolitical, ...)
+- `description` -- detailed description
+- `watches` -- array of entity labels to watch
+- `initial_probability` -- starting probability (0.05-0.95, default: 0.50)
+
+Example call:
+```json
+{
+  "name": "engram_assess_create",
+  "arguments": {
+    "title": "NVIDIA stock > $200 by Q3 2026",
+    "category": "financial",
+    "watches": ["NVIDIA", "GPU market"],
+    "initial_probability": 0.50
+  }
+}
+```
+
+Returns:
+```json
+{"label": "Assessment:nvidia-stock-gt-200", "probability": 0.50, "watches": 2}
+```
+
+### engram_assess_list
+
+List assessments with optional category and status filters.
+
+Parameters:
+- `category` -- filter by category
+- `status` -- filter by status (active, paused, archived, resolved)
+
+### engram_assess_get
+
+Get full assessment detail including history, evidence, and watches.
+
+Parameters:
+- `label` (required) -- assessment label (e.g., "Assessment:nvidia-stock-gt-200")
+
+### engram_assess_evaluate
+
+Trigger manual re-evaluation of an assessment. Recalculates probability from all current evidence.
+
+Parameters:
+- `label` (required) -- assessment label
+
+Returns:
+```json
+{"label": "Assessment:nvidia-stock-gt-200", "old_probability": 0.50, "new_probability": 0.62, "shift": 0.12}
+```
+
+### engram_assess_evidence
+
+Add evidence to an assessment (supporting or contradicting).
+
+Parameters:
+- `label` (required) -- assessment label
+- `node_label` (required) -- entity label to add as evidence
+- `direction` (required) -- `"supports"` or `"contradicts"`
+
+### engram_assess_watch
+
+Add or remove a watched entity from an assessment.
+
+Parameters:
+- `label` (required) -- assessment label
+- `entity_label` (required) -- entity to watch
+- `action` -- `"add"` (default) or `"remove"`
+
 ## Available Resources
 
 ### engram://stats

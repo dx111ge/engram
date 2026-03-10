@@ -203,6 +203,79 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "engram_assess_create",
+                "description": "Create a new assessment (hypothesis) to track probability over time with evidence-based scoring",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Hypothesis title (e.g. 'NVIDIA stock > $200 by Q3 2026')" },
+                        "category": { "type": "string", "description": "Category: financial, geopolitical, technical, military, social, other" },
+                        "timeframe": { "type": "string", "description": "Time horizon (e.g. 'Q3 2026')" },
+                        "initial_probability": { "type": "number", "description": "Starting probability (0.05-0.95, default 0.50)" },
+                        "watches": { "type": "array", "items": { "type": "string" }, "description": "Entity labels to watch for automatic re-evaluation" }
+                    },
+                    "required": ["title"]
+                }
+            },
+            {
+                "name": "engram_assess_list",
+                "description": "List assessments with optional filters by category and status",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "category": { "type": "string", "description": "Filter by category" },
+                        "status": { "type": "string", "description": "Filter by status: active, paused, archived, resolved" }
+                    }
+                }
+            },
+            {
+                "name": "engram_assess_get",
+                "description": "Get full assessment detail including score history, evidence, and watched entities",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "label": { "type": "string", "description": "Assessment label" }
+                    },
+                    "required": ["label"]
+                }
+            },
+            {
+                "name": "engram_assess_evaluate",
+                "description": "Trigger manual re-evaluation of an assessment's probability",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "label": { "type": "string", "description": "Assessment label to evaluate" }
+                    },
+                    "required": ["label"]
+                }
+            },
+            {
+                "name": "engram_assess_evidence",
+                "description": "Add evidence to an assessment (supporting or contradicting)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "label": { "type": "string", "description": "Assessment label" },
+                        "node_label": { "type": "string", "description": "Evidence entity label" },
+                        "direction": { "type": "string", "description": "'supports' or 'contradicts'" }
+                    },
+                    "required": ["label", "node_label", "direction"]
+                }
+            },
+            {
+                "name": "engram_assess_watch",
+                "description": "Add or list watched entities for an assessment",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "label": { "type": "string", "description": "Assessment label" },
+                        "entity_label": { "type": "string", "description": "Entity to watch (omit to list current watches)" }
+                    },
+                    "required": ["label"]
+                }
+            },
+            {
                 "name": "engram_create_rule",
                 "description": "Create an action engine rule that triggers on graph events. Restricted tool — requires opt-in.",
                 "inputSchema": {
@@ -539,6 +612,178 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
                 "effect": effect,
                 "toml_preview": rule_toml
             }))
+        }
+
+        #[cfg(feature = "assess")]
+        "engram_assess_create" => {
+            let title = args["title"].as_str().ok_or("missing title")?;
+            let category = args.get("category").and_then(|v| v.as_str()).map(String::from);
+            let timeframe = args.get("timeframe").and_then(|v| v.as_str()).map(String::from);
+            let initial_prob = args.get("initial_probability").and_then(|v| v.as_f64()).map(|v| v as f32);
+            let watches: Vec<String> = args.get("watches")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+
+            let label = format!("Assessment:{}", title.to_lowercase()
+                .replace(' ', "-")
+                .replace(|c: char| !c.is_alphanumeric() && c != '-', ""));
+
+            let prob = initial_prob.unwrap_or(0.50).clamp(0.05, 0.95);
+            let prov = Provenance::user("mcp");
+
+            let mut g = state.graph.write().map_err(|_| "graph write lock poisoned".to_string())?;
+            let slot = g.store_with_confidence(&label, prob, &prov).map_err(|e| e.to_string())?;
+            let _ = g.set_node_type(&label, "assessment");
+            let _ = g.set_property(&label, "title", title);
+            if let Some(ref cat) = category { let _ = g.set_property(&label, "category", cat); }
+            if let Some(ref tf) = timeframe { let _ = g.set_property(&label, "timeframe", tf); }
+            let _ = g.set_property(&label, "status", "active");
+            for entity in &watches { let _ = g.relate(&label, entity, "watches", &prov); }
+            drop(g);
+            state.mark_dirty();
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+
+            let record = engram_assess::AssessmentRecord {
+                label: label.clone(),
+                node_id: slot,
+                history: vec![engram_assess::ScorePoint {
+                    timestamp: now,
+                    probability: prob,
+                    shift: 0.0,
+                    trigger: engram_assess::ScoreTrigger::Created,
+                    reason: "Created via MCP".to_string(),
+                    path: None,
+                }],
+                evidence_for: vec![],
+                evidence_against: vec![],
+            };
+            state.assessments.write().map_err(|_| "assessment store lock".to_string())?.insert(record);
+
+            Ok(serde_json::json!({ "label": label, "probability": prob, "watches": watches }))
+        }
+
+        #[cfg(feature = "assess")]
+        "engram_assess_list" => {
+            let store = state.assessments.read().map_err(|_| "assessment store lock".to_string())?;
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
+            let cat_filter = args.get("category").and_then(|v| v.as_str());
+            let status_filter = args.get("status").and_then(|v| v.as_str());
+
+            let assessments: Vec<Value> = store.all().iter().filter_map(|r| {
+                let props = g.get_properties(&r.label).ok().flatten().unwrap_or_default();
+                let cat = props.get("category").map(|s| s.as_str()).unwrap_or("");
+                let status = props.get("status").map(|s| s.as_str()).unwrap_or("active");
+                if let Some(cf) = cat_filter { if cat != cf { return None; } }
+                if let Some(sf) = status_filter { if status != sf { return None; } }
+                Some(serde_json::json!({
+                    "label": r.label,
+                    "title": props.get("title").cloned().unwrap_or_else(|| r.label.clone()),
+                    "category": cat,
+                    "status": status,
+                    "probability": engram_assess::engine::recalculate_probability(r),
+                    "evidence_count": r.evidence_for.len() + r.evidence_against.len(),
+                }))
+            }).collect();
+
+            Ok(serde_json::json!({ "assessments": assessments, "total": assessments.len() }))
+        }
+
+        #[cfg(feature = "assess")]
+        "engram_assess_get" => {
+            let label = args["label"].as_str().ok_or("missing label")?;
+            let store = state.assessments.read().map_err(|_| "assessment store lock".to_string())?;
+            let record = store.get(label).ok_or_else(|| format!("assessment not found: {label}"))?;
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
+            let props = g.get_properties(label).ok().flatten().unwrap_or_default();
+            let watches: Vec<String> = g.edges_from(label).unwrap_or_default().iter()
+                .filter(|e| e.relationship == "watches").map(|e| e.to.clone()).collect();
+
+            Ok(serde_json::json!({
+                "label": record.label,
+                "title": props.get("title").cloned().unwrap_or_default(),
+                "probability": engram_assess::engine::recalculate_probability(record),
+                "history_count": record.history.len(),
+                "evidence_for": record.evidence_for.len(),
+                "evidence_against": record.evidence_against.len(),
+                "watches": watches,
+            }))
+        }
+
+        #[cfg(feature = "assess")]
+        "engram_assess_evaluate" => {
+            let label = args["label"].as_str().ok_or("missing label")?;
+            let mut store = state.assessments.write().map_err(|_| "assessment store lock".to_string())?;
+            let record = store.get_mut(label).ok_or_else(|| format!("assessment not found: {label}"))?;
+            let point = engram_assess::engine::evaluate(record);
+
+            let mut g = state.graph.write().map_err(|_| "graph write lock poisoned".to_string())?;
+            let _ = g.set_property(label, "current_probability", &format!("{:.4}", point.probability));
+            drop(g);
+            state.mark_dirty();
+
+            Ok(serde_json::json!({
+                "label": label,
+                "probability": point.probability,
+                "shift": point.shift,
+            }))
+        }
+
+        #[cfg(feature = "assess")]
+        "engram_assess_evidence" => {
+            let label = args["label"].as_str().ok_or("missing label")?;
+            let node_label = args["node_label"].as_str().ok_or("missing node_label")?;
+            let direction = args["direction"].as_str().ok_or("missing direction")?;
+            let supports = direction == "supports";
+
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
+            let conf = g.get_node(node_label).ok().flatten().map(|n| n.confidence).unwrap_or(0.50);
+            drop(g);
+
+            let mut g = state.graph.write().map_err(|_| "graph write lock poisoned".to_string())?;
+            let prov = Provenance::user("mcp");
+            let edge_type = if supports { "supported_by" } else { "contradicted_by" };
+            let _ = g.relate(node_label, label, edge_type, &prov);
+            drop(g);
+
+            let mut store = state.assessments.write().map_err(|_| "assessment store lock".to_string())?;
+            let record = store.get_mut(label).ok_or_else(|| format!("assessment not found: {label}"))?;
+            let point = engram_assess::engine::add_evidence(
+                record, conf, supports,
+                engram_assess::ScoreTrigger::EvidenceAdded { node_id: 0 },
+                format!("{} {} assessment (via MCP)", node_label, direction),
+                None,
+            );
+            state.mark_dirty();
+
+            Ok(serde_json::json!({
+                "label": label,
+                "probability": point.probability,
+                "shift": point.shift,
+                "direction": direction,
+            }))
+        }
+
+        #[cfg(feature = "assess")]
+        "engram_assess_watch" => {
+            let label = args["label"].as_str().ok_or("missing label")?;
+            if let Some(entity) = args.get("entity_label").and_then(|v| v.as_str()) {
+                let mut g = state.graph.write().map_err(|_| "graph write lock poisoned".to_string())?;
+                let prov = Provenance::user("mcp");
+                let _ = g.relate(label, entity, "watches", &prov);
+                drop(g);
+                state.mark_dirty();
+                Ok(serde_json::json!({ "added": entity, "assessment": label }))
+            } else {
+                let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
+                let watches: Vec<String> = g.edges_from(label).unwrap_or_default().iter()
+                    .filter(|e| e.relationship == "watches").map(|e| e.to.clone()).collect();
+                Ok(serde_json::json!({ "assessment": label, "watches": watches }))
+            }
         }
 
         _ => Err(format!("unknown tool: {name}")),

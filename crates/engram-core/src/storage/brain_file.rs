@@ -261,6 +261,35 @@ impl BrainFile {
         Ok(())
     }
 
+    /// Soft-delete an edge by its slot index. WAL-protected.
+    pub fn delete_edge(&mut self, slot: u64) -> Result<()> {
+        let header = self.mmap.read_header();
+        if slot >= header.edge_count {
+            return Err(StorageError::NodeNotFound { id: slot });
+        }
+
+        // Read current edge, apply soft-delete to a copy
+        let offset = header.edge_region_offset + slot * EDGE_SIZE as u64;
+        let mut edge_copy = unsafe { *(self.mmap.ptr_at(offset) as *const Edge) };
+        edge_copy.soft_delete();
+
+        // WAL first: slot(8) + edge_bytes(EDGE_SIZE)
+        let mut wal_data = Vec::with_capacity(8 + EDGE_SIZE);
+        wal_data.extend_from_slice(&slot.to_le_bytes());
+        let edge_bytes = unsafe {
+            std::slice::from_raw_parts(&edge_copy as *const Edge as *const u8, EDGE_SIZE)
+        };
+        wal_data.extend_from_slice(edge_bytes);
+        self.wal.append(WalOp::EdgeDelete, &wal_data)?;
+
+        // Write to mmap
+        unsafe {
+            let dest = self.mmap.ptr_at_mut(offset);
+            std::ptr::copy_nonoverlapping(edge_bytes.as_ptr(), dest, EDGE_SIZE);
+        }
+        Ok(())
+    }
+
     /// Get current stats.
     pub fn stats(&self) -> (u64, u64) {
         let header = self.mmap.read_header();
@@ -495,6 +524,24 @@ impl BrainFile {
                     }
                 }
                 WalOp::EdgeUpdate => {
+                    if entry.data.len() == 8 + EDGE_SIZE {
+                        let slot = u64::from_le_bytes(entry.data[..8].try_into().unwrap());
+                        let header = self.mmap.read_header();
+                        if slot < header.edge_count {
+                            let offset = header.edge_region_offset + slot * EDGE_SIZE as u64;
+                            unsafe {
+                                let dest = self.mmap.ptr_at_mut(offset);
+                                std::ptr::copy_nonoverlapping(
+                                    entry.data[8..].as_ptr(),
+                                    dest,
+                                    EDGE_SIZE,
+                                );
+                            }
+                        }
+                    }
+                }
+                WalOp::EdgeDelete => {
+                    // Same format as EdgeUpdate: slot(8) + edge_bytes(EDGE_SIZE)
                     if entry.data.len() == 8 + EDGE_SIZE {
                         let slot = u64::from_le_bytes(entry.data[..8].try_into().unwrap());
                         let header = self.mmap.read_header();

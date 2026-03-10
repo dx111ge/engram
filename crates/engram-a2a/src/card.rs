@@ -140,6 +140,21 @@ impl AgentCard {
                     input_modes: vec!["text/plain".to_string()],
                     output_modes: vec!["application/json".to_string()],
                 },
+                Skill {
+                    id: "assess-knowledge".to_string(),
+                    name: "Assessment & Hypothesis Tracking".to_string(),
+                    description: "Create and evaluate hypotheses. Track probability over time \
+                        with evidence-based scoring. Watch entities for automatic re-evaluation.".to_string(),
+                    tags: vec!["assessment", "prediction", "hypothesis", "monitoring", "probability"]
+                        .into_iter().map(String::from).collect(),
+                    examples: vec![
+                        "Create assessment: NVIDIA stock > $200 by Q3".to_string(),
+                        "Evaluate my financial assessments".to_string(),
+                        "What's the probability of the merger completing?".to_string(),
+                    ],
+                    input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
+                    output_modes: vec!["application/json".to_string()],
+                },
             ],
             authentication: Some(Authentication {
                 schemes: vec!["bearer".to_string()],
@@ -174,7 +189,7 @@ mod tests {
         let card = AgentCard::engram_default("http://localhost:3030");
         assert_eq!(card.name, "engram");
         assert_eq!(card.protocol_version, "0.2");
-        assert_eq!(card.skills.len(), 5);
+        assert_eq!(card.skills.len(), 6);
         assert!(card.capabilities.streaming);
     }
 
@@ -183,6 +198,8 @@ mod tests {
         let card = AgentCard::engram_default("http://localhost:3030");
         let skill = card.find_skill("query-knowledge").unwrap();
         assert_eq!(skill.name, "Query Knowledge");
+        let assess = card.find_skill("assess-knowledge").unwrap();
+        assert_eq!(assess.name, "Assessment & Hypothesis Tracking");
         assert!(card.find_skill("nonexistent").is_none());
     }
 
@@ -190,7 +207,7 @@ mod tests {
     fn skill_ids() {
         let card = AgentCard::engram_default("http://localhost:3030");
         let ids = card.skill_ids();
-        assert_eq!(ids, vec!["store-knowledge", "query-knowledge", "reason", "learn", "explain"]);
+        assert_eq!(ids, vec!["store-knowledge", "query-knowledge", "reason", "learn", "explain", "assess-knowledge"]);
     }
 
     #[test]
@@ -199,7 +216,7 @@ mod tests {
         let json = card.to_json();
         let parsed: AgentCard = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, "engram");
-        assert_eq!(parsed.skills.len(), 5);
+        assert_eq!(parsed.skills.len(), 6);
         // Verify camelCase serialization
         assert!(json.contains("protocolVersion"));
         assert!(json.contains("pushNotifications"));

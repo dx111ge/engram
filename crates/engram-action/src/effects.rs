@@ -84,6 +84,12 @@ pub fn execute_effect(
             }
             Ok(())
         }
+
+        Effect::AssessEvaluate { categories } => {
+            tracing::info!("assess_evaluate effect: categories={:?}", categories);
+            // Actual evaluation handled by the assessment engine subscriber
+            Ok(())
+        }
     }
 }
 
@@ -125,6 +131,10 @@ pub fn preview_effect(effect: &Effect, event: &GraphEvent) -> EffectPreview {
         Effect::Log { message, .. } => (
             "log",
             substitute_event_vars(message, event),
+        ),
+        Effect::AssessEvaluate { categories } => (
+            "assess_evaluate",
+            format!("evaluate assessments: {:?}", categories),
         ),
     };
 

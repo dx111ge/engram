@@ -466,7 +466,7 @@ impl Graph {
                 if let Some(edge_slots) = self.adj_out.get(&node_id) {
                     for &edge_slot in edge_slots {
                         let edge = self.brain.read_edge(edge_slot)?;
-                        if edge.confidence < min_confidence {
+                        if edge.is_deleted() || edge.confidence < min_confidence {
                             continue;
                         }
 
@@ -495,7 +495,7 @@ impl Graph {
                 if let Some(edge_slots) = self.adj_in.get(&node_id) {
                     for &edge_slot in edge_slots {
                         let edge = self.brain.read_edge(edge_slot)?;
-                        if edge.confidence < min_confidence {
+                        if edge.is_deleted() || edge.confidence < min_confidence {
                             continue;
                         }
 
@@ -554,6 +554,86 @@ impl Graph {
             }
         }
         Ok(false)
+    }
+
+    /// Soft-delete an edge by from_label, to_label, and relationship type.
+    /// Deletes the first matching active edge. Returns true if an edge was deleted.
+    pub fn delete_edge(
+        &mut self,
+        from_label: &str,
+        to_label: &str,
+        rel_type: &str,
+        provenance: &Provenance,
+    ) -> Result<bool> {
+        let from_id = match self.find_node_id(from_label)? {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+        let to_id = match self.find_node_id(to_label)? {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+
+        let edge_type = match self.type_registry.get(rel_type) {
+            Some(t) => t,
+            None => return Ok(false),
+        };
+
+        // Find matching edge slot in adj_out
+        let slot = if let Some(edge_slots) = self.adj_out.get(&from_id) {
+            let mut found = None;
+            for &s in edge_slots {
+                let edge = self.brain.read_edge(s)?;
+                if edge.is_active()
+                    && edge.from_node == from_id
+                    && edge.to_node == to_id
+                    && edge.edge_type == edge_type
+                {
+                    found = Some(s);
+                    break;
+                }
+            }
+            found
+        } else {
+            None
+        };
+
+        match slot {
+            Some(s) => self.delete_edge_by_slot(s, provenance),
+            None => Ok(false),
+        }
+    }
+
+    /// Soft-delete an edge by its slot index. Returns true if the edge was deleted.
+    pub fn delete_edge_by_slot(&mut self, slot: u64, _provenance: &Provenance) -> Result<bool> {
+        let edge = self.brain.read_edge(slot)?;
+        if edge.is_deleted() {
+            return Ok(false);
+        }
+
+        let edge_id = edge.id;
+        let from_id = edge.from_node;
+        let to_id = edge.to_node;
+        let rel_name = self.type_registry.name_or_default(edge.edge_type);
+
+        self.brain.delete_edge(slot)?;
+
+        // Remove from adjacency lists
+        if let Some(slots) = self.adj_out.get_mut(&from_id) {
+            slots.retain(|&s| s != slot);
+        }
+        if let Some(slots) = self.adj_in.get_mut(&to_id) {
+            slots.retain(|&s| s != slot);
+        }
+
+        self.emit(GraphEvent::EdgeDeleted {
+            edge_id,
+            from: from_id,
+            to: to_id,
+            rel_type: Arc::from(rel_name.as_str()),
+        });
+
+        Ok(true)
     }
 
     // --- Property operations ---
@@ -657,6 +737,9 @@ impl Graph {
         if let Some(edge_slots) = self.adj_out.get(&node_id) {
             for &slot in edge_slots {
                 let edge = self.brain.read_edge(slot)?;
+                if edge.is_deleted() {
+                    continue;
+                }
                 let target_label = self.label_for_id(edge.to_node)?;
                 let rel_name = self.type_registry.name_or_default(edge.edge_type);
                 edges.push(EdgeView {
@@ -681,6 +764,9 @@ impl Graph {
         if let Some(edge_slots) = self.adj_in.get(&node_id) {
             for &slot in edge_slots {
                 let edge = self.brain.read_edge(slot)?;
+                if edge.is_deleted() {
+                    continue;
+                }
                 let source_label = self.label_for_id(edge.from_node)?;
                 let rel_name = self.type_registry.name_or_default(edge.edge_type);
                 edges.push(EdgeView {
@@ -957,6 +1043,9 @@ impl Graph {
         let mut result = Vec::new();
         for slot in 0..edge_count {
             let edge = self.brain.read_edge(slot)?;
+            if edge.is_deleted() {
+                continue;
+            }
             let from_label = self.label_for_id(edge.from_node)?;
             let to_label = self.label_for_id(edge.to_node)?;
             let rel_name = self.type_registry.name_or_default(edge.edge_type);
@@ -1598,6 +1687,9 @@ impl Graph {
                 if let Some(edge_slots) = self.adj_out.get(&node_id) {
                     for &edge_slot in edge_slots {
                         let edge = self.brain.read_edge(edge_slot)?;
+                        if edge.is_deleted() {
+                            continue;
+                        }
                         let edge_rel = self.type_registry.name_or_default(edge.edge_type);
 
                         if edge_rel != relationship {
@@ -1681,6 +1773,9 @@ impl Graph {
                 for bindings in &candidates {
                     for edge_slot in 0..edge_count {
                         let edge = self.brain.read_edge(edge_slot)?;
+                        if edge.is_deleted() {
+                            continue;
+                        }
                         let edge_rel = self.type_registry.name_or_default(edge.edge_type);
                         if edge_rel != *relationship {
                             continue;
@@ -1880,6 +1975,9 @@ impl Graph {
         if let Some(edge_slots) = self.adj_out.get(&from_id) {
             for &edge_slot in edge_slots {
                 let edge = self.brain.read_edge(edge_slot)?;
+                if edge.is_deleted() {
+                    continue;
+                }
                 if edge.to_node == to_id {
                     let rel = self.type_registry.name_or_default(edge.edge_type);
                     if rel == relationship {
@@ -2220,9 +2318,12 @@ impl Graph {
             }
         }
 
-        // Rebuild adjacency lists
+        // Rebuild adjacency lists (skip deleted edges)
         for edge_slot in 0..edge_count {
             let edge = self.brain.read_edge(edge_slot)?;
+            if edge.is_deleted() {
+                continue;
+            }
             self.adj_out
                 .entry(edge.from_node)
                 .or_default()
@@ -2341,6 +2442,93 @@ mod tests {
         let edges_in = g.edges_to("postgresql").unwrap();
         assert_eq!(edges_in.len(), 1);
         assert_eq!(edges_in[0].from, "server-01");
+    }
+
+    #[test]
+    fn delete_edge_removes_from_queries() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("alpha", &prov).unwrap();
+        g.store("beta", &prov).unwrap();
+        g.store("gamma", &prov).unwrap();
+        g.relate("alpha", "beta", "links_to", &prov).unwrap();
+        g.relate("alpha", "gamma", "links_to", &prov).unwrap();
+
+        // Both edges visible
+        assert_eq!(g.edges_from("alpha").unwrap().len(), 2);
+        assert_eq!(g.all_edges().unwrap().len(), 2);
+
+        // Delete one edge
+        let deleted = g.delete_edge("alpha", "beta", "links_to", &prov).unwrap();
+        assert!(deleted);
+
+        // Only one edge remains
+        let edges = g.edges_from("alpha").unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].to, "gamma");
+
+        // edges_to also reflects deletion
+        assert_eq!(g.edges_to("beta").unwrap().len(), 0);
+        assert_eq!(g.edges_to("gamma").unwrap().len(), 1);
+
+        // all_edges also filtered
+        assert_eq!(g.all_edges().unwrap().len(), 1);
+
+        // Deleting non-existent edge returns false
+        let not_deleted = g.delete_edge("alpha", "beta", "links_to", &prov).unwrap();
+        assert!(!not_deleted);
+
+        // edge_exists reflects the deletion
+        assert!(!g.edge_exists("alpha", "beta", "links_to").unwrap());
+        assert!(g.edge_exists("alpha", "gamma", "links_to").unwrap());
+    }
+
+    #[test]
+    fn delete_edge_by_slot_works() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("x", &prov).unwrap();
+        g.store("y", &prov).unwrap();
+        g.relate("x", "y", "connects", &prov).unwrap();
+
+        assert_eq!(g.edges_from("x").unwrap().len(), 1);
+
+        // Edge is at slot 0
+        let deleted = g.delete_edge_by_slot(0, &prov).unwrap();
+        assert!(deleted);
+        assert_eq!(g.edges_from("x").unwrap().len(), 0);
+
+        // Double-delete returns false
+        let again = g.delete_edge_by_slot(0, &prov).unwrap();
+        assert!(!again);
+    }
+
+    #[test]
+    fn delete_edge_persists_across_reopen() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+
+        {
+            let mut g = Graph::create(&path).unwrap();
+            let prov = test_provenance();
+            g.store("a", &prov).unwrap();
+            g.store("b", &prov).unwrap();
+            g.relate("a", "b", "rel", &prov).unwrap();
+            g.delete_edge("a", "b", "rel", &prov).unwrap();
+            g.checkpoint().unwrap();
+        }
+
+        {
+            let g = Graph::open(&path).unwrap();
+            assert_eq!(g.edges_from("a").unwrap().len(), 0);
+            assert_eq!(g.all_edges().unwrap().len(), 0);
+        }
     }
 
     #[test]

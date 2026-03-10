@@ -334,6 +334,51 @@ fn trigger_matches(trigger: &Trigger, event: &GraphEvent) -> bool {
 
         (Trigger::Timer { .. }, GraphEvent::TimerTick { .. }) => true,
 
+        (
+            Trigger::AssessmentShift {
+                label_pattern,
+                min_shift,
+                direction,
+            },
+            GraphEvent::PropertyChanged {
+                label,
+                key,
+                value,
+                ..
+            },
+        ) => {
+            // AssessmentShift fires on PropertyChanged for "current_probability" on assessment nodes
+            if key.as_ref() != "current_probability" {
+                return false;
+            }
+            if !label.starts_with("Assessment:") {
+                return false;
+            }
+            if let Some(pattern) = label_pattern {
+                if !glob_match(pattern, label) {
+                    return false;
+                }
+            }
+            // Parse the shift from the value (format: "new_prob|shift")
+            // If we can't parse, still trigger (shift unknown)
+            if let Some(shift_str) = value.split('|').nth(1) {
+                if let Ok(shift) = shift_str.parse::<f32>() {
+                    if shift.abs() < *min_shift {
+                        return false;
+                    }
+                    match direction.as_deref() {
+                        Some("up") => shift > 0.0,
+                        Some("down") => shift < 0.0,
+                        _ => true,
+                    }
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        }
+
         _ => false,
     }
 }

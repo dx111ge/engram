@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 /// Scheduler configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SchedulerConfig {
     /// Minimum fetch interval in seconds.
     pub min_interval_secs: u64,
@@ -41,7 +41,7 @@ impl Default for SchedulerConfig {
 }
 
 /// Per-source schedule state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SourceSchedule {
     /// Current fetch interval in seconds.
     pub interval_secs: u64,
@@ -167,6 +167,51 @@ impl AdaptiveScheduler {
             .iter()
             .map(|(name, s)| (name.clone(), s.interval_secs, s.paused))
             .collect()
+    }
+
+    /// Get all schedules (for serialization).
+    pub fn schedules(&self) -> &HashMap<String, SourceSchedule> {
+        &self.schedules
+    }
+
+    /// Get the config.
+    pub fn config(&self) -> &SchedulerConfig {
+        &self.config
+    }
+
+    /// Save scheduler state (config + schedules) to a JSON file.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let data = serde_json::json!({
+            "config": self.config,
+            "schedules": self.schedules,
+        });
+        let json = serde_json::to_string_pretty(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(path, json)
+    }
+
+    /// Load scheduler state from a JSON file. Returns default if file doesn't exist.
+    pub fn load(path: &std::path::Path) -> Self {
+        if !path.exists() {
+            return Self::default();
+        }
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                #[derive(serde::Deserialize)]
+                struct SavedState {
+                    config: SchedulerConfig,
+                    schedules: HashMap<String, SourceSchedule>,
+                }
+                match serde_json::from_str::<SavedState>(&contents) {
+                    Ok(state) => Self {
+                        config: state.config,
+                        schedules: state.schedules,
+                    },
+                    Err(_) => Self::default(),
+                }
+            }
+            Err(_) => Self::default(),
+        }
     }
 
     /// Reset a source to the default interval.

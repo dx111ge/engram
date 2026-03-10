@@ -2,6 +2,9 @@
 
 pub const EDGE_SIZE: usize = 64;
 
+/// Edge flag: soft-deleted.
+pub const FLAG_EDGE_DELETED: u32 = 1 << 0;
+
 #[repr(C, align(64))]
 #[derive(Debug, Clone, Copy)]
 pub struct Edge {
@@ -40,6 +43,22 @@ impl Edge {
             created_at: now,
             source_id: 0,
         }
+    }
+
+    /// Returns true if this edge is not deleted.
+    pub fn is_active(&self) -> bool {
+        self.flags & FLAG_EDGE_DELETED == 0
+    }
+
+    /// Returns true if this edge has been soft-deleted.
+    pub fn is_deleted(&self) -> bool {
+        self.flags & FLAG_EDGE_DELETED != 0
+    }
+
+    /// Mark this edge as soft-deleted.
+    pub fn soft_delete(&mut self) {
+        self.flags |= FLAG_EDGE_DELETED;
+        self.confidence = 0.0;
     }
 }
 

@@ -93,7 +93,7 @@ impl SourceUsage {
 }
 
 /// Serializable snapshot of usage counters.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UsageSnapshot {
     pub requests: u64,
     pub items: u64,
@@ -104,7 +104,7 @@ pub struct UsageSnapshot {
 }
 
 /// Serializable source info for the API.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SourceInfo {
     pub name: String,
     pub capabilities: CapabilitiesInfo,
@@ -113,7 +113,7 @@ pub struct SourceInfo {
 }
 
 /// Serializable capabilities for the API.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CapabilitiesInfo {
     pub temporal_cursor: bool,
     pub searchable: bool,

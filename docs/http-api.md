@@ -651,6 +651,185 @@ Response:
 }
 ```
 
+### Assessments
+
+#### POST /assessments -- Create an assessment
+
+Create a hypothesis/assessment with watched entities. Stores a graph node, watch edges, and a sidecar record.
+
+```bash
+curl -X POST http://localhost:3030/assessments \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "title": "NVIDIA stock > $200 by Q3 2026",
+    "category": "financial",
+    "description": "Tracks whether NVIDIA stock will exceed $200",
+    "watches": ["NVIDIA", "GPU market", "AI spending"],
+    "initial_probability": 0.50
+  }'
+```
+
+Response:
+```json
+{"label": "Assessment:nvidia-stock-gt-200", "probability": 0.50, "watches": 3}
+```
+
+#### GET /assessments -- List assessments
+
+```bash
+curl "http://localhost:3030/assessments?category=financial&status=active"
+```
+
+Response:
+```json
+[
+  {"label": "Assessment:nvidia-stock-gt-200", "title": "NVIDIA stock > $200 by Q3 2026", "category": "financial", "status": "active", "probability": 0.62, "last_evaluated": 1741340400}
+]
+```
+
+#### GET /assessments/:label -- Get assessment detail
+
+```bash
+curl http://localhost:3030/assessments/Assessment:nvidia-stock-gt-200
+```
+
+Response includes summary, score history, evidence arrays, and watched entities.
+
+#### PATCH /assessments/:label -- Update assessment properties
+
+```bash
+curl -X PATCH http://localhost:3030/assessments/Assessment:nvidia-stock-gt-200 \
+  -H 'Content-Type: application/json' \
+  -d '{"status": "paused"}'
+```
+
+#### DELETE /assessments/:label -- Delete assessment
+
+```bash
+curl -X DELETE http://localhost:3030/assessments/Assessment:nvidia-stock-gt-200
+```
+
+#### POST /assessments/:label/evaluate -- Trigger manual re-evaluation
+
+```bash
+curl -X POST http://localhost:3030/assessments/Assessment:nvidia-stock-gt-200/evaluate
+```
+
+Response:
+```json
+{"label": "Assessment:nvidia-stock-gt-200", "old_probability": 0.50, "new_probability": 0.62, "shift": 0.12}
+```
+
+#### POST /assessments/:label/evidence -- Add evidence
+
+```bash
+curl -X POST http://localhost:3030/assessments/Assessment:nvidia-stock-gt-200/evidence \
+  -H 'Content-Type: application/json' \
+  -d '{"node_label": "NVIDIA Q1 earnings beat", "direction": "supports"}'
+```
+
+#### DELETE /assessments/:label/evidence/:node_label -- Remove evidence
+
+```bash
+curl -X DELETE http://localhost:3030/assessments/Assessment:nvidia-stock-gt-200/evidence/NVIDIA%20Q1%20earnings%20beat
+```
+
+Removes the supporting/contradicting edge and updates the sidecar evidence arrays.
+
+#### GET /assessments/:label/history -- Score time-series
+
+```bash
+curl http://localhost:3030/assessments/Assessment:nvidia-stock-gt-200/history
+```
+
+Response:
+```json
+[
+  {"timestamp": 1741340400, "probability": 0.50, "shift": 0.0, "trigger": "created", "reason": "Initial assessment"},
+  {"timestamp": 1741340500, "probability": 0.62, "shift": 0.12, "trigger": "graph_propagation", "reason": "New fact 'NVIDIA Q1 earnings beat' propagated via 2 hops"}
+]
+```
+
+#### POST /assessments/:label/watch -- Add watched entity
+
+```bash
+curl -X POST http://localhost:3030/assessments/Assessment:nvidia-stock-gt-200/watch \
+  -H 'Content-Type: application/json' \
+  -d '{"entity_label": "semiconductor supply chain"}'
+```
+
+#### DELETE /assessments/:label/watch/:entity -- Remove watch
+
+```bash
+curl -X DELETE http://localhost:3030/assessments/Assessment:nvidia-stock-gt-200/watch/semiconductor%20supply%20chain
+```
+
+### Edge Deletion
+
+#### DELETE /edges -- Delete a specific edge
+
+```bash
+curl -X DELETE http://localhost:3030/edges \
+  -H 'Content-Type: application/json' \
+  -d '{"from": "postgresql", "to": "redis", "relationship": "caches_with"}'
+```
+
+Response:
+```json
+{"deleted": true}
+```
+
+Soft-deletes the edge (sets deleted flag). The edge is excluded from all queries but preserved in storage for audit purposes. WAL-protected for crash recovery.
+
+### Secrets
+
+Encrypted secrets storage for API keys and credentials. Secrets are encrypted at rest using AES-256-GCM with Argon2id key derivation. The master password is prompted on server startup.
+
+#### GET /secrets -- List secret keys
+
+Returns key names only, never values.
+
+```bash
+curl http://localhost:3030/secrets
+```
+
+Response:
+```json
+["llm.api_key", "embed.api_key"]
+```
+
+#### POST /secrets/:key -- Set a secret
+
+```bash
+curl -X POST http://localhost:3030/secrets/llm.api_key \
+  -H 'Content-Type: application/json' \
+  -d '{"value": "sk-abc123..."}'
+```
+
+Response:
+```json
+{"stored": "llm.api_key"}
+```
+
+#### DELETE /secrets/:key -- Remove a secret
+
+```bash
+curl -X DELETE http://localhost:3030/secrets/llm.api_key
+```
+
+#### GET /secrets/:key/check -- Check if a secret exists
+
+```bash
+curl http://localhost:3030/secrets/llm.api_key/check
+```
+
+Response:
+```json
+{"exists": true}
+```
+
+**Security:** These endpoints are local-only (no mesh sync, no A2A exposure). Values are never returned over the API.
+
 ### Streaming
 
 #### GET /events/stream -- SSE event subscription (graph changes)

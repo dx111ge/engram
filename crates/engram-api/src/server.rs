@@ -1,6 +1,6 @@
 /// HTTP server setup — routes, middleware, startup.
 
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
@@ -93,6 +93,26 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/proxy/rss", get(handlers::proxy_news_rss))
         .route("/proxy/llm", post(handlers::proxy_llm))
         .route("/proxy/search", get(handlers::proxy_web_search))
+        // Assessments
+        .route("/assessments", post(handlers::create_assessment))
+        .route("/assessments", get(handlers::list_assessments))
+        .route("/assessments/{label}", get(handlers::get_assessment))
+        .route("/assessments/{label}", delete(handlers::delete_assessment))
+        .route("/assessments/{label}", patch(handlers::update_assessment))
+        .route("/assessments/{label}/evaluate", post(handlers::evaluate_assessment))
+        .route("/assessments/{label}/evidence", post(handlers::add_assessment_evidence))
+        .route("/assessments/{label}/evidence/{id}", delete(handlers::remove_assessment_evidence))
+        .route("/assessments/{label}/history", get(handlers::assessment_history))
+        .route("/assessments/{label}/watch", post(handlers::add_assessment_watch))
+        .route("/assessments/{label}/watch/{entity}", delete(handlers::remove_assessment_watch))
+        // Secrets (local-only, no mesh/A2A exposure)
+        .route("/secrets", get(handlers::list_secrets))
+        .route("/secrets/{key}", post(handlers::set_secret))
+        .route("/secrets/{key}", delete(handlers::delete_secret))
+        .route("/secrets/{key}/check", get(handlers::check_secret))
+        // Configuration
+        .route("/config", get(handlers::get_config))
+        .route("/config", post(handlers::set_config))
         // System
         .route("/health", get(handlers::health))
         .route("/stats", get(handlers::stats))
@@ -227,6 +247,48 @@ pub async fn serve_with_frontend(state: AppState, addr: &str, frontend_dir: Opti
             }
         }
     });
+
+    // Assessment auto-evaluation subscriber (listens for FactStored events)
+    #[cfg(feature = "assess")]
+    {
+        let assess_state = state.clone();
+        tokio::spawn(async move {
+            let mut rx = assess_state.event_bus.subscribe();
+            loop {
+                match rx.recv().await {
+                    Ok(engram_core::events::GraphEvent::FactStored { node_id, label, confidence, .. }) => {
+                        let engine = engram_assess::AssessmentEngine::new(
+                            assess_state.assessments.clone(),
+                            assess_state.graph.clone(),
+                        );
+                        let results = engine.on_fact_stored(node_id, &label, confidence);
+                        if !results.is_empty() {
+                            tracing::info!(
+                                "assessment auto-eval: {} assessments updated",
+                                results.len()
+                            );
+                            // Update current_probability on assessment graph nodes
+                            if let Ok(mut g) = assess_state.graph.write() {
+                                for result in &results {
+                                    let prob_with_shift = format!("{}|{}", result.new_probability, result.shift);
+                                    let _ = g.set_property(&result.label, "current_probability", &prob_with_shift);
+                                }
+                            }
+                            assess_state.mark_dirty();
+                        }
+                    }
+                    Ok(_) => {} // ignore other events
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("assessment subscriber lagged by {} events", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::info!("event bus closed, assessment subscriber stopping");
+                        break;
+                    }
+                }
+            }
+        });
+    }
 
     let app = router_with_frontend(state, frontend_dir);
     let listener = tokio::net::TcpListener::bind(addr).await?;

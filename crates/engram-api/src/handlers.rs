@@ -3,10 +3,11 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use engram_core::Embedder;
 use engram_core::graph::Provenance;
 
 use crate::natural;
-use crate::state::AppState;
+use crate::state::{AppState, EngineConfig};
 use crate::types::*;
 
 type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, Json<ErrorResponse>)>;
@@ -1406,18 +1407,31 @@ pub async fn proxy_web_search(
 /// Uses ENGRAM_EMBED_ENDPOINT (same as embeddings) or ENGRAM_LLM_ENDPOINT if set.
 /// Model defaults to ENGRAM_LLM_MODEL env var, then request body, then "llama3.2".
 pub async fn proxy_llm(
-    axum::Json(body): axum::Json<serde_json::Value>,
-) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
-    use axum::response::IntoResponse;
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    // Read config from AppState, then secrets store, then env vars.
+    let (endpoint, api_key, default_model) = {
+        let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
+        let ep = cfg.llm_endpoint.clone()
+            .or_else(|| std::env::var("ENGRAM_LLM_ENDPOINT").ok());
+        // API key: secrets store first, then config (legacy), then env
+        let key = state.secrets.as_ref()
+            .and_then(|s| s.read().ok())
+            .and_then(|s| s.get("llm.api_key").map(String::from))
+            .or_else(|| cfg.llm_api_key.clone())
+            .or_else(|| std::env::var("ENGRAM_LLM_API_KEY").ok())
+            .unwrap_or_default();
+        let model = cfg.llm_model.clone()
+            .or_else(|| std::env::var("ENGRAM_LLM_MODEL").ok());
+        (ep, key, model)
+    };
 
-    let endpoint = std::env::var("ENGRAM_LLM_ENDPOINT")
-        .or_else(|_| std::env::var("ENGRAM_EMBED_ENDPOINT"))
-        .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
-    let api_key = std::env::var("ENGRAM_LLM_API_KEY")
-        .or_else(|_| std::env::var("ENGRAM_EMBED_API_KEY"))
-        .unwrap_or_default();
-    let default_model = std::env::var("ENGRAM_LLM_MODEL")
-        .unwrap_or_else(|_| "llama3.2".to_string());
+    let endpoint = endpoint.ok_or_else(|| {
+        api_err(StatusCode::SERVICE_UNAVAILABLE,
+            "LLM not configured. Set endpoint via POST /config or ENGRAM_LLM_ENDPOINT env var.")
+    })?;
+    let default_model = default_model.unwrap_or_else(|| "llama3.2".to_string());
 
     let messages = body.get("messages").cloned().unwrap_or(serde_json::json!([]));
     let model = body.get("model")
@@ -1429,16 +1443,21 @@ pub async fn proxy_llm(
     let max_tokens = body.get("max_tokens")
         .and_then(|t| t.as_u64())
         .unwrap_or(1024);
+    let tools = body.get("tools").cloned();
 
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
 
-    let request_body = serde_json::json!({
+    let mut request_body = serde_json::json!({
         "model": model,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": false,
     });
+    // Pass through tools for function calling
+    if let Some(tools_val) = tools {
+        request_body["tools"] = tools_val;
+    }
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -1457,21 +1476,22 @@ pub async fn proxy_llm(
         .await
         .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("LLM request failed: {e}")))?;
 
-    let status = StatusCode::from_u16(resp.status().as_u16())
-        .unwrap_or(StatusCode::BAD_GATEWAY);
-    let body = resp
-        .bytes()
-        .await
+    if !resp.status().is_success() {
+        let status_code = resp.status().as_u16();
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(api_err(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
+            format!("LLM returned {status_code}: {body_text}"),
+        ));
+    }
+
+    let body_text = resp.text().await
         .map_err(|e| api_err(StatusCode::BAD_GATEWAY, e.to_string()))?;
 
-    Ok((
-        status,
-        [
-            (axum::http::header::CONTENT_TYPE, "application/json"),
-            (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
-        ],
-        body,
-    ).into_response())
+    let json_value: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("invalid JSON from LLM: {e}")))?;
+
+    Ok(Json(json_value))
 }
 
 fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
@@ -1662,10 +1682,9 @@ pub async fn ingest_file() -> impl axum::response::IntoResponse {
 /// POST /ingest/configure — update pipeline defaults (runtime).
 #[cfg(feature = "ingest")]
 pub async fn ingest_configure(
+    State(state): State<AppState>,
     Json(req): Json<IngestConfigureRequest>,
 ) -> ApiResult<serde_json::Value> {
-    // For now, return the effective config. Runtime config persistence comes
-    // with Phase 8.17+ (source trait).
     let mut stages = engram_ingest::types::StageConfig::default();
     if let Some(ref skip) = req.skip {
         let unknown = stages.apply_skip(skip);
@@ -1676,6 +1695,24 @@ pub async fn ingest_configure(
             ));
         }
     }
+
+    // Merge pipeline settings into runtime config and persist
+    {
+        let mut cfg = state.config.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "config lock poisoned")
+        })?;
+        let patch = crate::state::EngineConfig {
+            pipeline_batch_size: req.batch_size.map(|v| v as u32),
+            pipeline_workers: req.workers.map(|v| v as u32),
+            pipeline_skip_stages: req.skip.as_ref().map(|s| {
+                s.split(',').map(|t| t.trim().to_string()).collect()
+            }),
+            ..Default::default()
+        };
+        cfg.merge(&patch);
+    }
+    // Persist pipeline config changes
+    state.save_config().ok();
 
     Ok(Json(serde_json::json!({
         "name": req.name.unwrap_or_else(|| "default".into()),
@@ -1695,13 +1732,11 @@ pub async fn ingest_configure() -> impl axum::response::IntoResponse {
 // ── GET /sources — list registered sources (stub) ──
 
 #[cfg(feature = "ingest")]
-pub async fn list_sources() -> ApiResult<serde_json::Value> {
-    // Source registry will be wired to AppState in a future phase.
-    // For now, return an empty list with the endpoint shape.
-    Ok(Json(serde_json::json!({
-        "sources": serde_json::Value::Array(vec![]),
-        "note": "source registry not yet wired to server state"
-    })))
+pub async fn list_sources(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let sources = state.source_registry.list_info();
+    Ok(Json(serde_json::json!({ "sources": sources })))
 }
 
 #[cfg(not(feature = "ingest"))]
@@ -1714,18 +1749,16 @@ pub async fn list_sources() -> impl axum::response::IntoResponse {
 
 #[cfg(feature = "ingest")]
 pub async fn source_usage(
+    State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<serde_json::Value> {
-    Ok(Json(serde_json::json!({
-        "source": name,
-        "usage": {
-            "requests": 0,
-            "items": 0,
-            "errors": 0,
-            "cost": 0.0
-        },
-        "note": "source registry not yet wired to server state"
-    })))
+    match state.source_registry.get_usage(&name) {
+        Some(usage) => Ok(Json(serde_json::json!({
+            "source": name,
+            "usage": usage,
+        }))),
+        None => Err(api_err(StatusCode::NOT_FOUND, format!("source '{}' not registered", name))),
+    }
 }
 
 #[cfg(not(feature = "ingest"))]
@@ -1774,6 +1807,8 @@ pub async fn load_action_rules(
     let count = rules.len();
     let mut engine = state.action_engine.write().map_err(|_| write_lock_err())?;
     engine.load_rules(rules);
+    drop(engine);
+    state.save_action_rules();
     Ok(Json(serde_json::json!({ "loaded": count })))
 }
 
@@ -1823,7 +1858,9 @@ pub async fn delete_action_rule(
 ) -> ApiResult<serde_json::Value> {
     let mut engine = state.action_engine.write().map_err(|_| write_lock_err())?;
     let removed = engine.remove_rule(&id);
+    drop(engine);
     if removed {
+        state.save_action_rules();
         Ok(Json(serde_json::json!({ "removed": id })))
     } else {
         Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("rule '{}' not found", id) })))
@@ -2010,6 +2047,7 @@ fn event_type_name(event: &engram_core::events::GraphEvent) -> &'static str {
         GraphEvent::ConflictDetected { .. } => "conflict_detected",
         GraphEvent::DecayApplied { .. } => "decay_applied",
         GraphEvent::TierSweepCompleted { .. } => "tier_sweep_completed",
+        GraphEvent::EdgeDeleted { .. } => "edge_deleted",
     }
 }
 
@@ -2390,4 +2428,725 @@ pub async fn enrich_stream(
     _query: axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl axum::response::IntoResponse {
     (StatusCode::NOT_IMPLEMENTED, Json(ErrorResponse { error: "reason feature not enabled".into() }))
+}
+
+// ── GET /config ── Return current effective configuration
+
+pub async fn get_config(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
+
+    // Build response with env var fallbacks for unset fields
+    let effective_embed_endpoint = cfg.embed_endpoint.clone()
+        .or_else(|| std::env::var("ENGRAM_EMBED_ENDPOINT").ok());
+    let effective_embed_model = cfg.embed_model.clone()
+        .or_else(|| std::env::var("ENGRAM_EMBED_MODEL").ok());
+    let effective_llm_endpoint = cfg.llm_endpoint.clone()
+        .or_else(|| std::env::var("ENGRAM_LLM_ENDPOINT").ok());
+    let effective_llm_model = cfg.llm_model.clone()
+        .or_else(|| std::env::var("ENGRAM_LLM_MODEL").ok());
+
+    // Mask API key: never return the actual value
+    let has_llm_api_key = cfg.llm_api_key.is_some()
+        || std::env::var("ENGRAM_LLM_API_KEY").is_ok();
+
+    Json(serde_json::json!({
+        "embed_endpoint": effective_embed_endpoint,
+        "embed_model": effective_embed_model,
+        "llm_endpoint": effective_llm_endpoint,
+        "llm_model": effective_llm_model,
+        "has_llm_api_key": has_llm_api_key,
+        "llm_temperature": cfg.llm_temperature,
+        "pipeline_batch_size": cfg.pipeline_batch_size,
+        "pipeline_workers": cfg.pipeline_workers,
+        "pipeline_skip_stages": cfg.pipeline_skip_stages,
+        "ner_provider": cfg.ner_provider,
+        "ner_model": cfg.ner_model,
+        "ner_endpoint": cfg.ner_endpoint,
+        "mesh_enabled": cfg.mesh_enabled,
+        "mesh_topology": cfg.mesh_topology,
+    }))
+}
+
+// ── POST /config ── Update configuration (partial updates supported)
+
+pub async fn set_config(
+    State(state): State<AppState>,
+    Json(patch): Json<EngineConfig>,
+) -> ApiResult<serde_json::Value> {
+    // Detect if embedder settings changed before merging
+    let embed_changed = patch.embed_endpoint.is_some() || patch.embed_model.is_some();
+
+    // If embedder settings changed, create new embedder BEFORE acquiring locks
+    let new_embedder = if embed_changed {
+        let cfg = state.config.read().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "config lock poisoned")
+        })?;
+
+        // Resolve effective values after merge
+        let endpoint = patch.embed_endpoint.clone()
+            .or_else(|| cfg.embed_endpoint.clone())
+            .or_else(|| std::env::var("ENGRAM_EMBED_ENDPOINT").ok());
+        let model = patch.embed_model.clone()
+            .or_else(|| cfg.embed_model.clone())
+            .or_else(|| std::env::var("ENGRAM_EMBED_MODEL").ok());
+        drop(cfg);
+
+        match (endpoint, model) {
+            (Some(ep), Some(m)) => {
+                // Create new embedder with probe for dimension detection
+                let embedder = engram_core::ApiEmbedder::new(
+                    ep.clone(), m.clone(), 0, None,
+                );
+                let dim = embedder.probe_dimension().map_err(|e| {
+                    api_err(StatusCode::BAD_REQUEST, format!("embedder probe failed: {e}"))
+                })?;
+                let embedder = engram_core::ApiEmbedder::new(ep, m, dim, None);
+                Some(embedder)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // Merge the patch into current config
+    {
+        let mut cfg = state.config.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "config lock poisoned")
+        })?;
+        cfg.merge(&patch);
+    }
+
+    // Hot-reload embedder if settings changed
+    if let Some(embedder) = new_embedder {
+        let model = embedder.model_id().to_string();
+        let dim = embedder.dim();
+        let endpoint = {
+            let cfg = state.config.read().map_err(|_| {
+                api_err(StatusCode::INTERNAL_SERVER_ERROR, "config lock poisoned")
+            })?;
+            cfg.embed_endpoint.clone().unwrap_or_default()
+        };
+
+        // Acquire graph write lock and install new embedder
+        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+        g.set_embedder(Box::new(embedder));
+        drop(g);
+
+        // Update compute info (no lock needed, but we need interior mutability workaround)
+        // ComputeInfo is on the cloned AppState, so we log it. The /compute endpoint
+        // will reflect the config values via GET /config instead.
+        tracing::info!("hot-reloaded embedder: {} ({}D) via {}", model, dim, endpoint);
+    }
+
+    // Persist to sidecar file
+    state.save_config().map_err(|e| {
+        api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("config save failed: {e}"))
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "message": "configuration updated"
+    })))
+}
+
+// ── Assessment endpoints ─────────────────────────────────────────────
+
+// POST /assessments -- Create assessment
+#[cfg(feature = "assess")]
+pub async fn create_assessment(
+    State(state): State<AppState>,
+    Json(req): Json<engram_assess::CreateAssessmentRequest>,
+) -> ApiResult<serde_json::Value> {
+    let label = format!("Assessment:{}", req.title.to_lowercase()
+        .replace(' ', "-")
+        .replace(|c: char| !c.is_alphanumeric() && c != '-', ""));
+
+    let initial_prob = req.initial_probability.unwrap_or(0.50).clamp(0.05, 0.95);
+    let prov = provenance(&None);
+
+    // Create graph node
+    let node_id = {
+        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+        let slot = g.store_with_confidence(&label, initial_prob, &prov)
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let _ = g.set_node_type(&label, "assessment");
+        let _ = g.set_property(&label, "title", &req.title);
+        if let Some(ref cat) = req.category { let _ = g.set_property(&label, "category", cat); }
+        if let Some(ref desc) = req.description { let _ = g.set_property(&label, "description", desc); }
+        if let Some(ref tf) = req.timeframe { let _ = g.set_property(&label, "timeframe", tf); }
+        let _ = g.set_property(&label, "status", "active");
+        let _ = g.set_property(&label, "current_probability", &format!("{:.4}", initial_prob));
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = g.set_property(&label, "last_evaluated", &now.to_string());
+
+        // Create watch edges
+        for entity in &req.watches {
+            let _ = g.relate(&label, entity, "watches", &prov);
+        }
+
+        slot
+    };
+
+    state.mark_dirty();
+
+    // Create sidecar record
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let record = engram_assess::AssessmentRecord {
+            label: label.clone(),
+            node_id,
+            history: vec![engram_assess::ScorePoint {
+                timestamp: now,
+                probability: initial_prob,
+                shift: 0.0,
+                trigger: engram_assess::ScoreTrigger::Created,
+                reason: "Initial assessment created".to_string(),
+                path: None,
+            }],
+            evidence_for: vec![],
+            evidence_against: vec![],
+        };
+
+        let mut store = state.assessments.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "assessment store lock poisoned")
+        })?;
+        store.insert(record);
+    }
+
+    Ok(Json(serde_json::json!({
+        "label": label,
+        "node_id": node_id,
+        "probability": initial_prob,
+        "status": "active",
+        "watches": req.watches,
+    })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn create_assessment() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+// GET /assessments -- List assessments
+#[cfg(feature = "assess")]
+pub async fn list_assessments(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<serde_json::Value> {
+    let g = state.graph.read().map_err(|_| read_lock_err())?;
+    let store = state.assessments.read().map_err(|_| {
+        api_err(StatusCode::INTERNAL_SERVER_ERROR, "assessment store lock poisoned")
+    })?;
+
+    let category_filter = params.get("category").filter(|s| !s.is_empty());
+    let status_filter = params.get("status").filter(|s| !s.is_empty());
+
+    let mut assessments = Vec::new();
+    for record in store.all() {
+        let props = g.get_properties(&record.label).ok().flatten().unwrap_or_default();
+        let category = props.get("category").cloned().unwrap_or_default();
+        let status = props.get("status").cloned().unwrap_or_else(|| "active".to_string());
+
+        if let Some(cf) = category_filter {
+            if &category != cf { continue; }
+        }
+        if let Some(sf) = status_filter {
+            if &status != sf { continue; }
+        }
+
+        let last_shift = record.history.last().map(|p| p.shift).unwrap_or(0.0);
+        let last_evaluated: i64 = props.get("last_evaluated")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let watch_count = g.edges_from(&record.label)
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| e.relationship == "watches")
+            .count();
+
+        assessments.push(serde_json::json!({
+            "label": record.label,
+            "title": props.get("title").cloned().unwrap_or_else(|| record.label.clone()),
+            "category": category,
+            "status": status,
+            "description": props.get("description").cloned().unwrap_or_default(),
+            "timeframe": props.get("timeframe").cloned().unwrap_or_default(),
+            "current_probability": engram_assess::engine::recalculate_probability(record),
+            "last_evaluated": last_evaluated,
+            "evidence_count": record.evidence_for.len() + record.evidence_against.len(),
+            "watch_count": watch_count,
+            "last_shift": last_shift,
+        }));
+    }
+
+    Ok(Json(serde_json::json!({ "assessments": assessments })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn list_assessments() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+// GET /assessments/:label -- Full detail
+#[cfg(feature = "assess")]
+pub async fn get_assessment(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let label = urlencoding::decode(&label).unwrap_or_default().to_string();
+    let g = state.graph.read().map_err(|_| read_lock_err())?;
+    let store = state.assessments.read().map_err(|_| {
+        api_err(StatusCode::INTERNAL_SERVER_ERROR, "assessment store lock poisoned")
+    })?;
+
+    let record = store.get(&label)
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("assessment not found: {label}")))?;
+
+    let props = g.get_properties(&label).ok().flatten().unwrap_or_default();
+
+    let watches: Vec<String> = g.edges_from(&label)
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| e.relationship == "watches")
+        .map(|e| e.to.clone())
+        .collect();
+
+    let evidence_for: Vec<serde_json::Value> = record.evidence_for.iter().enumerate().map(|(i, &c)| {
+        serde_json::json!({ "node_label": format!("evidence_{}", i), "confidence": c })
+    }).collect();
+
+    let evidence_against: Vec<serde_json::Value> = record.evidence_against.iter().enumerate().map(|(i, &c)| {
+        serde_json::json!({ "node_label": format!("evidence_{}", i), "confidence": c })
+    }).collect();
+
+    Ok(Json(serde_json::json!({
+        "label": record.label,
+        "title": props.get("title").cloned().unwrap_or_else(|| record.label.clone()),
+        "category": props.get("category").cloned().unwrap_or_default(),
+        "status": props.get("status").cloned().unwrap_or_else(|| "active".to_string()),
+        "description": props.get("description").cloned().unwrap_or_default(),
+        "timeframe": props.get("timeframe").cloned().unwrap_or_default(),
+        "current_probability": engram_assess::engine::recalculate_probability(record),
+        "last_evaluated": props.get("last_evaluated").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+        "history": record.history,
+        "evidence_for": evidence_for,
+        "evidence_against": evidence_against,
+        "watches": watches,
+    })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn get_assessment() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+// DELETE /assessments/:label
+#[cfg(feature = "assess")]
+pub async fn delete_assessment(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let label = urlencoding::decode(&label).unwrap_or_default().to_string();
+
+    // Remove from graph
+    {
+        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+        let prov = provenance(&None);
+        let _ = g.delete(&label, &prov);
+    }
+    state.mark_dirty();
+
+    // Remove from sidecar
+    {
+        let mut store = state.assessments.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "assessment store lock poisoned")
+        })?;
+        store.remove(&label);
+    }
+
+    Ok(Json(serde_json::json!({ "deleted": label })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn delete_assessment() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+// PATCH /assessments/:label
+#[cfg(feature = "assess")]
+pub async fn update_assessment(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+    Json(req): Json<engram_assess::UpdateAssessmentRequest>,
+) -> ApiResult<serde_json::Value> {
+    let label = urlencoding::decode(&label).unwrap_or_default().to_string();
+
+    {
+        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+        if let Some(ref title) = req.title { let _ = g.set_property(&label, "title", title); }
+        if let Some(ref desc) = req.description { let _ = g.set_property(&label, "description", desc); }
+        if let Some(ref cat) = req.category { let _ = g.set_property(&label, "category", cat); }
+        if let Some(ref status) = req.status { let _ = g.set_property(&label, "status", status); }
+        if let Some(ref tf) = req.timeframe { let _ = g.set_property(&label, "timeframe", tf); }
+    }
+
+    // Manual probability override
+    if let Some(prob) = req.probability {
+        let prob = prob.clamp(0.05, 0.95);
+        let mut store = state.assessments.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "assessment store lock poisoned")
+        })?;
+        if let Some(record) = store.get_mut(&label) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let old_prob = record.history.last().map(|p| p.probability).unwrap_or(0.50);
+            record.history.push(engram_assess::ScorePoint {
+                timestamp: now,
+                probability: prob,
+                shift: prob - old_prob,
+                trigger: engram_assess::ScoreTrigger::Manual,
+                reason: "Manual probability adjustment".to_string(),
+                path: None,
+            });
+        }
+
+        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+        let _ = g.set_property(&label, "current_probability", &format!("{:.4}", prob));
+    }
+
+    state.mark_dirty();
+    Ok(Json(serde_json::json!({ "updated": label })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn update_assessment() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+// POST /assessments/:label/evaluate
+#[cfg(feature = "assess")]
+pub async fn evaluate_assessment(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let label = urlencoding::decode(&label).unwrap_or_default().to_string();
+
+    let point = {
+        let mut store = state.assessments.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "assessment store lock poisoned")
+        })?;
+        let record = store.get_mut(&label)
+            .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("assessment not found: {label}")))?;
+        engram_assess::engine::evaluate(record)
+    };
+
+    // Update graph property
+    {
+        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+        let _ = g.set_property(&label, "current_probability", &format!("{:.4}", point.probability));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = g.set_property(&label, "last_evaluated", &now.to_string());
+    }
+    state.mark_dirty();
+
+    Ok(Json(serde_json::json!({
+        "label": label,
+        "old_probability": point.probability - point.shift,
+        "new_probability": point.probability,
+        "shift": point.shift,
+    })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn evaluate_assessment() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+// POST /assessments/:label/evidence
+#[cfg(feature = "assess")]
+pub async fn add_assessment_evidence(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+    Json(req): Json<engram_assess::AddEvidenceRequest>,
+) -> ApiResult<serde_json::Value> {
+    let label = urlencoding::decode(&label).unwrap_or_default().to_string();
+    let supports = req.direction == "supports";
+
+    // Get evidence node confidence
+    let evidence_conf = {
+        let g = state.graph.read().map_err(|_| read_lock_err())?;
+        req.confidence.unwrap_or_else(|| {
+            g.get_node(&req.node_label).ok().flatten().map(|n| n.confidence).unwrap_or(0.50)
+        })
+    };
+
+    // Create evidence edge in graph
+    {
+        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+        let prov = provenance(&None);
+        let edge_type = if supports { "supported_by" } else { "contradicted_by" };
+        let _ = g.relate(&req.node_label, &label, edge_type, &prov);
+    }
+
+    // Update sidecar
+    let point = {
+        let mut store = state.assessments.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "assessment store lock poisoned")
+        })?;
+        let record = store.get_mut(&label)
+            .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("assessment not found: {label}")))?;
+
+        let node_id = 0; // We don't have the node_id easily here
+        engram_assess::engine::add_evidence(
+            record,
+            evidence_conf,
+            supports,
+            engram_assess::ScoreTrigger::EvidenceAdded { node_id },
+            format!("Evidence '{}' {} assessment", req.node_label, if supports { "supports" } else { "contradicts" }),
+            None,
+        )
+    };
+
+    // Update graph property
+    {
+        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+        let _ = g.set_property(&label, "current_probability", &format!("{:.4}", point.probability));
+    }
+    state.mark_dirty();
+
+    Ok(Json(serde_json::json!({
+        "added": true,
+        "direction": req.direction,
+        "new_probability": point.probability,
+        "shift": point.shift,
+    })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn add_assessment_evidence() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+// DELETE /assessments/:label/evidence/:id
+#[cfg(feature = "assess")]
+pub async fn remove_assessment_evidence(
+    State(state): State<AppState>,
+    Path((label, evidence_label)): Path<(String, String)>,
+) -> ApiResult<serde_json::Value> {
+    let label = urlencoding::decode(&label).unwrap_or_default().to_string();
+    let evidence_label = urlencoding::decode(&evidence_label).unwrap_or_default().to_string();
+
+    // Remove the evidence edge (supported_by or contradicted_by)
+    let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+    let prov = provenance(&None);
+
+    let mut removed = false;
+    let mut was_supporting = true;
+
+    // Try supported_by first
+    if g.delete_edge(&evidence_label, &label, "supported_by", &prov).is_ok() {
+        removed = true;
+        was_supporting = true;
+    }
+    // Try contradicted_by
+    if !removed {
+        if g.delete_edge(&evidence_label, &label, "contradicted_by", &prov).is_ok() {
+            removed = true;
+            was_supporting = false;
+        }
+    }
+    drop(g);
+
+    if removed {
+        // Update evidence arrays in sidecar
+        let mut store = state.assessments.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "assessment store lock poisoned")
+        })?;
+        if let Some(record) = store.get_mut(&label) {
+            if was_supporting {
+                // Remove last evidence_for entry (best effort)
+                record.evidence_for.pop();
+            } else {
+                record.evidence_against.pop();
+            }
+        }
+        state.mark_dirty();
+    }
+
+    Ok(Json(serde_json::json!({ "removed": removed, "evidence": evidence_label })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn remove_assessment_evidence() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+// GET /assessments/:label/history
+#[cfg(feature = "assess")]
+pub async fn assessment_history(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let label = urlencoding::decode(&label).unwrap_or_default().to_string();
+    let store = state.assessments.read().map_err(|_| {
+        api_err(StatusCode::INTERNAL_SERVER_ERROR, "assessment store lock poisoned")
+    })?;
+    let record = store.get(&label)
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("assessment not found: {label}")))?;
+
+    Ok(Json(serde_json::json!({ "label": label, "history": record.history })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn assessment_history() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+// POST /assessments/:label/watch
+#[cfg(feature = "assess")]
+pub async fn add_assessment_watch(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+    Json(req): Json<engram_assess::AddWatchRequest>,
+) -> ApiResult<serde_json::Value> {
+    let label = urlencoding::decode(&label).unwrap_or_default().to_string();
+
+    let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+    let prov = provenance(&None);
+    let _ = g.relate(&label, &req.entity_label, "watches", &prov);
+    drop(g);
+    state.mark_dirty();
+
+    Ok(Json(serde_json::json!({ "added": true, "entity": req.entity_label })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn add_assessment_watch() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+// DELETE /assessments/:label/watch/:entity
+#[cfg(feature = "assess")]
+pub async fn remove_assessment_watch(
+    State(state): State<AppState>,
+    Path((label, entity)): Path<(String, String)>,
+) -> ApiResult<serde_json::Value> {
+    let label = urlencoding::decode(&label).unwrap_or_default().to_string();
+    let entity = urlencoding::decode(&entity).unwrap_or_default().to_string();
+
+    let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+    let prov = provenance(&None);
+    let removed = g.delete_edge(&label, &entity, "watches", &prov).is_ok();
+    drop(g);
+
+    if removed {
+        state.mark_dirty();
+    }
+
+    Ok(Json(serde_json::json!({ "removed": removed, "entity": entity })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn remove_assessment_watch() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+#[allow(dead_code)]
+fn feature_not_enabled(name: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: format!("{name} feature not enabled -- rebuild with --features {name}") }))
+}
+
+// ── Secrets endpoints ────────────────────────────────────────────────
+
+// GET /secrets -- List secret keys (never values)
+pub async fn list_secrets(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    if let Some(ref secrets) = state.secrets {
+        let s = secrets.read().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
+        })?;
+        let keys: Vec<&str> = s.keys();
+        Ok(Json(serde_json::json!({ "keys": keys })))
+    } else {
+        Ok(Json(serde_json::json!({ "keys": [], "message": "no secrets store (start server with master password)" })))
+    }
+}
+
+// POST /secrets/:key -- Set a secret
+pub async fn set_secret(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let value = body.get("value")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "missing 'value' field"))?
+        .to_string();
+
+    if let Some(ref secrets) = state.secrets {
+        let mut s = secrets.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
+        })?;
+        s.set(&key, value);
+        s.save().map_err(|e| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to save secrets: {e}"))
+        })?;
+        Ok(Json(serde_json::json!({ "set": key })))
+    } else {
+        Err(api_err(StatusCode::SERVICE_UNAVAILABLE, "no secrets store"))
+    }
+}
+
+// DELETE /secrets/:key -- Remove a secret
+pub async fn delete_secret(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    if let Some(ref secrets) = state.secrets {
+        let mut s = secrets.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
+        })?;
+        let removed = s.remove(&key);
+        if removed {
+            s.save().map_err(|e| {
+                api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to save secrets: {e}"))
+            })?;
+        }
+        Ok(Json(serde_json::json!({ "deleted": removed, "key": key })))
+    } else {
+        Err(api_err(StatusCode::SERVICE_UNAVAILABLE, "no secrets store"))
+    }
+}
+
+// GET /secrets/:key/check -- Check if a secret exists (never expose value)
+pub async fn check_secret(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    if let Some(ref secrets) = state.secrets {
+        let s = secrets.read().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
+        })?;
+        Ok(Json(serde_json::json!({ "key": key, "exists": s.has(&key) })))
+    } else {
+        Ok(Json(serde_json::json!({ "key": key, "exists": false })))
+    }
 }

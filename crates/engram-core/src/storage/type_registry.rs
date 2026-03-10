@@ -46,6 +46,11 @@ impl TypeRegistry {
         Ok(reg)
     }
 
+    /// Look up a type ID by name, without creating it.
+    pub fn get(&self, name: &str) -> Option<u32> {
+        self.lookup.get(name).copied()
+    }
+
     /// Get or create a type ID for a name.
     pub fn get_or_create(&mut self, name: &str) -> u32 {
         if let Some(&id) = self.lookup.get(name) {

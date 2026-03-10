@@ -11,6 +11,7 @@ members = [
     "crates/engram-ingest",
     "crates/engram-action",
     "crates/engram-reason",
+    "crates/engram-assess",
 ]
 exclude = [
     "crates/engram-intel",  # WASM crate -- built separately via wasm-pack
@@ -33,9 +34,10 @@ mesh = ["engram-api/mesh", "engram-mesh"]
 llm = ["engram-api/llm"]
 onnx = ["engram-core/onnx"]
 grpc = ["engram-api/grpc"]
-ingest = ["engram-ingest"]
+ingest = ["engram-api/ingest", "engram-ingest"]
 actions = ["engram-api/actions", "engram-action"]
 reason = ["engram-api/reason", "engram-reason"]
+assess = ["engram-api/assess", "engram-assess"]
 
 [dependencies]
 engram-core = { path = "crates/engram-core" }
@@ -45,10 +47,11 @@ engram-mesh = { path = "crates/engram-mesh", optional = true }
 engram-ingest = { path = "crates/engram-ingest", optional = true }
 engram-action = { path = "crates/engram-action", optional = true }
 engram-reason = { path = "crates/engram-reason", optional = true }
+engram-assess = { path = "crates/engram-assess", optional = true }
 tokio = { workspace = true }
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 license = "LicenseRef-Proprietary"
 repository = "https://github.com/dx111ge/engram"
@@ -70,6 +73,7 @@ engram-api = { path = "crates/engram-api" }
 engram-compute = { path = "crates/engram-compute" }
 engram-mesh = { path = "crates/engram-mesh" }
 engram-a2a = { path = "crates/engram-a2a" }
+engram-assess = { path = "crates/engram-assess" }
 serde_json = { workspace = true }
 
 [profile.release]

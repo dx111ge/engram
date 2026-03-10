@@ -10,6 +10,7 @@ pub mod mcp;
 #[cfg(feature = "mesh")]
 pub mod mesh;
 pub mod natural;
+pub mod secrets;
 pub mod server;
 pub mod state;
 pub mod tools;

@@ -49,7 +49,7 @@ println!("{}", card.to_json());
 
 ## Skills
 
-Engram exposes 8 skills via A2A:
+Engram exposes 9 skills via A2A:
 
 ### store-knowledge
 
@@ -216,6 +216,52 @@ Response includes:
 - `mechanical_suggestions` -- concrete queries that can be run against sources (GDELT, RSS, mesh peers)
 - `llm_available` -- boolean indicating if LLM-powered suggestions can be generated
 - `llm_suggestions` -- deeper investigation plans (only present when LLM is configured and reachable)
+
+### assess-knowledge
+
+Create, evaluate, and track hypotheses with evidence-based probability scoring. Assessments watch graph entities and auto-update when new information arrives.
+
+```json
+{
+  "skillId": "assess-knowledge",
+  "message": {
+    "role": "user",
+    "parts": [{ "type": "text", "text": "Create assessment: NVIDIA stock > $200 by Q3 2026, watch NVIDIA and GPU market" }]
+  }
+}
+```
+
+Structured input for creating assessments:
+
+```json
+{
+  "skillId": "assess-knowledge",
+  "message": {
+    "role": "user",
+    "parts": [{
+      "type": "data",
+      "data": {
+        "action": "create",
+        "title": "NVIDIA stock > $200 by Q3 2026",
+        "category": "financial",
+        "watches": ["NVIDIA", "GPU market"],
+        "initial_probability": 0.50
+      }
+    }]
+  }
+}
+```
+
+Supported actions via text patterns:
+| Pattern | Action |
+|---------|--------|
+| `Create assessment: ...` | Create new assessment with watches |
+| `Evaluate ...` / `Re-evaluate ...` | Trigger manual re-evaluation |
+| `Add evidence ...` | Add supporting/contradicting evidence |
+| `List assessments` | List all active assessments |
+| `Assessment status ...` | Get detail for specific assessment |
+
+Returns probability, shift delta, evidence counts, and score history for evaluation requests.
 
 ## Streaming Task Support
 

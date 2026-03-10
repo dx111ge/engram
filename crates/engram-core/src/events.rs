@@ -44,6 +44,13 @@ pub enum GraphEvent {
         rel_type: Arc<str>,
         confidence: f32,
     },
+    /// An edge was deleted (soft-delete).
+    EdgeDeleted {
+        edge_id: u64,
+        from: u64,
+        to: u64,
+        rel_type: Arc<str>,
+    },
     /// A property was set or changed on a node.
     PropertyChanged {
         node_id: u64,

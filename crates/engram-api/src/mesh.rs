@@ -208,6 +208,11 @@ pub async fn receive_sync(
             Resolution::AcceptIncoming, now_millis(),
         );
     }
+    drop(audit);
+
+    // Persist mesh sidecars after sync
+    state.save_mesh_peers();
+    state.save_mesh_audit();
 
     let result = serde_json::json!({
         "accepted": sync_result.accepted,
@@ -269,6 +274,10 @@ pub async fn register_peer(
     let mut registry = mesh.peers.write()
         .map_err(|_| mesh_err(StatusCode::INTERNAL_SERVER_ERROR, "peer registry lock poisoned"))?;
     registry.register(peer);
+    drop(registry);
+
+    // Persist peer registry to sidecar
+    state.save_mesh_peers();
 
     Ok(Json(serde_json::json!({
         "registered": true,
@@ -290,6 +299,13 @@ pub async fn remove_peer(
     let mut registry = mesh.peers.write()
         .map_err(|_| mesh_err(StatusCode::INTERNAL_SERVER_ERROR, "peer registry lock poisoned"))?;
     let existed = registry.remove(&public_key).is_some();
+    drop(registry);
+
+    // Persist peer registry to sidecar
+    if existed {
+        state.save_mesh_peers();
+    }
+
     Ok(Json(serde_json::json!({
         "removed": existed,
         "peer_key": key,

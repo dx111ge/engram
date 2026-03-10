@@ -33,7 +33,7 @@ const engram = {
     return this._fetch(path, { method: 'POST', body: JSON.stringify(body) });
   },
 
-  // Endpoints
+  // Core endpoints
   health()          { return this._fetch('/health'); },
   stats()           { return this._fetch('/stats'); },
   compute()         { return this._fetch('/compute'); },
@@ -63,6 +63,64 @@ const engram = {
   loadRules(data)   { return this._post('/rules', data); },
   listRules()       { return this._fetch('/rules'); },
   clearRules()      { return this._fetch('/rules', { method: 'DELETE' }); },
+
+  // Ingest
+  ingest(data)           { return this._post('/ingest', data); },
+  ingestFile(data)       { return this._post('/ingest/file', data); },
+  ingestConfigure(data)  { return this._post('/ingest/configure', data); },
+
+  // Sources
+  listSources()          { return this._fetch('/sources'); },
+  sourceUsage(name)      { return this._fetch(`/sources/${encodeURIComponent(name)}/usage`); },
+
+  // Action rules
+  loadActionRules(data)  { return this._post('/actions/rules', data); },
+  listActionRules()      { return this._fetch('/actions/rules'); },
+  dryRunAction(data)     { return this._post('/actions/dry-run', data); },
+
+  // Reasoning
+  reasonGaps()           { return this._fetch('/reason/gaps'); },
+  reasonScan()           { return this._post('/reason/scan', {}); },
+  reasonFrontier()       { return this._fetch('/reason/frontier'); },
+  reasonSuggest(data)    { return this._post('/reason/suggest', data); },
+
+  // Mesh
+  meshProfiles()         { return this._fetch('/mesh/profiles'); },
+  meshDiscover(topic)    { return this._fetch(`/mesh/discover?topic=${encodeURIComponent(topic)}`); },
+  meshFederatedQuery(data) { return this._post('/mesh/query', data); },
+  meshPeers()            { return this._fetch('/mesh/peers'); },
+  meshIdentity()         { return this._fetch('/mesh/identity'); },
+  meshAudit()            { return this._fetch('/mesh/audit'); },
+
+  // Config
+  getConfig()            { return this._fetch('/config'); },
+  setConfig(data)        { return this._post('/config', data); },
+
+  // Assessments
+  listAssessments(params) {
+    let url = '/assessments?';
+    if (params?.category) url += `category=${encodeURIComponent(params.category)}&`;
+    if (params?.status) url += `status=${encodeURIComponent(params.status)}&`;
+    return this._fetch(url);
+  },
+  getAssessment(label)     { return this._fetch(`/assessments/${encodeURIComponent(label)}`); },
+  createAssessment(data)   { return this._post('/assessments', data); },
+  updateAssessment(label, data) {
+    return this._fetch(`/assessments/${encodeURIComponent(label)}`, { method: 'PATCH', body: JSON.stringify(data), headers: { 'Content-Type': 'application/json' } });
+  },
+  deleteAssessment(label)  { return this._fetch(`/assessments/${encodeURIComponent(label)}`, { method: 'DELETE' }); },
+  evaluateAssessment(label){ return this._post(`/assessments/${encodeURIComponent(label)}/evaluate`, {}); },
+  addEvidence(label, data) { return this._post(`/assessments/${encodeURIComponent(label)}/evidence`, data); },
+  removeEvidence(label, id){ return this._fetch(`/assessments/${encodeURIComponent(label)}/evidence/${id}`, { method: 'DELETE' }); },
+  assessHistory(label)     { return this._fetch(`/assessments/${encodeURIComponent(label)}/history`); },
+  addWatch(label, data)    { return this._post(`/assessments/${encodeURIComponent(label)}/watch`, data); },
+  removeWatch(label, entity){ return this._fetch(`/assessments/${encodeURIComponent(label)}/watch/${encodeURIComponent(entity)}`, { method: 'DELETE' }); },
+
+  // Secrets (keys only, never values)
+  listSecrets()          { return this._fetch('/secrets'); },
+  setSecret(key, value)  { return this._post(`/secrets/${encodeURIComponent(key)}`, { value }); },
+  deleteSecret(key)      { return this._fetch(`/secrets/${encodeURIComponent(key)}`, { method: 'DELETE' }); },
+  checkSecret(key)       { return this._fetch(`/secrets/${encodeURIComponent(key)}/check`); },
 };
 
 
@@ -101,8 +159,9 @@ function confidenceColor(c) {
 function confidenceBar(confidence, showLabel = true) {
   const pct = Math.round(confidence * 100);
   const color = confidenceColor(confidence);
+  const label = strengthLabel(confidence);
   return `
-    ${showLabel ? `<div class="confidence-label"><span>Confidence</span><span>${pct}%</span></div>` : ''}
+    ${showLabel ? `<div class="confidence-label"><span>${label}</span><span>${pct}%</span></div>` : ''}
     <div class="confidence-bar">
       <div class="confidence-bar-fill" style="width:${pct}%;background:${color}"></div>
     </div>`;
@@ -112,6 +171,26 @@ function tierBadge(confidence) {
   if (confidence >= 0.8) return '<span class="badge badge-core"><i class="fa-solid fa-star"></i> Core</span>';
   if (confidence >= 0.4) return '<span class="badge badge-active"><i class="fa-solid fa-bolt"></i> Active</span>';
   return '<span class="badge badge-archival"><i class="fa-solid fa-box-archive"></i> Archival</span>';
+}
+
+function strengthLabel(confidence) {
+  if (confidence >= 0.7) return 'Strong';
+  if (confidence >= 0.4) return 'Moderate';
+  return 'Weak';
+}
+
+function strengthBadge(confidence) {
+  const label = strengthLabel(confidence);
+  const color = confidenceColor(confidence);
+  let icon;
+  if (confidence >= 0.7) {
+    icon = 'fa-shield-check';
+  } else if (confidence >= 0.4) {
+    icon = 'fa-shield-halved';
+  } else {
+    icon = 'fa-shield';
+  }
+  return `<span class="badge" style="background:${color};color:#fff"><i class="fa-solid ${icon}"></i> ${label}</span>`;
 }
 
 function loadingHTML(message = 'Loading...') {
@@ -167,7 +246,7 @@ const router = {
       }
     }
 
-    // Default: dashboard
+    // Default: home
     if (this.routes['/']) {
       this.routes['/']();
     }

@@ -231,9 +231,59 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let planner = engram_compute::planner::ComputePlanner::new();
     g.set_compute_planner(planner);
 
-    // Auto-configure embedder from environment if ENGRAM_EMBED_ENDPOINT is set
+    // Auto-configure embedder: config file takes precedence over env vars
     let mut state = engram_api::state::AppState::new(g);
-    if let Some(embedder) = engram_core::ApiEmbedder::from_env() {
+
+    // Load config sidecar if it exists
+    let config_path = {
+        let mut p = path.as_os_str().to_owned();
+        p.push(".config");
+        PathBuf::from(p)
+    };
+    state.load_config(config_path);
+
+    // Determine embedder settings: config file > env vars
+    let (embed_endpoint, embed_model) = {
+        let cfg = state.config.read().unwrap();
+        let ep = cfg.embed_endpoint.clone()
+            .or_else(|| std::env::var("ENGRAM_EMBED_ENDPOINT").ok());
+        let model = cfg.embed_model.clone()
+            .or_else(|| std::env::var("ENGRAM_EMBED_MODEL").ok());
+        (ep, model)
+    };
+
+    if let Some(ref endpoint) = embed_endpoint {
+        let model_name = embed_model.clone()
+            .unwrap_or_else(|| "multilingual-e5-small".into());
+        // Create embedder with dimension probing
+        let probe = engram_core::ApiEmbedder::new(
+            endpoint.clone(), model_name.clone(), 0, None,
+        );
+        match probe.probe_dimension() {
+            Ok(dim) => {
+                let embedder = engram_core::ApiEmbedder::new(
+                    endpoint.clone(), model_name.clone(), dim, None,
+                );
+                println!("Embedder: {} ({}D) via {}", model_name, dim, endpoint);
+                state.set_embedder_info(model_name, dim, endpoint.clone());
+                state.graph.write().unwrap().set_embedder(Box::new(embedder));
+            }
+            Err(e) => {
+                // Fall back to from_env() which has its own error handling
+                println!("Embedder probe failed ({}), trying env fallback...", e);
+                if let Some(embedder) = engram_core::ApiEmbedder::from_env() {
+                    let model = embedder.model_id().to_string();
+                    let dim = embedder.dim();
+                    let ep = std::env::var("ENGRAM_EMBED_ENDPOINT").unwrap_or_default();
+                    println!("Embedder: {} ({}D, env fallback) via {}", model, dim, ep);
+                    state.set_embedder_info(model, dim, ep);
+                    state.graph.write().unwrap().set_embedder(Box::new(embedder));
+                } else {
+                    println!("Embedder: none (probe failed, no env fallback)");
+                }
+            }
+        }
+    } else if let Some(embedder) = engram_core::ApiEmbedder::from_env() {
         let model = embedder.model_id().to_string();
         let dim = embedder.dim();
         let endpoint = std::env::var("ENGRAM_EMBED_ENDPOINT").unwrap_or_default();
@@ -241,7 +291,128 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         state.set_embedder_info(model, dim, endpoint);
         state.graph.write().unwrap().set_embedder(Box::new(embedder));
     } else {
-        println!("Embedder: none (set ENGRAM_EMBED_ENDPOINT for semantic search)");
+        println!("Embedder: none (set ENGRAM_EMBED_ENDPOINT or use POST /config)");
+    }
+
+    // Load assessment sidecar (if assess feature enabled)
+    #[cfg(feature = "assess")]
+    {
+        let assess_path = {
+            let mut p = path.as_os_str().to_owned();
+            p.push(".assessments");
+            PathBuf::from(p)
+        };
+        state.load_assessments(assess_path);
+        let count = state.assessments.read().map(|s| s.len()).unwrap_or(0);
+        if count > 0 {
+            println!("Assessments: {} loaded", count);
+        }
+    }
+
+    // Load action rules sidecar (if actions feature enabled)
+    #[cfg(feature = "actions")]
+    {
+        let rules_path = {
+            let mut p = path.as_os_str().to_owned();
+            p.push(".rules");
+            PathBuf::from(p)
+        };
+        state.action_rules_path = Some(rules_path);
+        state.load_action_rules_from_file();
+    }
+
+    // Load scheduler sidecar (if ingest feature enabled)
+    #[cfg(feature = "ingest")]
+    {
+        let schedules_path = {
+            let mut p = path.as_os_str().to_owned();
+            p.push(".schedules");
+            PathBuf::from(p)
+        };
+        state.load_schedules(schedules_path);
+    }
+
+    // Auto-enable mesh if configured
+    #[cfg(feature = "mesh")]
+    {
+        let mesh_enabled = state.config.read().map(|c| c.mesh_enabled.unwrap_or(false)).unwrap_or(false);
+        if mesh_enabled {
+            let identity_path = {
+                let mut p = path.as_os_str().to_owned();
+                p.push(".identity");
+                PathBuf::from(p)
+            };
+            let keypair = engram_mesh::identity::Keypair::load_or_generate(&identity_path)
+                .unwrap_or_else(|e| {
+                    eprintln!("Warning: failed to load/generate mesh identity: {e}, generating ephemeral");
+                    engram_mesh::identity::Keypair::generate()
+                });
+
+            let peers_path = {
+                let mut p = path.as_os_str().to_owned();
+                p.push(".peers");
+                Some(PathBuf::from(p))
+            };
+            let audit_path = {
+                let mut p = path.as_os_str().to_owned();
+                p.push(".audit");
+                Some(PathBuf::from(p))
+            };
+
+            state.enable_mesh(keypair, peers_path, audit_path);
+            let peer_count = state.mesh.as_ref().map(|m| m.peers.read().map(|p| p.peers.len()).unwrap_or(0)).unwrap_or(0);
+            println!("Mesh: enabled ({} peers)", peer_count);
+        }
+    }
+
+    // Secrets store: prompt for master password
+    let secrets_path = {
+        let mut p = path.as_os_str().to_owned();
+        p.push(".secrets");
+        PathBuf::from(p)
+    };
+
+    if secrets_path.exists() {
+        // Existing secrets file: prompt for password
+        loop {
+            eprint!("Enter master password: ");
+            let password = read_password_line();
+            match engram_api::secrets::SecretStore::open(&secrets_path, &password) {
+                Ok(store) => {
+                    let count = store.len();
+                    state.secrets = Some(std::sync::Arc::new(std::sync::RwLock::new(store)));
+                    println!("Secrets: {} entries loaded", count);
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("Failed to decrypt secrets: {e}. Wrong password?");
+                }
+            }
+        }
+    } else {
+        // First run: offer to create
+        eprint!("No secrets file found. Create a master password? (y/N): ");
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        if answer.trim().eq_ignore_ascii_case("y") {
+            eprint!("Create master password: ");
+            let pw1 = read_password_line();
+            eprint!("Confirm master password: ");
+            let pw2 = read_password_line();
+            if pw1 == pw2 {
+                match engram_api::secrets::SecretStore::create(&secrets_path, &pw1) {
+                    Ok(store) => {
+                        state.secrets = Some(std::sync::Arc::new(std::sync::RwLock::new(store)));
+                        println!("Secrets: file created");
+                    }
+                    Err(e) => eprintln!("Failed to create secrets file: {e}"),
+                }
+            } else {
+                eprintln!("Passwords do not match. Skipping secrets setup.");
+            }
+        } else {
+            println!("Secrets: skipped (no master password)");
+        }
     }
 
     let grpc_addr = args.get(4).map(|s| s.as_str()).unwrap_or("0.0.0.0:50051");
@@ -311,8 +482,16 @@ fn cmd_reindex(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Read a line from stdin (for password prompts).
+/// In a real terminal we'd disable echo, but for simplicity we read a line.
+fn read_password_line() -> String {
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    line.trim().to_string()
+}
+
 fn print_usage() {
-    println!("engram v1.0.0 -- AI Memory Engine");
+    println!("engram v1.1.0 -- AI Memory Engine");
     println!();
     println!("Usage:");
     println!("  engram create [path]                          Create a new .brain file");

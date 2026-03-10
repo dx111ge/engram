@@ -12,6 +12,7 @@ mesh = ["engram-mesh"]
 ingest = ["engram-ingest"]
 actions = ["engram-action"]
 reason = ["engram-reason"]
+assess = ["engram-assess"]
 grpc = ["tonic", "prost"]
 
 [dependencies]
@@ -21,6 +22,9 @@ engram-mesh = { path = "../engram-mesh", optional = true }
 engram-ingest = { path = "../engram-ingest", optional = true }
 engram-action = { path = "../engram-action", optional = true }
 engram-reason = { path = "../engram-reason", optional = true }
+engram-assess = { path = "../engram-assess", optional = true }
+aes-gcm = "0.10"
+argon2 = "0.5"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

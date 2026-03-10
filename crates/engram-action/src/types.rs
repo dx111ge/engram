@@ -70,6 +70,15 @@ pub enum Trigger {
         /// Interval in seconds.
         interval_secs: u64,
     },
+    /// Fires when an assessment probability shifts.
+    AssessmentShift {
+        /// Optional label pattern (glob-style).
+        label_pattern: Option<String>,
+        /// Minimum absolute shift to trigger (e.g. 0.05).
+        min_shift: f32,
+        /// Direction: "up", "down", or None for both.
+        direction: Option<String>,
+    },
 }
 
 /// Conditions evaluated against the event and graph state.
@@ -148,6 +157,11 @@ pub enum Effect {
     Log {
         level: Option<String>,
         message: String,
+    },
+    /// Trigger assessment re-evaluation.
+    AssessEvaluate {
+        /// Only evaluate assessments in these categories (None = all).
+        categories: Option<Vec<String>>,
     },
 }
 

@@ -59,6 +59,7 @@ pub use pipeline::{Pipeline, PlainTextParser, StructuredParser};
 pub use ner_chain::{ChainStrategy, NerChain};
 pub use resolver::{ConservativeResolver, ResolverConfig};
 pub use rules::RuleBasedNer;
+pub use scheduler::{AdaptiveScheduler, SchedulerConfig, SourceSchedule};
 pub use source::{SourceRegistry, SourceInfo, SourceUsage, UsageSnapshot};
 pub use traits::{
     CostModel, Extractor, LanguageDetector, Parser, Resolver, Source, SourceCapabilities,

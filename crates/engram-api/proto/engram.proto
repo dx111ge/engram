@@ -231,3 +231,121 @@ message BulkIngestResponse {
   uint64 errors = 2;
   uint64 duration_ms = 3;
 }
+
+// ── Assessment service (v1.1.0) ──
+
+service EngramAssessService {
+  rpc CreateAssessment(CreateAssessmentRequest) returns (AssessmentResponse);
+  rpc GetAssessment(GetAssessmentRequest) returns (AssessmentDetailResponse);
+  rpc ListAssessments(ListAssessmentsRequest) returns (ListAssessmentsResponse);
+  rpc EvaluateAssessment(EvaluateAssessmentRequest) returns (EvaluationResponse);
+  rpc AddEvidence(AddEvidenceRequest) returns (EvidenceResponse);
+  rpc AddWatch(AddWatchRequest) returns (WatchResponse);
+  // Server-streaming: real-time score updates
+  rpc AssessmentStream(AssessmentStreamRequest) returns (stream ScoreUpdate);
+}
+
+message CreateAssessmentRequest {
+  string title = 1;
+  string description = 2;
+  string category = 3;
+  string timeframe = 4;
+  float initial_probability = 5;
+  repeated string watches = 6;
+}
+
+message AssessmentResponse {
+  string label = 1;
+  float probability = 2;
+  string status = 3;
+}
+
+message GetAssessmentRequest {
+  string label = 1;
+}
+
+message AssessmentDetailResponse {
+  string label = 1;
+  string title = 2;
+  string category = 3;
+  string status = 4;
+  string description = 5;
+  string timeframe = 6;
+  float current_probability = 7;
+  int64 last_evaluated = 8;
+  repeated ScorePointMessage history = 9;
+  repeated string watches = 10;
+}
+
+message ScorePointMessage {
+  int64 timestamp = 1;
+  float probability = 2;
+  float shift = 3;
+  string trigger = 4;
+  string reason = 5;
+}
+
+message ListAssessmentsRequest {
+  string category = 1;
+  string status = 2;
+}
+
+message ListAssessmentsResponse {
+  repeated AssessmentSummaryMessage assessments = 1;
+}
+
+message AssessmentSummaryMessage {
+  string label = 1;
+  string title = 2;
+  string category = 3;
+  string status = 4;
+  float current_probability = 5;
+  int64 last_evaluated = 6;
+  uint32 evidence_count = 7;
+  uint32 watch_count = 8;
+  float last_shift = 9;
+}
+
+message EvaluateAssessmentRequest {
+  string label = 1;
+}
+
+message EvaluationResponse {
+  string label = 1;
+  float old_probability = 2;
+  float new_probability = 3;
+  float shift = 4;
+}
+
+message AddEvidenceRequest {
+  string assessment_label = 1;
+  string node_label = 2;
+  string direction = 3;
+  float confidence = 4;
+}
+
+message EvidenceResponse {
+  bool added = 1;
+  float new_probability = 2;
+}
+
+message AddWatchRequest {
+  string assessment_label = 1;
+  string entity_label = 2;
+}
+
+message WatchResponse {
+  bool added = 1;
+}
+
+message AssessmentStreamRequest {
+  repeated string labels = 1;
+}
+
+message ScoreUpdate {
+  string label = 1;
+  float probability = 2;
+  float shift = 3;
+  string trigger = 4;
+  int64 timestamp = 5;
+}

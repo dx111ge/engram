@@ -203,6 +203,97 @@ pub fn tool_definitions() -> Value {
                         "properties": {}
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "engram_assess_create",
+                    "description": "Create a new assessment (hypothesis tracking) with watched entities and initial probability",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string", "description": "Hypothesis title" },
+                            "category": { "type": "string", "description": "Category: financial, geopolitical, technical, military, social, other" },
+                            "timeframe": { "type": "string", "description": "Time horizon" },
+                            "initial_probability": { "type": "number", "description": "Starting probability (0.05-0.95)" },
+                            "watches": { "type": "array", "items": { "type": "string" }, "description": "Entities to watch" }
+                        },
+                        "required": ["title"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "engram_assess_list",
+                    "description": "List all assessments with probability, evidence count, and status",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "category": { "type": "string", "description": "Filter by category" },
+                            "status": { "type": "string", "description": "Filter by status" }
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "engram_assess_get",
+                    "description": "Get full assessment detail: probability, history, evidence, watched entities",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "label": { "type": "string", "description": "Assessment label" }
+                        },
+                        "required": ["label"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "engram_assess_evaluate",
+                    "description": "Re-evaluate an assessment's probability based on current evidence",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "label": { "type": "string", "description": "Assessment label" }
+                        },
+                        "required": ["label"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "engram_assess_evidence",
+                    "description": "Add evidence to an assessment (supports or contradicts)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "label": { "type": "string", "description": "Assessment label" },
+                            "node_label": { "type": "string", "description": "Evidence entity label" },
+                            "direction": { "type": "string", "description": "'supports' or 'contradicts'" }
+                        },
+                        "required": ["label", "node_label", "direction"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "engram_assess_watch",
+                    "description": "Add a watched entity to an assessment for automatic re-evaluation",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "label": { "type": "string", "description": "Assessment label" },
+                            "entity_label": { "type": "string", "description": "Entity to watch" }
+                        },
+                        "required": ["label"]
+                    }
+                }
             }
         ]
     })

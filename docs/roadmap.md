@@ -45,17 +45,19 @@ All items from the original v0.1.0 roadmap are complete. See `DESIGN.md` for ful
 
 ## v1.1.0 -- Intelligence & Ingestion Layer
 
-**Status:** Complete (all 93 tasks done, 548 tests pass)
+**Status:** Complete (all 100+ tasks done, 561 tests pass)
 **Build plan:** `docs/BUILD-PLAN-v1.1.0.md`
 **Design document:** `docs/DESIGN-v1.1.0.md`
 
-Four new subsystems transform engram from passive storage into an active intelligence engine:
+Six new subsystems transform engram from passive storage into an active intelligence engine:
 
 | Subsystem | Crate | Purpose |
 |-----------|-------|---------|
 | Ingest Pipeline | `engram-ingest` | High-speed ELT with NER, entity resolution, conflict detection |
 | Action Engine | `engram-action` | Event-driven rules triggering effects from graph changes |
 | Reasoning Layer | `engram-reason` | Black area detection, knowledge gap analysis |
+| Assessment System | `engram-assess` | Hypothesis tracking with evidence-based probability scoring |
+| Encrypted Secrets | `engram-api` | AES-256-GCM encrypted secrets storage (API keys, credentials) |
 | Frontend (WASM) | `engram-ui` | Pipeline management, NER config, gap visualization |
 
 **Key decisions:**
@@ -68,6 +70,12 @@ Four new subsystems transform engram from passive storage into an active intelli
 - Budget tracking via source usage endpoints (engram never calculates costs)
 - 3-tier enrichment: mesh (free) > external free > external paid
 - LLM-suggested investigations in frontend (never auto-execute, permanent warning)
+- Assessment auto-evaluation via pure graph propagation (adaptive BFS, no LLM dependency)
+- Encrypted secrets with AES-256-GCM + Argon2id, master password always prompted
+- Edge soft-delete with WAL recovery for assessment evidence/watch removal
+- Full sidecar persistence for rules, schedules, peers, audit (.brain.* files)
+- Assessment integration across all 5 protocols (REST, MCP, A2A, gRPC, LLM tools)
+- Mesh auto-enable from config with ed25519 keypair load-or-generate
 
 ---
 
