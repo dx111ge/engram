@@ -19,13 +19,23 @@
 /// and chunked to keep reads alive during large imports.
 
 pub mod error;
+pub mod gazetteer;
+pub mod lang;
 pub mod pipeline;
+pub mod ner_chain;
+pub mod rules;
 pub mod traits;
 pub mod types;
 
 // Re-exports for convenience.
 pub use error::IngestError;
-pub use pipeline::Pipeline;
+pub use gazetteer::{GazetteerExtractor, GraphGazetteer, GazetteerEntry};
+pub use lang::DefaultLanguageDetector;
+#[cfg(feature = "lang-detect")]
+pub use lang::WhatlangDetector;
+pub use pipeline::{Pipeline, PlainTextParser, StructuredParser};
+pub use ner_chain::{ChainStrategy, NerChain};
+pub use rules::RuleBasedNer;
 pub use traits::{
     CostModel, Extractor, LanguageDetector, Parser, Resolver, Source, SourceCapabilities,
     SourceParams, Transformer,

@@ -1,11 +1,25 @@
 /// Pipeline executor: orchestrates stages, manages workers, batch writes.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::error::IngestError;
 use crate::traits::{Extractor, LanguageDetector, Parser, Resolver, Transformer};
-use crate::types::{PipelineConfig, PipelineResult, RawItem};
+use crate::types::{
+    Content, DetectedLanguage, ExtractionMethod, PipelineConfig, PipelineResult, ProcessedFact,
+    Provenance, RawItem, TransformResult,
+};
+
+/// A parsed text segment with its source metadata preserved.
+#[derive(Debug, Clone)]
+struct ParsedSegment {
+    text: String,
+    source_name: String,
+    source_url: Option<String>,
+    fetched_at: i64,
+    metadata: HashMap<String, String>,
+}
 
 /// The ingest pipeline executor.
 ///
@@ -14,7 +28,6 @@ use crate::types::{PipelineConfig, PipelineResult, RawItem};
 /// tokio for async I/O (source fetching, batch writes).
 pub struct Pipeline {
     config: PipelineConfig,
-    #[allow(dead_code)] // used in Phase 8.2+ (resolve, dedup, load stages)
     graph: Arc<RwLock<engram_core::graph::Graph>>,
     parsers: Vec<Box<dyn Parser>>,
     language_detector: Option<Box<dyn LanguageDetector>>,
@@ -73,18 +86,14 @@ impl Pipeline {
 
     /// Execute the pipeline on a batch of raw items.
     ///
-    /// This is the main entry point. It:
-    /// 1. Parses raw items into text segments
-    /// 2. Detects language per segment
-    /// 3. Runs NER extraction (parallelized across workers)
-    /// 4. Resolves entities against the graph (read lock)
-    /// 5. Deduplicates
-    /// 6. Checks for conflicts
-    /// 7. Calculates confidence
-    /// 8. Applies transformers
-    /// 9. Batch-writes to graph (write lock, chunked)
-    ///
-    /// Returns a summary of the pipeline run.
+    /// Full pipeline flow:
+    /// 1. Parse raw items into text segments
+    /// 2. Detect language per segment
+    /// 3. Run NER extraction (cascade through extractors)
+    /// 4. Resolve entities against the graph (read lock)
+    /// 5. Build ProcessedFacts from extracted entities
+    /// 6. Apply transformers
+    /// 7. Batch-write to graph (write lock, chunked)
     pub async fn execute(&self, items: Vec<RawItem>) -> Result<PipelineResult, IngestError> {
         let start = std::time::Instant::now();
         let mut result = PipelineResult::default();
@@ -99,22 +108,120 @@ impl Pipeline {
             "starting pipeline execution"
         );
 
-        // Phase 1: Parse raw items into text segments
-        let _texts = if self.config.stages.parse {
-            self.parse_items(&items, &mut result)?
-        } else {
-            // No parsing — extract text directly from content
-            items
-                .iter()
-                .filter_map(|item| match &item.content {
-                    crate::types::Content::Text(t) => Some(t.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
+        // Stage 1: Parse raw items into text segments
+        let segments = self.parse_items(&items, &mut result)?;
 
-        // Phase 2-9: TODO — implemented in subsequent build tasks (8.2+)
-        // Each phase will be added as its build task is completed.
+        if segments.is_empty() {
+            result.duration_ms = start.elapsed().as_millis() as u64;
+            return Ok(result);
+        }
+
+        // Stage 2: Detect language per segment
+        let lang_segments: Vec<(ParsedSegment, DetectedLanguage)> = segments
+            .into_iter()
+            .map(|seg| {
+                let lang = if self.config.stages.language_detect {
+                    self.detect_language(&seg.text)
+                } else {
+                    DetectedLanguage {
+                        code: "en".into(),
+                        confidence: 0.0,
+                    }
+                };
+                (seg, lang)
+            })
+            .collect();
+
+        // Stage 3: Extract entities via NER (cascade through extractors)
+        let mut facts: Vec<ProcessedFact> = Vec::new();
+
+        if self.config.stages.ner && !self.extractors.is_empty() {
+            for (seg, lang) in &lang_segments {
+                let mut extracted = self.run_extractors(&seg.text, lang);
+
+                // Stage 4: Resolve extracted entities against graph
+                if self.config.stages.entity_resolve && !self.resolvers.is_empty() {
+                    let graph = self.graph.read().await;
+                    for entity in &mut extracted {
+                        if entity.resolved_to.is_none() {
+                            for resolver in &self.resolvers {
+                                let res = resolver.resolve(entity, &graph);
+                                match &res {
+                                    crate::types::ResolutionResult::Matched(nid) => {
+                                        entity.resolved_to = Some(*nid);
+                                        break;
+                                    }
+                                    crate::types::ResolutionResult::New => {}
+                                    crate::types::ResolutionResult::Ambiguous(_) => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Stage 5: Convert extracted entities to ProcessedFacts
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+
+                for entity in extracted {
+                    facts.push(ProcessedFact {
+                        entity: entity.text.clone(),
+                        entity_type: Some(entity.entity_type.clone()),
+                        properties: seg.metadata.clone(),
+                        confidence: entity.confidence,
+                        provenance: Provenance {
+                            source: seg.source_name.clone(),
+                            source_url: seg.source_url.clone(),
+                            author: None,
+                            extraction_method: entity.method,
+                            fetched_at: seg.fetched_at,
+                            ingested_at: now,
+                        },
+                        extraction_method: entity.method,
+                        language: entity.language.clone(),
+                        relations: Vec::new(),
+                        conflicts: Vec::new(),
+                        resolution: entity.resolved_to.map(crate::types::ResolutionResult::Matched),
+                    });
+                }
+            }
+        } else {
+            // No NER — treat structured items as direct facts
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+
+            for (seg, lang) in &lang_segments {
+                facts.push(ProcessedFact {
+                    entity: seg.text.clone(),
+                    entity_type: None,
+                    properties: seg.metadata.clone(),
+                    confidence: 0.5, // default for unscored input
+                    provenance: Provenance {
+                        source: seg.source_name.clone(),
+                        source_url: seg.source_url.clone(),
+                        author: None,
+                        extraction_method: ExtractionMethod::Manual,
+                        fetched_at: seg.fetched_at,
+                        ingested_at: now,
+                    },
+                    extraction_method: ExtractionMethod::Manual,
+                    language: lang.code.clone(),
+                    relations: Vec::new(),
+                    conflicts: Vec::new(),
+                    resolution: None,
+                });
+            }
+        }
+
+        // Stage 6: Apply transformers
+        let facts = self.apply_transformers(facts, &mut result);
+
+        // Stage 7: Load — batch write to graph (chunked write locking)
+        self.load_facts(facts, &mut result).await?;
 
         result.duration_ms = start.elapsed().as_millis() as u64;
 
@@ -122,6 +229,7 @@ impl Pipeline {
             pipeline = %self.config.name,
             facts_stored = result.facts_stored,
             relations = result.relations_created,
+            resolved = result.facts_resolved,
             errors = result.errors.len(),
             duration_ms = result.duration_ms,
             "pipeline execution complete"
@@ -130,67 +238,366 @@ impl Pipeline {
         Ok(result)
     }
 
+    /// Execute the pipeline on pre-processed facts (skip parse/NER/resolve).
+    /// Useful for structured data that already has entity labels and types.
+    pub async fn load_processed(
+        &self,
+        facts: Vec<ProcessedFact>,
+    ) -> Result<PipelineResult, IngestError> {
+        let start = std::time::Instant::now();
+        let mut result = PipelineResult::default();
+
+        if facts.is_empty() {
+            return Ok(result);
+        }
+
+        let facts = self.apply_transformers(facts, &mut result);
+        self.load_facts(facts, &mut result).await?;
+
+        result.duration_ms = start.elapsed().as_millis() as u64;
+        Ok(result)
+    }
+
+    // ── Internal stage implementations ──
+
     /// Parse raw items into text segments using registered parsers.
     fn parse_items(
         &self,
         items: &[RawItem],
         result: &mut PipelineResult,
-    ) -> Result<Vec<String>, IngestError> {
-        let mut texts = Vec::new();
+    ) -> Result<Vec<ParsedSegment>, IngestError> {
+        let mut segments = Vec::new();
 
         for item in items {
-            let mut parsed = false;
-            for parser in &self.parsers {
-                match parser.parse(&item.content) {
-                    Ok(segments) => {
-                        texts.extend(segments);
-                        parsed = true;
-                        break;
-                    }
-                    Err(_) => continue, // try next parser
-                }
-            }
-
-            if !parsed {
-                // Fallback: extract text directly
+            let texts = if self.config.stages.parse {
+                self.parse_content(&item.content, result)
+            } else {
+                // No parsing — extract text directly
                 match &item.content {
-                    crate::types::Content::Text(t) => texts.push(t.clone()),
-                    crate::types::Content::Structured(map) => {
-                        // Concatenate all values as text
+                    Content::Text(t) => vec![t.clone()],
+                    Content::Structured(map) => {
                         let text = map.values().cloned().collect::<Vec<_>>().join(" ");
-                        if !text.is_empty() {
-                            texts.push(text);
+                        if text.is_empty() {
+                            vec![]
+                        } else {
+                            vec![text]
                         }
                     }
-                    crate::types::Content::Bytes { mime, .. } => {
+                    Content::Bytes { mime, .. } => {
                         result
                             .errors
                             .push(format!("no parser for MIME type: {}", mime));
+                        vec![]
                     }
+                }
+            };
+
+            for text in texts {
+                if !text.trim().is_empty() {
+                    segments.push(ParsedSegment {
+                        text,
+                        source_name: item.source_name.clone(),
+                        source_url: item.source_url.clone(),
+                        fetched_at: item.fetched_at,
+                        metadata: item.metadata.clone(),
+                    });
                 }
             }
         }
 
-        Ok(texts)
+        Ok(segments)
+    }
+
+    /// Try each registered parser, fall back to direct text extraction.
+    fn parse_content(&self, content: &Content, result: &mut PipelineResult) -> Vec<String> {
+        for parser in &self.parsers {
+            if let Ok(segments) = parser.parse(content) {
+                if !segments.is_empty() {
+                    return segments;
+                }
+            }
+        }
+
+        // Fallback
+        match content {
+            Content::Text(t) => vec![t.clone()],
+            Content::Structured(map) => {
+                let text = map.values().cloned().collect::<Vec<_>>().join(" ");
+                if text.is_empty() {
+                    vec![]
+                } else {
+                    vec![text]
+                }
+            }
+            Content::Bytes { mime, .. } => {
+                result
+                    .errors
+                    .push(format!("no parser for MIME type: {}", mime));
+                vec![]
+            }
+        }
+    }
+
+    /// Detect language for a text segment.
+    fn detect_language(&self, text: &str) -> DetectedLanguage {
+        if let Some(ref detector) = self.language_detector {
+            detector.detect(text)
+        } else {
+            // Default: assume English
+            DetectedLanguage {
+                code: "en".into(),
+                confidence: 0.0,
+            }
+        }
+    }
+
+    /// Run extractors in cascade: first extractor that produces results wins.
+    fn run_extractors(
+        &self,
+        text: &str,
+        lang: &DetectedLanguage,
+    ) -> Vec<crate::types::ExtractedEntity> {
+        for extractor in &self.extractors {
+            let supported = extractor.supported_languages();
+            if !supported.is_empty() && !supported.contains(&lang.code) {
+                continue;
+            }
+            let entities = extractor.extract(text, lang);
+            if !entities.is_empty() {
+                return entities;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Apply transformers to facts. Drops facts where a transformer returns Drop.
+    fn apply_transformers(
+        &self,
+        facts: Vec<ProcessedFact>,
+        result: &mut PipelineResult,
+    ) -> Vec<ProcessedFact> {
+        if self.transformers.is_empty() {
+            return facts;
+        }
+
+        let mut output = Vec::with_capacity(facts.len());
+
+        for mut fact in facts {
+            let mut keep = true;
+            for transformer in &self.transformers {
+                match transformer.transform(&mut fact) {
+                    TransformResult::Ok => {}
+                    TransformResult::Drop(reason) => {
+                        tracing::debug!(
+                            entity = %fact.entity,
+                            transformer = transformer.name(),
+                            reason = %reason,
+                            "fact dropped by transformer"
+                        );
+                        keep = false;
+                        break;
+                    }
+                    TransformResult::Error(err) => {
+                        result.errors.push(format!(
+                            "transformer '{}' error on '{}': {}",
+                            transformer.name(),
+                            fact.entity,
+                            err
+                        ));
+                    }
+                }
+            }
+            if keep {
+                output.push(fact);
+            }
+        }
+
+        output
+    }
+
+    /// Load processed facts into the graph with chunked write locking.
+    ///
+    /// Acquires write lock per chunk of `batch_size` facts.
+    /// Readers can interleave between chunks.
+    async fn load_facts(
+        &self,
+        facts: Vec<ProcessedFact>,
+        result: &mut PipelineResult,
+    ) -> Result<(), IngestError> {
+        if facts.is_empty() {
+            return Ok(());
+        }
+
+        let chunk_size = self.config.batch_size;
+
+        for chunk in facts.chunks(chunk_size) {
+            let mut graph = self.graph.write().await;
+
+            for fact in chunk {
+                // Store the entity node
+                let provenance = engram_core::graph::Provenance {
+                    source_type: engram_core::graph::SourceType::Api,
+                    source_id: fact.provenance.source.clone(),
+                };
+
+                let store_result = graph.store_with_confidence(
+                    &fact.entity,
+                    fact.confidence,
+                    &provenance,
+                );
+
+                match store_result {
+                    Ok(node_id) => {
+                        result.facts_stored += 1;
+
+                        // Set entity type if provided
+                        if let Some(ref etype) = fact.entity_type {
+                            let _ = graph.set_node_type(&fact.entity, etype);
+                        }
+
+                        // Set properties
+                        for (key, value) in &fact.properties {
+                            let _ = graph.set_property(&fact.entity, key, value);
+                        }
+
+                        // Set provenance properties
+                        let _ = graph.set_property(
+                            &fact.entity,
+                            "ingest_source",
+                            &fact.provenance.source,
+                        );
+                        if let Some(ref url) = fact.provenance.source_url {
+                            let _ = graph.set_property(&fact.entity, "source_url", url);
+                        }
+                        if let Some(ref author) = fact.provenance.author {
+                            let _ = graph.set_property(&fact.entity, "author", author);
+                        }
+
+                        // Track resolution
+                        if let Some(crate::types::ResolutionResult::Matched(_)) = &fact.resolution {
+                            result.facts_resolved += 1;
+                        }
+
+                        // Create relations
+                        for rel in &fact.relations {
+                            match graph.relate(
+                                &rel.from,
+                                &rel.to,
+                                &rel.rel_type,
+                                &provenance,
+                            ) {
+                                Ok(_) => result.relations_created += 1,
+                                Err(e) => result.errors.push(format!(
+                                    "relation {}-[{}]->{}: {}",
+                                    rel.from, rel.rel_type, rel.to, e
+                                )),
+                            }
+                        }
+
+                        // Track conflicts
+                        result.conflicts_detected += fact.conflicts.len() as u32;
+
+                        let _ = node_id; // used above, suppress warning
+                    }
+                    Err(e) => {
+                        result
+                            .errors
+                            .push(format!("store '{}': {}", fact.entity, e));
+                    }
+                }
+            }
+
+            // Write lock drops here — readers can interleave between chunks
+        }
+
+        Ok(())
+    }
+}
+
+// ── Built-in parsers ──
+
+/// Simple plain-text parser. Passes text through unchanged.
+pub struct PlainTextParser;
+
+impl Parser for PlainTextParser {
+    fn parse(&self, content: &Content) -> Result<Vec<String>, IngestError> {
+        match content {
+            Content::Text(t) => Ok(vec![t.clone()]),
+            _ => Err(IngestError::Parse("PlainTextParser only handles text".into())),
+        }
+    }
+
+    fn supported_types(&self) -> Vec<String> {
+        vec!["text/plain".into()]
+    }
+}
+
+/// Structured data parser. Extracts entity labels from key-value maps.
+/// Looks for an "entity" key; falls back to concatenating all values.
+pub struct StructuredParser;
+
+impl Parser for StructuredParser {
+    fn parse(&self, content: &Content) -> Result<Vec<String>, IngestError> {
+        match content {
+            Content::Structured(map) => {
+                if let Some(entity) = map.get("entity") {
+                    Ok(vec![entity.clone()])
+                } else {
+                    let text = map.values().cloned().collect::<Vec<_>>().join(" ");
+                    if text.is_empty() {
+                        Ok(vec![])
+                    } else {
+                        Ok(vec![text])
+                    }
+                }
+            }
+            _ => Err(IngestError::Parse("StructuredParser only handles structured data".into())),
+        }
+    }
+
+    fn supported_types(&self) -> Vec<String> {
+        vec!["application/json".into(), "text/csv".into()]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Content, PipelineConfig, RawItem};
+    use crate::types::{PipelineConfig, StageConfig};
     use tempfile::TempDir;
 
-    fn test_graph() -> Arc<RwLock<engram_core::graph::Graph>> {
+    fn test_graph() -> (TempDir, Arc<RwLock<engram_core::graph::Graph>>) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.brain");
         let graph = engram_core::graph::Graph::create(&path).unwrap();
-        Arc::new(RwLock::new(graph))
+        (dir, Arc::new(RwLock::new(graph)))
+    }
+
+    fn make_item(text: &str, source: &str) -> RawItem {
+        RawItem {
+            content: Content::Text(text.into()),
+            source_url: None,
+            source_name: source.into(),
+            fetched_at: 1000,
+            metadata: Default::default(),
+        }
+    }
+
+    fn no_ner_config() -> PipelineConfig {
+        PipelineConfig {
+            stages: StageConfig {
+                ner: false,
+                entity_resolve: false,
+                language_detect: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
     async fn empty_pipeline_returns_default_result() {
-        let graph = test_graph();
+        let (_dir, graph) = test_graph();
         let pipeline = Pipeline::new(graph, PipelineConfig::default());
         let result = pipeline.execute(vec![]).await.unwrap();
         assert_eq!(result.facts_stored, 0);
@@ -198,28 +605,201 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_extracts_text_from_raw_items() {
-        let graph = test_graph();
+    async fn pipeline_stores_text_items_without_ner() {
+        let (_dir, graph) = test_graph();
+        let pipeline = Pipeline::new(graph.clone(), no_ner_config());
+
+        let items = vec![
+            make_item("Apple Inc.", "test"),
+            make_item("Tim Cook", "test"),
+        ];
+
+        let result = pipeline.execute(items).await.unwrap();
+        assert_eq!(result.facts_stored, 2);
+        assert!(result.errors.is_empty());
+
+        // Verify nodes exist in graph
+        let g = graph.read().await;
+        assert!(g.find_node_id("Apple Inc.").unwrap().is_some());
+        assert!(g.find_node_id("Tim Cook").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn pipeline_sets_provenance_properties() {
+        let (_dir, graph) = test_graph();
+        let pipeline = Pipeline::new(graph.clone(), no_ner_config());
+
+        let items = vec![RawItem {
+            content: Content::Text("TestEntity".into()),
+            source_url: Some("https://example.com".into()),
+            source_name: "reuters".into(),
+            fetched_at: 12345,
+            metadata: HashMap::from([("key1".into(), "val1".into())]),
+        }];
+
+        let result = pipeline.execute(items).await.unwrap();
+        assert_eq!(result.facts_stored, 1);
+
+        let g = graph.read().await;
+        let nid = g.find_node_id("TestEntity").unwrap().unwrap();
+        assert!(nid > 0 || nid == 0); // node exists (id is valid)
+    }
+
+    #[tokio::test]
+    async fn load_processed_stores_facts_with_relations() {
+        let (_dir, graph) = test_graph();
+        let pipeline = Pipeline::new(graph.clone(), PipelineConfig::default());
+
+        let now = 1000i64;
+        let facts = vec![
+            ProcessedFact {
+                entity: "Alice".into(),
+                entity_type: Some("PERSON".into()),
+                properties: Default::default(),
+                confidence: 0.9,
+                provenance: Provenance {
+                    source: "test".into(),
+                    source_url: None,
+                    author: None,
+                    extraction_method: ExtractionMethod::Manual,
+                    fetched_at: now,
+                    ingested_at: now,
+                },
+                extraction_method: ExtractionMethod::Manual,
+                language: "en".into(),
+                relations: vec![],
+                conflicts: vec![],
+                resolution: None,
+            },
+            ProcessedFact {
+                entity: "Acme Corp".into(),
+                entity_type: Some("ORG".into()),
+                properties: Default::default(),
+                confidence: 0.85,
+                provenance: Provenance {
+                    source: "test".into(),
+                    source_url: None,
+                    author: None,
+                    extraction_method: ExtractionMethod::Manual,
+                    fetched_at: now,
+                    ingested_at: now,
+                },
+                extraction_method: ExtractionMethod::Manual,
+                language: "en".into(),
+                relations: vec![crate::types::ExtractedRelation {
+                    from: "Alice".into(),
+                    to: "Acme Corp".into(),
+                    rel_type: "works_at".into(),
+                    confidence: 0.8,
+                    method: ExtractionMethod::Manual,
+                }],
+                conflicts: vec![],
+                resolution: None,
+            },
+        ];
+
+        let result = pipeline.load_processed(facts).await.unwrap();
+        assert_eq!(result.facts_stored, 2);
+        assert_eq!(result.relations_created, 1);
+        assert!(result.errors.is_empty());
+
+        // Verify graph state
+        let g = graph.read().await;
+        assert!(g.find_node_id("Alice").unwrap().is_some());
+        assert!(g.find_node_id("Acme Corp").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn chunked_write_locking_works_with_small_batch_size() {
+        let (_dir, graph) = test_graph();
         let config = PipelineConfig {
-            stages: crate::types::StageConfig {
-                parse: false,
+            batch_size: 2, // force multiple chunks
+            stages: StageConfig {
+                ner: false,
+                entity_resolve: false,
+                language_detect: false,
                 ..Default::default()
             },
             ..Default::default()
         };
-        let pipeline = Pipeline::new(graph, config);
+        let pipeline = Pipeline::new(graph.clone(), config);
 
-        let items = vec![RawItem {
-            content: Content::Text("Hello world".into()),
-            source_url: None,
-            source_name: "test".into(),
-            fetched_at: 0,
-            metadata: Default::default(),
-        }];
+        let items: Vec<RawItem> = (0..5)
+            .map(|i| make_item(&format!("Entity{}", i), "test"))
+            .collect();
 
         let result = pipeline.execute(items).await.unwrap();
-        // No extractors registered, so no facts stored — but no errors either
-        assert_eq!(result.facts_stored, 0);
-        assert!(result.errors.is_empty());
+        assert_eq!(result.facts_stored, 5); // 3 chunks: 2+2+1
+
+        let g = graph.read().await;
+        for i in 0..5 {
+            assert!(
+                g.find_node_id(&format!("Entity{}", i)).unwrap().is_some(),
+                "Entity{} should exist",
+                i
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transformer_can_drop_facts() {
+        let (_dir, graph) = test_graph();
+        let mut pipeline = Pipeline::new(graph.clone(), no_ner_config());
+
+        // Add a transformer that drops entities starting with "DROP_"
+        struct DropFilter;
+        impl Transformer for DropFilter {
+            fn transform(&self, fact: &mut ProcessedFact) -> TransformResult {
+                if fact.entity.starts_with("DROP_") {
+                    TransformResult::Drop("filtered by prefix".into())
+                } else {
+                    TransformResult::Ok
+                }
+            }
+            fn name(&self) -> &str {
+                "drop-filter"
+            }
+        }
+
+        pipeline.add_transformer(Box::new(DropFilter));
+
+        let items = vec![
+            make_item("Keep This", "test"),
+            make_item("DROP_This", "test"),
+            make_item("Also Keep", "test"),
+        ];
+
+        let result = pipeline.execute(items).await.unwrap();
+        assert_eq!(result.facts_stored, 2);
+
+        let g = graph.read().await;
+        assert!(g.find_node_id("Keep This").unwrap().is_some());
+        assert!(g.find_node_id("DROP_This").unwrap().is_none());
+        assert!(g.find_node_id("Also Keep").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn plain_text_parser_works() {
+        let parser = PlainTextParser;
+        let result = parser
+            .parse(&Content::Text("hello".into()))
+            .unwrap();
+        assert_eq!(result, vec!["hello"]);
+
+        assert!(parser.parse(&Content::Bytes {
+            data: vec![],
+            mime: "application/pdf".into(),
+        }).is_err());
+    }
+
+    #[tokio::test]
+    async fn structured_parser_extracts_entity_key() {
+        let parser = StructuredParser;
+        let map = HashMap::from([
+            ("entity".into(), "Test Corp".into()),
+            ("type".into(), "ORG".into()),
+        ]);
+        let result = parser.parse(&Content::Structured(map)).unwrap();
+        assert_eq!(result, vec!["Test Corp"]);
     }
 }

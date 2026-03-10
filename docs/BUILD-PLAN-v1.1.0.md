@@ -41,11 +41,11 @@
 | # | Task | Effort | Deps | Status |
 |---|------|--------|------|--------|
 | 8.1 | Create `engram-ingest` crate skeleton (traits, pipeline executor) | Medium | -- | `[x]` |
-| 8.2 | Implement pipeline stages: Parse, Transform, Load | Medium | 8.1 | `[ ]` |
-| 8.3 | Language detection integration (lingua-rs) | Small | 8.1 | `[ ]` |
-| 8.4 | Graph gazetteer (dynamic, self-updating) | Medium | 8.1 | `[ ]` |
-| 8.5 | Rule-based NER (regex patterns, per-language rule files) | Medium | 8.3 | `[ ]` |
-| 8.6 | NER chain (cascade/merge strategies) | Medium | 8.4, 8.5 | `[ ]` |
+| 8.2 | Implement pipeline stages: Parse, Transform, Load | Medium | 8.1 | `[x]` |
+| 8.3 | Language detection integration (whatlang) | Small | 8.1 | `[x]` |
+| 8.4 | Graph gazetteer (dynamic, self-updating) | Medium | 8.1 | `[x]` |
+| 8.5 | Rule-based NER (regex patterns, per-language rule files) | Medium | 8.3 | `[x]` |
+| 8.6 | NER chain (cascade/merge strategies) | Medium | 8.4, 8.5 | `[x]` |
 | 8.7 | Anno backend (feature-gated, `anno_backend.rs`, GLiNER2 + coreference) | Medium | 8.6 | `[ ]` |
 | 8.8 | SpaCy HTTP sidecar integration | Small | 8.6 | `[ ]` |
 | 8.9 | LLM fallback NER (with restrictions) | Small | 8.6 | `[ ]` |
