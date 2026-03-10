@@ -299,6 +299,498 @@ curl -X POST http://localhost:3030/quantize \
 
 **Memory impact**: A 1M vector collection at 384 dimensions uses ~1.5 GB with f32 only. With int8 enabled, the f32 vectors are kept for reranking accuracy, and int8 copies are added for traversal. For storage-only savings (future), binary quantization (32x) and product quantization are planned.
 
+### Ingest Pipeline
+
+#### POST /ingest -- Text ingest through NER pipeline
+
+Ingests raw text through the named entity recognition and entity resolution pipeline. Entities and relationships are extracted automatically and stored in the graph.
+
+```bash
+curl -X POST http://localhost:3030/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "text": "Angela Merkel served as Chancellor of Germany from 2005 to 2021.",
+    "source": "wikipedia",
+    "pipeline": "default",
+    "skip": ["coref"]
+  }'
+```
+
+Response:
+```json
+{"entities_extracted": 3, "relations_extracted": 2, "pipeline": "default"}
+```
+
+#### POST /ingest/file -- File ingest (auto-detect format)
+
+Ingests a file by auto-detecting its format (plain text, JSON, CSV, PDF, HTML, Markdown). The file content is run through the NER pipeline.
+
+```bash
+curl -X POST http://localhost:3030/ingest/file \
+  -H 'Content-Type: multipart/form-data' \
+  -F 'file=@report.pdf' \
+  -F 'source=analyst-report' \
+  -F 'pipeline=default'
+```
+
+Response:
+```json
+{"entities_extracted": 47, "relations_extracted": 31, "format_detected": "pdf", "pipeline": "default"}
+```
+
+#### POST /ingest/configure -- Configure pipeline settings
+
+Configure the NER/entity-resolution pipeline parameters (confidence thresholds, enabled stages, deduplication settings).
+
+```bash
+curl -X POST http://localhost:3030/ingest/configure \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "pipeline": "default",
+    "min_entity_confidence": 0.6,
+    "enable_coref": true,
+    "dedup_threshold": 0.85
+  }'
+```
+
+Response:
+```json
+{"pipeline": "default", "configured": true}
+```
+
+#### POST /ingest/webhook/{pipeline_id} -- Webhook receiver for external data
+
+Receives data from external systems (CI/CD, monitoring, RSS aggregators) and routes it through the specified pipeline.
+
+```bash
+curl -X POST http://localhost:3030/ingest/webhook/security-feeds \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "event": "alert",
+    "data": "CVE-2026-1234 affects OpenSSL 3.x before 3.2.1"
+  }'
+```
+
+Response:
+```json
+{"accepted": true, "pipeline_id": "security-feeds", "queued": true}
+```
+
+#### WS /ingest/ws/{pipeline_id} -- WebSocket real-time ingest
+
+WebSocket endpoint for high-throughput real-time ingestion. Accepts newline-delimited JSON (NDJSON) over WebSocket frames. Each line is an independent ingest request processed through the specified pipeline.
+
+```
+ws://localhost:3030/ingest/ws/live-feed
+> {"text": "Server CPU at 95%", "source": "monitoring"}
+> {"text": "Deploy v2.3.1 completed", "source": "ci"}
+< {"accepted": 2, "errors": 0}
+```
+
+### Sources
+
+#### GET /sources -- List configured sources with health status
+
+Returns all configured data sources and their current health (reachable, last check, error rate).
+
+```bash
+curl http://localhost:3030/sources
+```
+
+Response:
+```json
+[
+  {"name": "gdelt", "type": "proxy", "healthy": true, "last_check": 1741340400000, "error_rate": 0.01},
+  {"name": "rss-security", "type": "rss", "healthy": true, "last_check": 1741340380000, "error_rate": 0.0}
+]
+```
+
+#### GET /sources/{name}/usage -- Source usage statistics and budget
+
+Returns usage statistics for a source including query count, token consumption, and budget remaining (if configured).
+
+```bash
+curl http://localhost:3030/sources/gdelt/usage
+```
+
+Response:
+```json
+{"source": "gdelt", "queries_today": 142, "tokens_used": 0, "budget_remaining": null, "rate_limit_remaining": 858}
+```
+
+#### GET /sources/{name}/ledger -- Search ledger (query history, dedup stats)
+
+Returns the search ledger for a source: recent queries, deduplication statistics, and cache hit rates.
+
+```bash
+curl http://localhost:3030/sources/gdelt/ledger
+```
+
+Response:
+```json
+{
+  "source": "gdelt",
+  "total_queries": 1423,
+  "dedup_hits": 312,
+  "cache_hit_rate": 0.22,
+  "recent_queries": [
+    {"query": "Ukraine energy infrastructure", "timestamp": 1741340400000, "results": 15, "cached": false}
+  ]
+}
+```
+
+### Action Engine
+
+#### POST /actions/rules -- Load action rules (TOML format)
+
+Load one or more action rules in TOML format. Rules define trigger conditions and effects (alerts, enrichments, auto-tagging).
+
+```bash
+curl -X POST http://localhost:3030/actions/rules \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "rules_toml": "[[rule]]\nname = \"high-severity-alert\"\ncondition = \"entity.type == '\''vulnerability'\'' && entity.confidence > 0.8\"\neffect = \"alert\"\n[rule.effect_config]\nchannel = \"security-team\""
+  }'
+```
+
+Response:
+```json
+{"loaded": 1, "rule_ids": ["high-severity-alert"]}
+```
+
+#### GET /actions/rules -- List loaded action rules
+
+```bash
+curl http://localhost:3030/actions/rules
+```
+
+Response:
+```json
+[
+  {"id": "high-severity-alert", "name": "high-severity-alert", "condition": "entity.type == 'vulnerability' && entity.confidence > 0.8", "effect": "alert"}
+]
+```
+
+#### GET /actions/rules/{id} -- Get specific rule
+
+```bash
+curl http://localhost:3030/actions/rules/high-severity-alert
+```
+
+Response:
+```json
+{"id": "high-severity-alert", "name": "high-severity-alert", "condition": "entity.type == 'vulnerability' && entity.confidence > 0.8", "effect": "alert", "effect_config": {"channel": "security-team"}}
+```
+
+#### DELETE /actions/rules/{id} -- Delete a rule
+
+```bash
+curl -X DELETE http://localhost:3030/actions/rules/high-severity-alert
+```
+
+Response:
+```json
+{"deleted": "high-severity-alert"}
+```
+
+#### POST /actions/dry-run -- Dry run: test an event against rules
+
+Tests a synthetic event against all loaded rules without executing any effects. Returns which rules would fire.
+
+```bash
+curl -X POST http://localhost:3030/actions/dry-run \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "event": {
+      "entity": "CVE-2026-5678",
+      "type": "vulnerability",
+      "confidence": 0.92
+    }
+  }'
+```
+
+Response:
+```json
+{"matched_rules": ["high-severity-alert"], "effects_suppressed": true}
+```
+
+### Reason / Gap Detection
+
+#### GET /reason/gaps -- List knowledge gaps ranked by severity
+
+Identifies areas of the graph with missing information, weak connections, or contradictions (black areas). Returns gaps ranked by severity.
+
+```bash
+curl "http://localhost:3030/reason/gaps?min_severity=0.5&limit=10"
+```
+
+Response:
+```json
+[
+  {"gap_id": "g-001", "description": "No source attribution for 12 entities in cluster 'networking'", "severity": 0.82, "affected_nodes": 12},
+  {"gap_id": "g-002", "description": "Contradictory facts about server-01 uptime", "severity": 0.65, "affected_nodes": 3}
+]
+```
+
+#### POST /reason/scan -- Full graph scan for black areas
+
+Triggers a full graph scan to detect knowledge gaps, orphan nodes, weak clusters, and contradictions. More thorough than `/reason/gaps` but slower.
+
+```bash
+curl -X POST http://localhost:3030/reason/scan
+```
+
+Response:
+```json
+{"gaps_found": 7, "orphan_nodes": 3, "weak_clusters": 2, "contradictions": 1, "scan_time_ms": 142}
+```
+
+#### GET /reason/frontier -- List frontier nodes
+
+Returns frontier nodes -- entities with very few connections that represent the boundary of current knowledge.
+
+```bash
+curl http://localhost:3030/reason/frontier
+```
+
+Response:
+```json
+[
+  {"label": "CVE-2026-9999", "connections": 1, "confidence": 0.6, "type": "vulnerability"},
+  {"label": "unknown-actor-7", "connections": 0, "confidence": 0.4, "type": "threat_actor"}
+]
+```
+
+#### POST /reason/suggest -- LLM-powered investigation suggestions
+
+Analyzes knowledge gaps and generates investigation suggestions. Returns mechanical query suggestions per gap, and optionally LLM-generated investigation plans if an LLM endpoint is configured.
+
+```bash
+curl -X POST http://localhost:3030/reason/suggest \
+  -H 'Content-Type: application/json' \
+  -d '{"gap_id": "g-001", "use_llm": true}'
+```
+
+Response:
+```json
+{
+  "gap_id": "g-001",
+  "mechanical_suggestions": [
+    "Search GDELT for entities in cluster 'networking'",
+    "Query mesh peers for 'networking' topic coverage"
+  ],
+  "llm_suggestions": [
+    "Investigate network topology documentation from infrastructure team",
+    "Cross-reference with recent change management tickets"
+  ]
+}
+```
+
+### Mesh Discovery
+
+#### GET /mesh/profiles -- List peer knowledge profiles
+
+Returns auto-derived knowledge profiles for all known mesh peers, including their domain coverage, depth, and freshness.
+
+```bash
+curl http://localhost:3030/mesh/profiles
+```
+
+Response:
+```json
+[
+  {
+    "peer_id": "a3f8c21b",
+    "name": "team-server",
+    "domains": [
+      {"domain": "security", "depth": 3, "node_count": 1200, "avg_confidence": 0.78, "freshness": 0.92}
+    ]
+  }
+]
+```
+
+#### GET /mesh/discover?topic=X -- Find peers by topic
+
+Discover mesh peers whose knowledge profiles cover the requested topic.
+
+```bash
+curl "http://localhost:3030/mesh/discover?topic=cybersecurity"
+```
+
+Response:
+```json
+[
+  {"peer_id": "a3f8c21b", "name": "team-server", "relevance": 0.91, "depth": 3, "node_count": 1200}
+]
+```
+
+#### POST /mesh/query -- Federated query across mesh peers
+
+Execute a query that fans out to relevant mesh peers, merges results with deduplication, and ranks by confidence. Respects ACL sensitivity clearance.
+
+```bash
+curl -X POST http://localhost:3030/mesh/query \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "What is known about CVE-2026-1234?",
+    "min_confidence": 0.3,
+    "max_hops": 2,
+    "clearance": "internal"
+  }'
+```
+
+Response:
+```json
+{
+  "results": [
+    {"label": "CVE-2026-1234", "confidence": 0.88, "source_peer": "a3f8c21b", "hops": 1},
+    {"label": "OpenSSL-3.x", "confidence": 0.72, "source_peer": "local", "hops": 0}
+  ],
+  "peers_queried": 3,
+  "peers_responded": 2
+}
+```
+
+### Streaming
+
+#### GET /events/stream -- SSE event subscription (graph changes)
+
+Server-Sent Events stream of real-time graph changes (node created, edge added, confidence updated, etc.).
+
+```bash
+curl -N http://localhost:3030/events/stream
+```
+
+```
+event: node_created
+data: {"label": "CVE-2026-5678", "type": "vulnerability", "confidence": 0.9}
+
+event: edge_added
+data: {"from": "CVE-2026-5678", "to": "OpenSSL", "relationship": "affects"}
+
+event: confidence_updated
+data: {"label": "server-01", "old": 0.85, "new": 0.87, "reason": "reinforced"}
+```
+
+#### GET /batch/jobs/{id}/stream -- SSE batch job progress
+
+Stream progress updates for a running batch import job.
+
+```bash
+curl -N http://localhost:3030/batch/jobs/job-001/stream
+```
+
+```
+event: progress
+data: {"job_id": "job-001", "processed": 500, "total": 2000, "errors": 0}
+
+event: progress
+data: {"job_id": "job-001", "processed": 1000, "total": 2000, "errors": 1}
+
+event: complete
+data: {"job_id": "job-001", "processed": 2000, "total": 2000, "errors": 3}
+```
+
+#### GET /enrich/stream?q=X -- SSE enrichment streaming
+
+Stream enrichment results as they arrive from multiple sources (GDELT, RSS, LLM, mesh peers).
+
+```bash
+curl -N "http://localhost:3030/enrich/stream?q=Ukraine+energy+infrastructure"
+```
+
+```
+event: source_started
+data: {"source": "gdelt", "query": "Ukraine energy infrastructure"}
+
+event: result
+data: {"source": "gdelt", "entity": "Zaporizhzhia NPP", "confidence": 0.85}
+
+event: result
+data: {"source": "rss-security", "entity": "IAEA Report March 2026", "confidence": 0.78}
+
+event: enrichment_complete
+data: {"sources_queried": 3, "total_results": 12}
+```
+
+### Proxy
+
+#### GET /proxy/gdelt -- GDELT proxy
+
+Proxies requests to the GDELT API, adding caching, rate limiting, and result normalization.
+
+```bash
+curl "http://localhost:3030/proxy/gdelt?query=cybersecurity+Russia&maxrecords=10&format=json"
+```
+
+Response: GDELT API response (JSON), cached and rate-limited.
+
+#### GET /proxy/rss -- RSS feed proxy
+
+Fetches and parses RSS feeds, normalizing entries into engram-compatible entity format.
+
+```bash
+curl "http://localhost:3030/proxy/rss?url=https://feeds.example.com/security.xml&limit=20"
+```
+
+Response:
+```json
+{"entries": [{"title": "New vulnerability disclosed", "published": "2026-03-10T12:00:00Z", "summary": "..."}], "count": 20}
+```
+
+#### POST /proxy/llm -- LLM proxy
+
+Proxies requests to the configured LLM endpoint (Ollama, OpenAI, vLLM), adding context from the knowledge graph.
+
+```bash
+curl -X POST http://localhost:3030/proxy/llm \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "Analyze the implications of CVE-2026-1234",
+    "context_entities": ["CVE-2026-1234", "OpenSSL"],
+    "max_tokens": 500
+  }'
+```
+
+Response:
+```json
+{"response": "Based on the knowledge graph, CVE-2026-1234 affects...", "tokens_used": 312, "context_injected": 2}
+```
+
+#### GET /proxy/search -- Web search proxy
+
+Proxies web search queries through configured search backends, with result caching and deduplication.
+
+```bash
+curl "http://localhost:3030/proxy/search?q=CVE-2026-1234+exploit&limit=10"
+```
+
+Response:
+```json
+{"results": [{"title": "CVE-2026-1234 Analysis", "url": "https://...", "snippet": "..."}], "count": 10, "cached": false}
+```
+
+### Batch Streaming
+
+#### POST /batch/stream -- NDJSON streaming batch import
+
+Accepts newline-delimited JSON for streaming batch import. Each line is processed independently. Results stream back as NDJSON.
+
+```bash
+curl -X POST http://localhost:3030/batch/stream \
+  -H 'Content-Type: application/x-ndjson' \
+  -d '{"entity": "server-01", "type": "server", "confidence": 0.9}
+{"entity": "server-02", "type": "server", "confidence": 0.85}
+{"from": "server-01", "to": "server-02", "relationship": "replicates_to"}'
+```
+
+Response (NDJSON):
+```
+{"ok": true, "action": "store", "label": "server-01"}
+{"ok": true, "action": "store", "label": "server-02"}
+{"ok": true, "action": "relate", "from": "server-01", "to": "server-02"}
+```
+
 ### System
 
 #### GET /health
@@ -308,7 +800,7 @@ curl http://localhost:3030/health
 ```
 
 ```json
-{"status": "ok", "version": "0.1.0"}
+{"status": "ok", "version": "1.1.0"}
 ```
 
 #### GET /stats

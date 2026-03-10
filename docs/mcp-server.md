@@ -152,6 +152,166 @@ Explain how a fact was derived, its confidence, edges, and co-occurrences.
 Parameters:
 - `entity` (required) — entity to explain
 
+### engram_gaps
+
+List knowledge gaps (black areas) in the graph, ranked by severity.
+
+Parameters:
+- `min_severity` — minimum severity threshold (0.0-1.0, default: 0.0)
+- `limit` — max results (default: 10)
+
+Example call:
+```json
+{
+  "name": "engram_gaps",
+  "arguments": {
+    "min_severity": 0.5,
+    "limit": 5
+  }
+}
+```
+
+Returns:
+```json
+[
+  {"gap_id": "g-001", "description": "No source attribution for 12 entities in cluster 'networking'", "severity": 0.82, "affected_nodes": 12}
+]
+```
+
+### engram_frontier
+
+List frontier nodes -- entities with few connections at the boundary of current knowledge.
+
+Parameters: none (returns all frontier nodes)
+
+Example call:
+```json
+{
+  "name": "engram_frontier",
+  "arguments": {}
+}
+```
+
+Returns:
+```json
+[
+  {"label": "CVE-2026-9999", "connections": 1, "confidence": 0.6, "type": "vulnerability"}
+]
+```
+
+### engram_mesh_discover
+
+Find mesh peers whose knowledge profiles cover a given topic.
+
+Parameters:
+- `topic` (required) — topic to search for
+
+Example call:
+```json
+{
+  "name": "engram_mesh_discover",
+  "arguments": {
+    "topic": "cybersecurity"
+  }
+}
+```
+
+Returns:
+```json
+[
+  {"peer_id": "a3f8c21b", "name": "team-server", "relevance": 0.91, "depth": 3}
+]
+```
+
+### engram_mesh_query
+
+Federated query across the knowledge mesh. Fans out to relevant peers, merges and deduplicates results.
+
+Parameters:
+- `query` (required) — search query text
+- `min_confidence` — minimum confidence threshold (default: 0.0)
+- `max_hops` — maximum peer hops (default: 2)
+- `clearance` — sensitivity clearance level: `public`, `internal`, `confidential`, `restricted` (default: `public`)
+
+Example call:
+```json
+{
+  "name": "engram_mesh_query",
+  "arguments": {
+    "query": "What is known about CVE-2026-1234?",
+    "min_confidence": 0.3,
+    "max_hops": 2,
+    "clearance": "internal"
+  }
+}
+```
+
+Returns:
+```json
+{
+  "results": [
+    {"label": "CVE-2026-1234", "confidence": 0.88, "source_peer": "a3f8c21b", "hops": 1}
+  ],
+  "peers_queried": 3,
+  "peers_responded": 2
+}
+```
+
+### engram_ingest
+
+Ingest text through the NER/entity-resolution pipeline. **Restricted** -- requires appropriate access level.
+
+Parameters:
+- `text` (required) — text to ingest
+- `source` — provenance label for extracted entities
+- `pipeline` — pipeline name (default: `default`)
+- `skip` — list of pipeline stages to skip (e.g., `["coref"]`)
+
+Example call:
+```json
+{
+  "name": "engram_ingest",
+  "arguments": {
+    "text": "Angela Merkel served as Chancellor of Germany from 2005 to 2021.",
+    "source": "wikipedia",
+    "pipeline": "default"
+  }
+}
+```
+
+Returns:
+```json
+{"entities_extracted": 3, "relations_extracted": 2, "pipeline": "default"}
+```
+
+### engram_create_rule
+
+Create an action engine rule. **Restricted** -- rules can trigger alerts and automated effects.
+
+Parameters:
+- `name` (required) — rule name/identifier
+- `condition` (required) — trigger condition expression
+- `effect` (required) — effect type (`alert`, `enrich`, `tag`, `webhook`)
+- `effect_config` — effect-specific configuration object
+
+Example call:
+```json
+{
+  "name": "engram_create_rule",
+  "arguments": {
+    "name": "high-severity-alert",
+    "condition": "entity.type == 'vulnerability' && entity.confidence > 0.8",
+    "effect": "alert",
+    "effect_config": {"channel": "security-team"}
+  }
+}
+```
+
+Returns:
+```json
+{"loaded": 1, "rule_ids": ["high-severity-alert"]}
+```
+
 ## Available Resources
 
 ### engram://stats
@@ -180,7 +340,7 @@ The MCP server implements the `2024-11-05` protocol version.
 
 ```
 → {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"engram","version":"0.1.0"}}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"engram","version":"1.1.0"}}}
 
 → {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 ← {"jsonrpc":"2.0","id":2,"result":{"tools":[...]}}

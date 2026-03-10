@@ -31,7 +31,7 @@ println!("{}", card.to_json());
   "name": "engram",
   "description": "High-performance AI memory engine...",
   "url": "http://localhost:3030",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "protocolVersion": "0.2",
   "capabilities": {
     "streaming": true,
@@ -49,7 +49,7 @@ println!("{}", card.to_json());
 
 ## Skills
 
-Engram exposes 5 skills via A2A:
+Engram exposes 8 skills via A2A:
 
 ### store-knowledge
 
@@ -133,6 +133,110 @@ Explain provenance, confidence, edges, and co-occurrences for an entity.
 ```
 
 Returns confidence, properties, incoming/outgoing edges, and co-occurrence data.
+
+### analyze-gaps
+
+Detect knowledge gaps and black areas in the graph. Returns gaps ranked by severity with affected node counts and descriptions.
+
+```json
+{
+  "skillId": "analyze-gaps",
+  "message": {
+    "role": "user",
+    "parts": [{ "type": "text", "text": "What knowledge gaps exist in the security domain?" }]
+  }
+}
+```
+
+Supports the keyword "critical" to filter for higher severity thresholds only:
+
+```json
+{
+  "skillId": "analyze-gaps",
+  "message": {
+    "role": "user",
+    "parts": [{ "type": "text", "text": "Show critical gaps in our infrastructure knowledge" }]
+  }
+}
+```
+
+Returns gaps with severity, affected node count, and suggested remediation queries.
+
+### federated-search
+
+Search across the local graph with mesh-aware ACL filtering. Results include peer attribution showing which mesh node contributed each fact.
+
+```json
+{
+  "skillId": "federated-search",
+  "message": {
+    "role": "user",
+    "parts": [{ "type": "text", "text": "What do mesh peers know about CVE-2026-1234?" }]
+  }
+}
+```
+
+Structured input for fine-grained control:
+
+```json
+{
+  "skillId": "federated-search",
+  "message": {
+    "role": "user",
+    "parts": [{
+      "type": "data",
+      "data": {
+        "query": "CVE-2026-1234",
+        "min_confidence": 0.3,
+        "max_hops": 2,
+        "clearance": "internal"
+      }
+    }]
+  }
+}
+```
+
+Returns facts with confidence, source peer ID, and hop count.
+
+### suggest-investigations
+
+Analyze knowledge gaps and generate investigation suggestions. Returns mechanical query suggestions per gap (always available) and indicates whether LLM-powered suggestions are available (requires configured LLM endpoint).
+
+```json
+{
+  "skillId": "suggest-investigations",
+  "message": {
+    "role": "user",
+    "parts": [{ "type": "text", "text": "How should we investigate the networking gaps?" }]
+  }
+}
+```
+
+Response includes:
+- `mechanical_suggestions` -- concrete queries that can be run against sources (GDELT, RSS, mesh peers)
+- `llm_available` -- boolean indicating if LLM-powered suggestions can be generated
+- `llm_suggestions` -- deeper investigation plans (only present when LLM is configured and reachable)
+
+## Streaming Task Support
+
+Long-running tasks (large graph scans, federated queries, enrichment) can be streamed via Server-Sent Events using `stream_task` and `format_sse_stream`.
+
+```rust
+use engram_a2a::skill::stream_task;
+use engram_a2a::streaming::format_sse_stream;
+
+// Stream a long-running task
+let events = stream_task(&request, &graph);
+for event in &events {
+    print!("{}", format_sse_stream(event));
+}
+```
+
+The streaming protocol sends incremental `artifact-chunk` events as results become available, followed by a `task-complete` event. Clients can process partial results immediately rather than waiting for the full response. This is particularly useful for:
+
+- `analyze-gaps` on large graphs (thousands of nodes)
+- `federated-search` where peer responses arrive at different times
+- `suggest-investigations` where mechanical suggestions arrive before LLM suggestions
 
 ## Task Lifecycle
 
