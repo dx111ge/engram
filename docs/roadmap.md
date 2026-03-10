@@ -1,6 +1,6 @@
 # Engram Roadmap
 
-**Last updated:** 2026-03-10
+**Last updated:** 2026-03-11
 
 ---
 
@@ -45,7 +45,8 @@ All items from the original v0.1.0 roadmap are complete. See `DESIGN.md` for ful
 
 ## v1.1.0 -- Intelligence & Ingestion Layer
 
-**Status:** Design phase
+**Status:** Complete (all 93 tasks done, 548 tests pass)
+**Build plan:** `docs/BUILD-PLAN-v1.1.0.md`
 **Design document:** `docs/DESIGN-v1.1.0.md`
 
 Four new subsystems transform engram from passive storage into an active intelligence engine:
@@ -70,7 +71,47 @@ Four new subsystems transform engram from passive storage into an active intelli
 
 ---
 
-## Deferred (Post v1.1.0)
+## v1.2.0 -- Integrations & Connectors
+
+**Status:** Planning
+
+### Google Workspace Integration (via `gws` CLI)
+
+Google released `@googleworkspace/cli` (`gws`) -- a unified CLI for all Workspace APIs
+(Gmail, Drive, Calendar, Sheets, Docs) with structured JSON output and a built-in MCP server,
+dynamically generated from Google's Discovery Service.
+
+**Why this matters for engram:**
+- Structured JSON output skips NER/parsing -- straight to entity resolution + graph loading
+- Built-in MCP server enables direct MCP-to-MCP bridge (engram <-> gws)
+- Discovery Service dynamic API means the source adapter auto-updates when Google adds services
+- Auth via `gws auth` (OAuth2) -- engram stays out of credential management
+
+**Integration plan:**
+
+| # | Task | Effort | Notes |
+|---|------|--------|-------|
+| 12.1 | `GwsSource` ingest adapter (shells out to `gws`, pipes JSON through mesh fast path) | Medium | Maps to `RawItem::Structured`, skips NER |
+| 12.2 | Calendar event ingestion (temporal nodes, meeting participants as relationship edges) | Medium | `gws calendar events list --format json` |
+| 12.3 | Gmail thread ingestion (provenance chains, who-said-what, corroboration scoring) | Medium | Thread -> facts with `authored_by` edges |
+| 12.4 | Drive document source nodes (`authored_by` edges feeding learned trust) | Small | Document metadata as properties |
+| 12.5 | Sheets batch ingest (each row = entity + properties) | Small | Maps to structured `RawItem` |
+| 12.6 | MCP bridge: engram MCP client connects to `gws` MCP server | Medium | Action engine rules can trigger `gws` queries |
+| 12.7 | Action engine rule templates for Workspace triggers | Small | E.g., "new email from X about Y -> ingest" |
+| 12.8 | Workspace-aware entity resolution (match contacts to graph entities) | Medium | Google contact IDs as stable identifiers |
+
+### Other Planned Integrations
+
+| Integration | Priority | Notes |
+|-------------|----------|-------|
+| Slack ingest source | Medium | Channel history as provenance chains |
+| GitHub/Gitea ingest source | Medium | Issues, PRs, commits as knowledge nodes |
+| RSS/Atom feed source | Low | Periodic polling via scheduler, content hash dedup |
+| Webhook-triggered ingest templates | Low | Generic JSON webhook -> entity mapping config |
+
+---
+
+## Deferred (Post v1.2.0)
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
