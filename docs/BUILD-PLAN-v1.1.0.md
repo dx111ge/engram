@@ -46,12 +46,12 @@
 | 8.4 | Graph gazetteer (dynamic, self-updating) | Medium | 8.1 | `[x]` |
 | 8.5 | Rule-based NER (regex patterns, per-language rule files) | Medium | 8.3 | `[x]` |
 | 8.6 | NER chain (cascade/merge strategies) | Medium | 8.4, 8.5 | `[x]` |
-| 8.7 | Anno backend (feature-gated, `anno_backend.rs`, GLiNER2 + coreference) | Medium | 8.6 | `[ ]` |
-| 8.8 | SpaCy HTTP sidecar integration | Small | 8.6 | `[ ]` |
-| 8.9 | LLM fallback NER (with restrictions) | Small | 8.6 | `[ ]` |
-| 8.10 | Entity resolution (conservative, progressive 4-step) | Large | 8.6 | `[ ]` |
-| 8.11 | Deduplication (content hash + semantic) | Small | 8.10 | `[ ]` |
-| 8.12 | Conflict detection and resolution | Medium | 8.11 | `[ ]` |
+| 8.7 | Anno backend (feature-gated, `anno_backend.rs`, GLiNER2 + coreference) | Medium | 8.6 | `[x]` |
+| 8.8 | SpaCy HTTP sidecar integration | Small | 8.6 | `[x]` |
+| 8.9 | LLM fallback NER (with restrictions) | Small | 8.6 | `[x]` |
+| 8.10 | Entity resolution (conservative, progressive 4-step) | Large | 8.6 | `[x]` |
+| 8.11 | Deduplication (content hash + semantic) | Small | 8.10 | `[x]` |
+| 8.12 | Conflict detection and resolution | Medium | 8.11 | `[x]` |
 | 8.13 | Confidence calculation (learned trust * extraction confidence, author > source > baseline) | Small | 8.12 | `[ ]` |
 | 8.14 | Multi-threaded pipeline executor (rayon + tokio) | Medium | 8.2 | `[ ]` |
 | 8.15 | Pipeline shortcuts (`?skip=ner,resolve` query params) | Small | 8.14 | `[ ]` |

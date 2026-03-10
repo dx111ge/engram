@@ -18,16 +18,26 @@
 /// (rayon for CPU-bound NER, tokio for async I/O). Writes are batched
 /// and chunked to keep reads alive during large imports.
 
+pub mod anno_backend;
+pub mod conflict;
+pub mod dedup;
 pub mod error;
 pub mod gazetteer;
 pub mod lang;
-pub mod pipeline;
+#[cfg(feature = "llm-ner")]
+pub mod llm_ner;
 pub mod ner_chain;
+pub mod pipeline;
+pub mod resolver;
 pub mod rules;
+#[cfg(feature = "spacy")]
+pub mod spacy;
 pub mod traits;
 pub mod types;
 
 // Re-exports for convenience.
+pub use conflict::{ConflictConfig, ConflictDetector};
+pub use dedup::{ContentDedup, dedup_batch, dedup_by_label};
 pub use error::IngestError;
 pub use gazetteer::{GazetteerExtractor, GraphGazetteer, GazetteerEntry};
 pub use lang::DefaultLanguageDetector;
@@ -35,6 +45,7 @@ pub use lang::DefaultLanguageDetector;
 pub use lang::WhatlangDetector;
 pub use pipeline::{Pipeline, PlainTextParser, StructuredParser};
 pub use ner_chain::{ChainStrategy, NerChain};
+pub use resolver::{ConservativeResolver, ResolverConfig};
 pub use rules::RuleBasedNer;
 pub use traits::{
     CostModel, Extractor, LanguageDetector, Parser, Resolver, Source, SourceCapabilities,
