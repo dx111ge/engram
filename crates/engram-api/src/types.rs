@@ -294,12 +294,17 @@ pub struct JsonLdExportResponse {
 pub struct JsonLdImportRequest {
     pub data: serde_json::Value,
     pub source: Option<String>,
+    /// Trust level for the import source (0.0–1.0, default 0.5).
+    /// Controls how much overlapping data affects existing confidence.
+    pub trust: Option<f32>,
 }
 
 #[derive(Serialize)]
 pub struct JsonLdImportResponse {
     pub nodes_imported: u32,
     pub edges_imported: u32,
+    pub nodes_merged: u32,
+    pub edges_merged: u32,
     pub errors: Option<Vec<String>>,
 }
 
@@ -339,6 +344,32 @@ pub struct IngestConfigureRequest {
     pub workers: Option<usize>,
     /// Stages to skip by default.
     pub skip: Option<String>,
+}
+
+/// Request body for `POST /ingest/analyze`.
+#[derive(Deserialize)]
+pub struct AnalyzeRequest {
+    /// Text to analyze.
+    pub text: String,
+}
+
+/// A single extracted entity in an analyze response.
+#[derive(Serialize)]
+pub struct AnalyzeEntityResponse {
+    pub text: String,
+    pub entity_type: String,
+    pub confidence: f32,
+    pub method: String,
+    pub span: (usize, usize),
+    pub resolved_to: Option<u64>,
+}
+
+/// Response for `POST /ingest/analyze`.
+#[derive(Serialize)]
+pub struct AnalyzeResponse {
+    pub entities: Vec<AnalyzeEntityResponse>,
+    pub language: String,
+    pub duration_ms: u64,
 }
 
 /// Response for ingest endpoints.

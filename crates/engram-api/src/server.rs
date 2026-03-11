@@ -6,6 +6,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
+use crate::auth;
 use crate::handlers;
 use crate::state::AppState;
 use crate::tools;
@@ -59,6 +60,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/mesh/identity", get(mesh_identity_handler))
         // Ingest pipeline (available when compiled with `ingest` feature)
         .route("/ingest", post(handlers::ingest))
+        .route("/ingest/analyze", post(handlers::ingest_analyze))
         .route("/ingest/file", post(handlers::ingest_file))
         .route("/ingest/configure", post(handlers::ingest_configure))
         .route("/sources", get(handlers::list_sources))
@@ -92,6 +94,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/proxy/gdelt", get(handlers::proxy_gdelt))
         .route("/proxy/rss", get(handlers::proxy_news_rss))
         .route("/proxy/llm", post(handlers::proxy_llm))
+        .route("/proxy/models", get(handlers::proxy_llm_models))
         .route("/proxy/search", get(handlers::proxy_web_search))
         // Assessments
         .route("/assessments", post(handlers::create_assessment))
@@ -114,6 +117,9 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config", get(handlers::get_config))
         .route("/config", post(handlers::set_config))
         .route("/config/onnx-model", get(handlers::check_onnx_model))
+        .route("/config/onnx-download", post(handlers::download_onnx_model))
+        .route("/config/ner-download", post(handlers::download_ner_model))
+        .route("/config/ner-model", get(handlers::check_ner_model))
         .merge(
             Router::new()
                 .route("/config/onnx-model", post(handlers::upload_onnx_model))
@@ -121,12 +127,30 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         )
         // Reindex
         .route("/reindex", post(handlers::reindex))
+        // Auth
+        .route("/auth/status", get(auth::auth_status))
+        .route("/auth/setup", post(auth::auth_setup))
+        .route("/auth/login", post(auth::auth_login))
+        .route("/auth/logout", post(auth::auth_logout))
+        .route("/auth/users", get(auth::list_users))
+        .route("/auth/users", post(auth::create_user))
+        .route("/auth/users/{username}", axum::routing::put(auth::update_user))
+        .route("/auth/users/{username}", delete(auth::delete_user))
+        .route("/auth/change-password", post(auth::change_password))
+        .route("/auth/api-keys", get(auth::list_api_keys))
+        .route("/auth/api-keys", post(auth::create_api_key))
+        .route("/auth/api-keys/{id}", delete(auth::revoke_api_key))
         // System
         .route("/health", get(handlers::health))
         .route("/stats", get(handlers::stats))
         .route("/compute", get(handlers::compute))
         .route("/explain/{label}", get(handlers::explain))
         .route("/tools", get(tools_handler))
+        // Auth middleware (route_layer = applies to routes only, not fallback)
+        .route_layer(axum::middleware::from_fn_with_state::<_, AppState, (axum::extract::State<AppState>, axum::extract::Request)>(
+            state.clone(),
+            auth::auth_middleware,
+        ))
         // Middleware
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
@@ -248,10 +272,17 @@ pub async fn serve_with_frontend(state: AppState, addr: &str, frontend_dir: Opti
     let checkpoint_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut cleanup_counter = 0u32;
         loop {
             interval.tick().await;
             if checkpoint_state.checkpoint_if_dirty() {
                 tracing::debug!("background checkpoint complete");
+            }
+            // Clean up expired sessions every 60 seconds (12 ticks)
+            cleanup_counter += 1;
+            if cleanup_counter >= 12 {
+                cleanup_counter = 0;
+                auth::cleanup_sessions(&checkpoint_state.sessions);
             }
         }
     });

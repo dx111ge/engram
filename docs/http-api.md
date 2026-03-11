@@ -21,6 +21,120 @@ engram serve
 engram serve /path/to/my.brain 127.0.0.1:8080
 ```
 
+## Authentication
+
+Engram uses bearer-token authentication. On first launch the server is in **setup mode** (no users exist) and all endpoints are open. Once the first admin account is created, all API endpoints require authentication.
+
+### Setup (first run)
+
+```bash
+# Check auth status
+curl http://localhost:3030/auth/status
+# → {"status":"setup_required","users_count":0}
+
+# Create admin account
+curl -X POST http://localhost:3030/auth/setup \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"your-secure-password"}'
+# → {"token":"...","username":"admin","role":"admin","trust_level":1.0,"expires_in":86400}
+```
+
+### Login
+
+```bash
+curl -X POST http://localhost:3030/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"your-secure-password"}'
+# → {"token":"abc123...","username":"admin","role":"admin","trust_level":1.0,"expires_in":86400}
+```
+
+### Using tokens
+
+All subsequent requests must include the token:
+
+```bash
+curl http://localhost:3030/stats \
+  -H 'Authorization: Bearer abc123...'
+```
+
+### API keys (persistent access)
+
+For integrations, scripts, and MCP connections, generate a persistent API key:
+
+```bash
+# Generate a key (requires valid session)
+curl -X POST http://localhost:3030/auth/api-keys \
+  -H 'Authorization: Bearer SESSION_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"MCP Server"}'
+# → {"key":"egk_a1b2c3...","label":"MCP Server","warning":"Store this key securely..."}
+
+# Use the key (two methods)
+curl http://localhost:3030/stats -H 'Authorization: Bearer egk_a1b2c3...'
+curl http://localhost:3030/stats -H 'X-Api-Key: egk_a1b2c3...'
+
+# List your keys (shows labels and IDs, never raw keys)
+curl http://localhost:3030/auth/api-keys \
+  -H 'Authorization: Bearer SESSION_TOKEN'
+
+# Revoke a key by ID
+curl -X DELETE http://localhost:3030/auth/api-keys/KEY_ID_PREFIX \
+  -H 'Authorization: Bearer SESSION_TOKEN'
+```
+
+API keys inherit the role and trust level of the user who created them.
+
+### User management (admin only)
+
+```bash
+# List users
+curl http://localhost:3030/auth/users \
+  -H 'Authorization: Bearer ADMIN_TOKEN'
+
+# Create user
+curl -X POST http://localhost:3030/auth/users \
+  -H 'Authorization: Bearer ADMIN_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"analyst1","password":"password123","role":"analyst","trust_level":0.7}'
+
+# Update user
+curl -X PUT http://localhost:3030/auth/users/analyst1 \
+  -H 'Authorization: Bearer ADMIN_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"reader","enabled":false}'
+
+# Delete user
+curl -X DELETE http://localhost:3030/auth/users/analyst1 \
+  -H 'Authorization: Bearer ADMIN_TOKEN'
+
+# Change own password
+curl -X POST http://localhost:3030/auth/change-password \
+  -H 'Authorization: Bearer YOUR_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"old_password":"old","new_password":"new-password"}'
+```
+
+### Roles
+
+| Role | Read | Write/Delete | Config/Secrets/Reindex | User Management |
+|------|------|-------------|----------------------|-----------------|
+| **admin** | yes | yes | yes | yes |
+| **analyst** | yes | yes | no | no |
+| **reader** | yes | no | no | no |
+
+### Trust levels
+
+Each user has a `trust_level` (0.0 - 1.0) that feeds into the confidence model for trust-weighted operations (e.g. JSON-LD import merge).
+
+### Public endpoints
+
+These endpoints never require authentication:
+- `GET /health`
+- `GET /auth/status`
+- `POST /auth/setup` (only when no users exist)
+- `POST /auth/login`
+- Static files (frontend assets)
+
 ## Endpoints
 
 ### Core Graph Operations

@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
+use crate::auth::{Session, UserStore};
 use crate::secrets::SecretStore;
+use std::collections::HashMap;
 
 /// Cached hardware and embedder info for the /compute endpoint.
 #[derive(Clone, serde::Serialize)]
@@ -57,6 +59,8 @@ pub struct EngineConfig {
     pub mesh_enabled: Option<bool>,
     /// Mesh topology: "star", "full", "ring"
     pub mesh_topology: Option<String>,
+    /// Vector quantization enabled (int8). Defaults to true.
+    pub quantization_enabled: Option<bool>,
 }
 
 impl EngineConfig {
@@ -122,6 +126,9 @@ impl EngineConfig {
         if other.mesh_topology.is_some() {
             self.mesh_topology = other.mesh_topology.clone();
         }
+        if other.quantization_enabled.is_some() {
+            self.quantization_enabled = other.quantization_enabled;
+        }
     }
 }
 
@@ -145,7 +152,7 @@ pub struct MeshState {
 #[derive(Clone)]
 pub struct AppState {
     pub graph: Arc<RwLock<Graph>>,
-    pub compute: ComputeInfo,
+    pub compute: Arc<RwLock<ComputeInfo>>,
     /// Set to true when a write happens; cleared after checkpoint.
     pub dirty: Arc<AtomicBool>,
     /// Optional rule set for push-based inference triggers.
@@ -170,7 +177,14 @@ pub struct AppState {
     #[cfg(feature = "actions")]
     pub action_rules_path: Option<PathBuf>,
     /// Encrypted secrets store (API keys, auth tokens).
-    pub secrets: Option<Arc<RwLock<SecretStore>>>,
+    /// Arc<RwLock<Option>> so it can be unlocked at runtime when admin logs in.
+    pub secrets: Arc<RwLock<Option<SecretStore>>>,
+    /// Path to the `.brain.secrets` sidecar file.
+    pub secrets_path: Option<PathBuf>,
+    /// User store (`.brain.users` sidecar).
+    pub user_store: Arc<RwLock<UserStore>>,
+    /// Active sessions (in-memory, lost on restart).
+    pub sessions: Arc<RwLock<HashMap<String, Session>>>,
     /// Source registry for ingest pipeline (optional, requires `ingest` feature).
     #[cfg(feature = "ingest")]
     pub source_registry: Arc<engram_ingest::SourceRegistry>,
@@ -190,7 +204,7 @@ impl AppState {
             #[cfg(feature = "actions")]
             action_engine: Arc::new(RwLock::new(engram_action::ActionEngine::new(graph.clone()))),
             graph,
-            compute: ComputeInfo {
+            compute: Arc::new(RwLock::new(ComputeInfo {
                 cpu_cores: hw.cpu_cores,
                 has_avx2: hw.has_avx2,
                 has_neon: hw.has_neon,
@@ -203,7 +217,7 @@ impl AppState {
                 embedder_model: None,
                 embedder_dim: None,
                 embedder_endpoint: None,
-            },
+            })),
             dirty: Arc::new(AtomicBool::new(false)),
             rules: Arc::new(RwLock::new(Vec::new())),
             event_bus: Arc::new(EventBus::default()),
@@ -215,7 +229,10 @@ impl AppState {
             action_rules_path: None,
             #[cfg(feature = "assess")]
             assessments: Arc::new(RwLock::new(engram_assess::AssessmentStore::new(PathBuf::new()))),
-            secrets: None,
+            secrets: Arc::new(RwLock::new(None)),
+            secrets_path: None,
+            user_store: Arc::new(RwLock::new(UserStore::empty())),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "ingest")]
             source_registry: Arc::new(engram_ingest::SourceRegistry::new()),
             #[cfg(feature = "ingest")]
@@ -348,11 +365,12 @@ impl AppState {
     }
 
     /// Set embedder info for the /compute endpoint.
-    pub fn set_embedder_info(&mut self, model: String, dim: usize, endpoint: String) {
-        let compute = &mut self.compute;
-        compute.embedder_model = Some(model);
-        compute.embedder_dim = Some(dim);
-        compute.embedder_endpoint = Some(endpoint);
+    pub fn set_embedder_info(&self, model: String, dim: usize, endpoint: String) {
+        if let Ok(mut compute) = self.compute.write() {
+            compute.embedder_model = Some(model);
+            compute.embedder_dim = Some(dim);
+            compute.embedder_endpoint = Some(endpoint);
+        }
     }
 
     /// Mark the graph as dirty (needs checkpoint).
@@ -380,8 +398,8 @@ impl AppState {
             }
         }
         // Also checkpoint secrets sidecar
-        if let Some(ref secrets) = self.secrets {
-            if let Ok(s) = secrets.read() {
+        if let Ok(guard) = self.secrets.read() {
+            if let Some(ref s) = *guard {
                 if s.checkpoint_if_dirty() {
                     tracing::debug!("secrets checkpoint complete");
                     flushed = true;

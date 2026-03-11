@@ -1945,3 +1945,128 @@ td {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-light);
 }
+
+/* --- Auth Screens --- */
+.auth-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80vh;
+  padding: 2rem;
+}
+.auth-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2.5rem;
+  width: 100%;
+  max-width: 400px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.auth-header {
+  text-align: center;
+  margin-bottom: 1.5rem;
+}
+.auth-header i {
+  font-size: 2.5rem;
+  color: var(--accent-bright);
+  display: block;
+  margin-bottom: 0.5rem;
+}
+.auth-header h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.auth-subtitle {
+  text-align: center;
+  color: var(--text-secondary);
+  margin-bottom: 1.5rem;
+  font-size: 0.9rem;
+}
+.auth-error {
+  background: rgba(214, 48, 49, 0.15);
+  border: 1px solid rgba(214, 48, 49, 0.3);
+  color: #ff6b6b;
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
+}
+.auth-card .form-group {
+  margin-bottom: 1rem;
+}
+.auth-card label {
+  display: block;
+  margin-bottom: 0.3rem;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+.auth-card input[type="text"],
+.auth-card input[type="password"] {
+  width: 100%;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+}
+.auth-card input:focus {
+  border-color: var(--accent-bright);
+  outline: none;
+}
+.btn-block {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+/* --- Nav User Badge --- */
+.nav-user {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-right: 0.5rem;
+}
+.nav-user-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  padding: 0.2rem 0.5rem;
+  background: var(--bg-hover);
+  border-radius: 4px;
+}
+
+/* --- User Management Table --- */
+.users-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.5rem;
+}
+.users-table th, .users-table td {
+  padding: 0.5rem 0.8rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.users-table th {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.users-table td { font-size: 0.9rem; }
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+.role-badge.admin { background: rgba(74,158,255,0.2); color: #4a9eff; }
+.role-badge.analyst { background: rgba(0,184,148,0.2); color: #00b894; }
+.role-badge.reader { background: rgba(160,160,184,0.2); color: #a0a0b8; }

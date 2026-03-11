@@ -291,7 +291,33 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         state.set_embedder_info(model, dim, endpoint);
         state.graph.write().unwrap().set_embedder(Box::new(embedder));
     } else {
-        println!("Embedder: none (set ENGRAM_EMBED_ENDPOINT or use POST /config)");
+        // Try to auto-load ONNX model from sidecar files
+        let mut onnx_loaded = false;
+        #[cfg(feature = "onnx")]
+        {
+            let model_path = format!("{}.model.onnx", path.display());
+            let tokenizer_path = format!("{}.tokenizer.json", path.display());
+            if std::path::Path::new(&model_path).exists() && std::path::Path::new(&tokenizer_path).exists() {
+                match engram_core::OnnxEmbedder::load(
+                    std::path::Path::new(&model_path),
+                    std::path::Path::new(&tokenizer_path),
+                ) {
+                    Ok(embedder) => {
+                        let dim = embedder.dim();
+                        println!("Embedder: ONNX local ({}D)", dim);
+                        state.set_embedder_info("ONNX Local".into(), dim, "local".into());
+                        state.graph.write().unwrap().set_embedder(Box::new(embedder));
+                        onnx_loaded = true;
+                    }
+                    Err(e) => {
+                        println!("Embedder: ONNX files found but failed to load: {e}");
+                    }
+                }
+            }
+        }
+        if !onnx_loaded {
+            println!("Embedder: none (set ENGRAM_EMBED_ENDPOINT or use POST /config)");
+        }
     }
 
     // Load assessment sidecar (if assess feature enabled)
@@ -365,53 +391,47 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Secrets store: prompt for master password
+    // Restore quantization mode from config (defaults to enabled)
+    {
+        let quant_enabled = state.config.read()
+            .map(|c| c.quantization_enabled.unwrap_or(true))
+            .unwrap_or(true);
+        if quant_enabled {
+            let mut g = state.graph.write().unwrap();
+            g.set_vector_quantization(engram_core::QuantizationMode::Int8);
+            println!("Quantization: int8 (4x memory reduction)");
+        } else {
+            println!("Quantization: off");
+        }
+    }
+
+    // Set secrets path for deferred unlock (admin login decrypts secrets)
     let secrets_path = {
         let mut p = path.as_os_str().to_owned();
         p.push(".secrets");
         PathBuf::from(p)
     };
-
+    state.secrets_path = Some(secrets_path.clone());
     if secrets_path.exists() {
-        // Existing secrets file: prompt for password
-        loop {
-            eprint!("Enter master password: ");
-            let password = read_password_line();
-            match engram_api::secrets::SecretStore::open(&secrets_path, &password) {
-                Ok(store) => {
-                    let count = store.len();
-                    state.secrets = Some(std::sync::Arc::new(std::sync::RwLock::new(store)));
-                    println!("Secrets: {} entries loaded", count);
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("Failed to decrypt secrets: {e}. Wrong password?");
-                }
-            }
-        }
+        println!("Secrets: encrypted (will unlock on admin login)");
     } else {
-        // First run: offer to create
-        eprint!("No secrets file found. Create a master password? (y/N): ");
-        let mut answer = String::new();
-        let _ = std::io::stdin().read_line(&mut answer);
-        if answer.trim().eq_ignore_ascii_case("y") {
-            eprint!("Create master password: ");
-            let pw1 = read_password_line();
-            eprint!("Confirm master password: ");
-            let pw2 = read_password_line();
-            if pw1 == pw2 {
-                match engram_api::secrets::SecretStore::create(&secrets_path, &pw1) {
-                    Ok(store) => {
-                        state.secrets = Some(std::sync::Arc::new(std::sync::RwLock::new(store)));
-                        println!("Secrets: file created");
-                    }
-                    Err(e) => eprintln!("Failed to create secrets file: {e}"),
-                }
-            } else {
-                eprintln!("Passwords do not match. Skipping secrets setup.");
-            }
+        println!("Secrets: none (will create on admin setup)");
+    }
+
+    // Load user store from sidecar
+    let users_path = {
+        let mut p = path.as_os_str().to_owned();
+        p.push(".users");
+        PathBuf::from(p)
+    };
+    {
+        let store = engram_api::auth::UserStore::load(&users_path);
+        let count = store.len();
+        *state.user_store.write().unwrap() = store;
+        if count > 0 {
+            println!("Users: {count} loaded");
         } else {
-            println!("Secrets: skipped (no master password)");
+            println!("Users: none (setup required via frontend)");
         }
     }
 
@@ -480,14 +500,6 @@ fn cmd_reindex(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     g.checkpoint()?;
     println!("Re-embedded {count} nodes");
     Ok(())
-}
-
-/// Read a line from stdin (for password prompts).
-/// In a real terminal we'd disable echo, but for simplicity we read a line.
-fn read_password_line() -> String {
-    let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
-    line.trim().to_string()
 }
 
 fn print_usage() {

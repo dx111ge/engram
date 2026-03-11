@@ -26,9 +26,31 @@ const SYSTEM_LLM_PROVIDERS = [
 ];
 
 const SYSTEM_NER_PROVIDERS = [
-  { id: 'builtin', label: 'Built-in (Rule-based)', quality: 'Basic', description: 'Pattern matching, always available, no extra setup.' },
-  { id: 'spacy',   label: 'spaCy',                 quality: 'Good',  description: 'Statistical NER, good accuracy. Requires spaCy service.' },
-  { id: 'anno',    label: 'spaCy + Anno',           quality: 'Excellent', description: 'Best NER quality with learning. Requires Anno service.' },
+  { id: 'builtin', label: 'Built-in (Rule-based)', quality: 'Basic', description: 'Pattern matching and gazetteer lookup. Always available, zero setup. Learns from your graph: known entities are recognized automatically via the built-in gazetteer.' },
+  { id: 'anno',    label: 'GLiNER (ONNX)',          quality: 'Excellent', description: 'Zero-shot NER via GLiNER models. Runs locally, no external service. Combined with graph-learned entity gazetteer for disambiguation and boosted recall.' },
+];
+
+const SYSTEM_NER_MODELS = [
+  { id: 'gliner_small-v2.1',  label: 'GLiNER Small v2.1',  size: '183 MB', langs: 'English', license: 'Apache-2.0', licenseOk: true,
+    modelUrl: 'https://huggingface.co/onnx-community/gliner_small-v2.1/resolve/main/onnx/model_int8.onnx',
+    tokenizerUrl: 'https://huggingface.co/onnx-community/gliner_small-v2.1/resolve/main/tokenizer.json',
+    url: 'https://huggingface.co/onnx-community/gliner_small-v2.1' },
+  { id: 'gliner_medium-v2.1', label: 'GLiNER Medium v2.1', size: '~350 MB', langs: 'English', license: 'Apache-2.0', licenseOk: true,
+    modelUrl: 'https://huggingface.co/onnx-community/gliner_medium-v2.1/resolve/main/onnx/model_int8.onnx',
+    tokenizerUrl: 'https://huggingface.co/onnx-community/gliner_medium-v2.1/resolve/main/tokenizer.json',
+    url: 'https://huggingface.co/onnx-community/gliner_medium-v2.1' },
+  { id: 'gliner_multi-v2.1',  label: 'GLiNER Multi v2.1',  size: '~350 MB', langs: '100+ languages', license: 'Apache-2.0', licenseOk: true,
+    modelUrl: 'https://huggingface.co/onnx-community/gliner_multi-v2.1/resolve/main/onnx/model_int8.onnx',
+    tokenizerUrl: 'https://huggingface.co/onnx-community/gliner_multi-v2.1/resolve/main/tokenizer.json',
+    url: 'https://huggingface.co/onnx-community/gliner_multi-v2.1' },
+  { id: 'gliner_large-v2.1',  label: 'GLiNER Large v2.1',  size: '~800 MB', langs: 'English', license: 'Apache-2.0', licenseOk: true,
+    modelUrl: 'https://huggingface.co/onnx-community/gliner_large-v2.1/resolve/main/onnx/model_int8.onnx',
+    tokenizerUrl: 'https://huggingface.co/onnx-community/gliner_large-v2.1/resolve/main/tokenizer.json',
+    url: 'https://huggingface.co/onnx-community/gliner_large-v2.1' },
+  { id: 'gliner_small-v1',    label: 'GLiNER Small v1.0',  size: '~180 MB', langs: 'English', license: 'CC-BY-NC-4.0', licenseOk: false,
+    modelUrl: 'https://huggingface.co/onnx-community/gliner_small/resolve/main/onnx/model_int8.onnx',
+    tokenizerUrl: 'https://huggingface.co/onnx-community/gliner_small/resolve/main/tokenizer.json',
+    url: 'https://huggingface.co/urchade/gliner_small' },
 ];
 
 // ── Section toggle logic ──
@@ -133,7 +155,7 @@ async function loadSystemView() {
   const hasEmbed = !!(cfg.embed_endpoint && cfg.embed_model) || hasOnnx;
   const hasLlm = !!(cfg.llm_endpoint && cfg.llm_model);
   const nerProvider = cfg.ner_provider || 'builtin';
-  const quantActive = !!(compute && compute.quantization_enabled);
+  const quantActive = !!(cfg && cfg.quantization_enabled);
   const peerCount = meshPeers.length;
   const secretCount = secrets.length;
 
@@ -142,7 +164,7 @@ async function loadSystemView() {
   // ── 1. Connection ──
   html += systemSection('connection', 'fa-plug', 'Connection',
     isConnected ? systemStatusDot('active', 'Connected') : systemStatusDot('error', 'Offline'),
-    false,
+    true,
     buildConnectionSection(apiBase, isConnected)
   );
 
@@ -152,7 +174,7 @@ async function loadSystemView() {
     hasEmbed
       ? systemStatusDot('active', escapeHtml(embedLabel))
       : systemStatusDot('setup', 'Not configured'),
-    false,
+    true,
     buildEmbeddingSection(cfg, compute)
   );
 
@@ -308,7 +330,27 @@ function buildEmbeddingSection(cfg, compute) {
             <i class="fa-solid fa-magnifying-glass"></i> Browse Embedding Models
           </a>
         </div>
-        <p style="margin:0 0 0.5rem;font-size:0.8rem;color:var(--text-muted)"><i class="fa-solid fa-star"></i> Suggestions: <a href="https://huggingface.co/intfloat/multilingual-e5-small/tree/main/onnx" target="_blank" rel="noopener" style="color:var(--accent-bright)">multilingual-e5-small</a> (384d, 120MB, 100+ langs), <a href="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/tree/main/onnx" target="_blank" rel="noopener" style="color:var(--accent-bright)">all-MiniLM-L6-v2</a> (384d, 90MB, English), <a href="https://huggingface.co/BAAI/bge-small-en-v1.5/tree/main/onnx" target="_blank" rel="noopener" style="color:var(--accent-bright)">bge-small-en-v1.5</a> (384d, 130MB, English)</p>
+        <p style="margin:0 0 0.5rem;font-size:0.8rem;color:var(--text-muted)"><i class="fa-solid fa-star"></i> Quick install:</p>
+        <div style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:0.5rem">
+          <button class="btn btn-secondary sys-onnx-quickinstall" style="font-size:0.75rem;padding:0.2rem 0.5rem"
+            data-model-url="https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/onnx/model.onnx"
+            data-tokenizer-url="https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/tokenizer.json"
+            data-name="multilingual-e5-small">
+            <i class="fa-solid fa-download"></i> multilingual-e5-small <span style="color:var(--text-muted)">(384d, 120MB, 100+ langs)</span>
+          </button>
+          <button class="btn btn-secondary sys-onnx-quickinstall" style="font-size:0.75rem;padding:0.2rem 0.5rem"
+            data-model-url="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"
+            data-tokenizer-url="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+            data-name="all-MiniLM-L6-v2">
+            <i class="fa-solid fa-download"></i> all-MiniLM-L6-v2 <span style="color:var(--text-muted)">(384d, 90MB, English)</span>
+          </button>
+          <button class="btn btn-secondary sys-onnx-quickinstall" style="font-size:0.75rem;padding:0.2rem 0.5rem"
+            data-model-url="https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx"
+            data-tokenizer-url="https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json"
+            data-name="bge-small-en-v1.5">
+            <i class="fa-solid fa-download"></i> bge-small-en-v1.5 <span style="color:var(--text-muted)">(384d, 130MB, English)</span>
+          </button>
+        </div>
         <p style="margin:0;font-size:0.8rem;color:var(--text-muted)"><i class="fa-solid fa-scale-balanced"></i> Powered by <a href="https://github.com/microsoft/onnxruntime" target="_blank" rel="noopener" style="color:var(--accent-bright)">ONNX Runtime</a> (MIT License)</p>
       </div>
       <div id="sys-onnx-status" style="margin-bottom:0.75rem"></div>
@@ -406,6 +448,7 @@ function buildLlmSection(cfg) {
 
 function buildNerSection(cfg) {
   const nerProvider = cfg.ner_provider || 'builtin';
+  const nerModel = cfg.ner_model || '';
 
   return `
     <div class="form-group">
@@ -424,17 +467,30 @@ function buildNerSection(cfg) {
         `).join('')}
       </div>
     </div>
-    <div id="sys-ner-endpoint-group" class="form-group" style="display:${nerProvider === 'spacy' || nerProvider === 'anno' ? '' : 'none'}">
-      <label>NER Service Endpoint</label>
-      <input type="text" id="sys-ner-endpoint" placeholder="http://localhost:5000" value="${escapeHtml(cfg.ner_endpoint || '')}">
+    <div id="sys-ner-gliner-section" style="display:${nerProvider === 'anno' ? '' : 'none'}">
+      <div class="form-group">
+        <label>GLiNER Model</label>
+        <select id="sys-ner-model-select" style="width:100%;padding:0.5rem;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:0.9rem">
+          <option value="">-- Select a model --</option>
+          ${SYSTEM_NER_MODELS.filter(m => m.licenseOk).map(m => `
+            <option value="${m.id}" ${m.id === nerModel ? 'selected' : ''}>${escapeHtml(m.label)} (${m.size}, ${m.langs})</option>
+          `).join('')}
+          <optgroup label="Non-commercial only (CC-BY-NC-4.0)">
+            ${SYSTEM_NER_MODELS.filter(m => !m.licenseOk).map(m => `
+              <option value="${m.id}" ${m.id === nerModel ? 'selected' : ''}>${escapeHtml(m.label)} (${m.size}, ${m.langs})</option>
+            `).join('')}
+          </optgroup>
+        </select>
+      </div>
+      <div id="sys-ner-model-info" style="margin-bottom:0.75rem"></div>
+      <div id="sys-ner-model-status" style="margin-bottom:0.75rem"></div>
     </div>
-    <div id="sys-ner-model-group" class="form-group" style="display:${nerProvider === 'spacy' || nerProvider === 'anno' ? '' : 'none'}">
-      <label>Model Name</label>
-      <input type="text" id="sys-ner-model" placeholder="en_core_web_sm" value="${escapeHtml(cfg.ner_model || '')}">
-    </div>
-    <div style="display:flex;gap:0.5rem">
-      <button class="btn btn-primary" id="sys-ner-save">
+    <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+      <button class="btn btn-primary" id="sys-ner-save" style="display:${nerProvider === 'builtin' ? '' : 'none'}">
         <i class="fa-solid fa-save"></i> Save NER Config
+      </button>
+      <button class="btn btn-primary" id="sys-ner-download-save" style="display:${nerProvider === 'anno' ? '' : 'none'}">
+        <i class="fa-solid fa-download"></i> Download &amp; Enable
       </button>
     </div>
     <div id="sys-ner-result" class="mt-1"></div>`;
@@ -723,6 +779,8 @@ function buildSecretsSection(secrets) {
     <div id="sys-secret-result" class="mt-1"></div>`;
 }
 
+// ── Users & Security ──
+
 // ── Import / Export ──
 
 function buildImportExportSection() {
@@ -739,13 +797,28 @@ function buildImportExportSection() {
     </div>
     <div>
       <div style="font-weight:600;font-size:0.85rem;margin-bottom:0.5rem"><i class="fa-solid fa-upload" style="margin-right:0.3rem"></i> Import</div>
-      <div class="form-group">
-        <label>Paste JSON-LD data</label>
-        <textarea id="sys-import-jsonld" rows="4" placeholder="Paste JSON-LD data here..."></textarea>
+      <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:0.75rem">
+        Import knowledge from a JSON-LD file.
+      </p>
+      <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+        <label class="btn btn-primary" style="cursor:pointer;margin:0" for="sys-import-file">
+          <i class="fa-solid fa-file-import"></i> Choose File
+        </label>
+        <input type="file" id="sys-import-file" accept=".jsonld,.json,.ld" style="display:none">
+        <span id="sys-import-filename" style="font-size:0.85rem;color:var(--text-muted)">No file selected</span>
       </div>
-      <button class="btn btn-primary" id="sys-import-jsonld-btn">
-        <i class="fa-solid fa-upload"></i> Import
-      </button>
+      <div style="margin-top:0.75rem">
+        <label style="font-size:0.8rem;display:block;margin-bottom:0.25rem">
+          Source trust: <strong id="sys-import-trust-val">0.5</strong>
+          <span style="color:var(--text-muted);margin-left:0.3rem">(0 = ignore overlaps, 1 = fully trust import)</span>
+        </label>
+        <input type="range" id="sys-import-trust" min="0" max="1" step="0.1" value="0.5" style="width:200px">
+      </div>
+      <div style="margin-top:0.75rem">
+        <button class="btn btn-primary" id="sys-import-jsonld-btn" disabled>
+          <i class="fa-solid fa-upload"></i> Import
+        </button>
+      </div>
       <div id="sys-import-result" class="mt-1"></div>
     </div>`;
 }
@@ -972,8 +1045,10 @@ function bindEmbeddingEvents(cfg) {
         const form = new FormData();
         if (modelFile) form.append('model', modelFile);
         if (tokenizerFile) form.append('tokenizer', tokenizerFile);
-        const base = localStorage.getItem('engram_api_base') || 'http://localhost:3030';
-        const raw = await fetch(base + '/config/onnx-model', { method: 'POST', body: form });
+        const base = engram.apiBase;
+        const hdrs = {};
+        if (auth.token) hdrs['Authorization'] = `Bearer ${auth.token}`;
+        const raw = await fetch(base + '/config/onnx-model', { method: 'POST', body: form, headers: hdrs });
         if (!raw.ok) { const e = await raw.json().catch(() => ({})); throw new Error(e.error || raw.statusText); }
         const resp = await raw.json();
         const sizeText = resp.model_size_mb ? ` (${resp.model_size_mb.toFixed(1)} MB)` : '';
@@ -1009,6 +1084,64 @@ function bindEmbeddingEvents(cfg) {
       }
     });
   }
+
+  // ── ONNX: Quick install from HuggingFace ──
+  document.querySelectorAll('.sys-onnx-quickinstall').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const modelUrl = btn.dataset.modelUrl;
+      const tokenizerUrl = btn.dataset.tokenizerUrl;
+      const name = btn.dataset.name;
+      const resultDiv = document.getElementById('sys-embed-result');
+
+      // Disable all quick-install buttons during download
+      document.querySelectorAll('.sys-onnx-quickinstall').forEach(b => { b.disabled = true; });
+      resultDiv.innerHTML = loadingHTML(`Downloading ${name} from HuggingFace... This may take a minute.`);
+
+      try {
+        const base = engram.apiBase;
+        const hdrs = { 'Content-Type': 'application/json' };
+        if (auth.token) hdrs['Authorization'] = `Bearer ${auth.token}`;
+        const raw = await fetch(base + '/config/onnx-download', {
+          method: 'POST',
+          headers: hdrs,
+          body: JSON.stringify({ model_url: modelUrl, tokenizer_url: tokenizerUrl }),
+        });
+        if (!raw.ok) { const e = await raw.json().catch(() => ({})); throw new Error(e.error || raw.statusText); }
+        const resp = await raw.json();
+        const sizeText = resp.model_size_mb ? ` (${resp.model_size_mb.toFixed(1)} MB)` : '';
+
+        if (resp.activated) {
+          resultDiv.innerHTML = `
+            <div style="color:var(--success);font-size:0.85rem;margin-bottom:0.5rem"><i class="fa-solid fa-check"></i> ${escapeHtml(name)} installed and activated${sizeText}.</div>
+            <button class="btn btn-primary" id="sys-onnx-reindex-now">
+              <i class="fa-solid fa-arrows-rotate"></i> Reindex Now
+            </button>`;
+          document.getElementById('sys-onnx-reindex-now').addEventListener('click', async () => {
+            const rbtn = document.getElementById('sys-onnx-reindex-now');
+            rbtn.disabled = true;
+            resultDiv.innerHTML = loadingHTML('Reindexing all nodes with ONNX embedder...');
+            try {
+              const r = await engram._post('/reindex', {});
+              resultDiv.innerHTML = `<div style="color:var(--success);font-size:0.85rem"><i class="fa-solid fa-check"></i> Reindex complete. ${r.reindexed} nodes re-embedded.</div>`;
+              showToast(`Reindexed ${r.reindexed} nodes`, 'success');
+            } catch (e) {
+              resultDiv.innerHTML = `<div style="color:var(--error);font-size:0.85rem"><i class="fa-solid fa-circle-exclamation"></i> Reindex failed: ${escapeHtml(e.message)}</div>`;
+            }
+          });
+          showToast(`${name} installed and activated`, 'success');
+        } else {
+          resultDiv.innerHTML = `<div style="color:var(--success);font-size:0.85rem"><i class="fa-solid fa-check"></i> ${escapeHtml(resp.message)}${sizeText}</div>`;
+          showToast(`${name} downloaded`, 'success');
+        }
+        checkOnnxStatus();
+      } catch (err) {
+        resultDiv.innerHTML = `<div style="color:var(--error);font-size:0.85rem"><i class="fa-solid fa-circle-exclamation"></i> Download failed: ${escapeHtml(err.message)}</div>`;
+        showToast('Download failed', 'error');
+      } finally {
+        document.querySelectorAll('.sys-onnx-quickinstall').forEach(b => { b.disabled = false; });
+      }
+    });
+  });
 }
 
 async function checkOnnxStatus() {
@@ -1114,10 +1247,10 @@ function bindLlmEvents(cfg) {
         if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
 
         // Use the proxy to fetch models (avoids CORS)
-        const base = localStorage.getItem('engram_api_base') || 'http://localhost:3030';
-        const proxyUrl = base + '/proxy/llm';
-        // Actually, we can't use the LLM proxy for /models. Let's try direct fetch first.
-        const resp = await fetch(modelsUrl, { headers, signal: AbortSignal.timeout(5000) });
+        const base = engram.apiBase;
+        const proxyHdrs = {};
+        if (auth.token) proxyHdrs['Authorization'] = `Bearer ${auth.token}`;
+        const resp = await fetch(base + '/proxy/models', { headers: proxyHdrs, signal: AbortSignal.timeout(10000) });
         const data = await resp.json();
         const models = (data.data || []).map(m => m.id).filter(Boolean).sort();
 
@@ -1311,53 +1444,203 @@ function bindNerEvents() {
     });
   });
 
-  // Save
+  // Model select — show info card + check install status
+  const modelSelect = document.getElementById('sys-ner-model-select');
+  if (modelSelect) {
+    modelSelect.addEventListener('change', () => {
+      systemUpdateNerModelInfo(modelSelect.value);
+      systemCheckNerModelStatus(modelSelect.value);
+    });
+    // Show info for initially selected model
+    if (modelSelect.value) {
+      systemUpdateNerModelInfo(modelSelect.value);
+      systemCheckNerModelStatus(modelSelect.value);
+    }
+  }
+
+  // Save (built-in provider — just saves config)
   const saveBtn = document.getElementById('sys-ner-save');
   if (saveBtn) {
     saveBtn.addEventListener('click', async () => {
-      const selected = document.querySelector('input[name="sys-ner-provider"]:checked');
-      if (!selected) { showToast('Select a NER provider', 'error'); return; }
-
-      const provider = selected.value;
       const resultDiv = document.getElementById('sys-ner-result');
       saveBtn.disabled = true;
-      resultDiv.innerHTML = loadingHTML('Saving NER configuration...');
-
+      resultDiv.innerHTML = loadingHTML('Saving...');
       try {
-        const patch = { ner_provider: provider };
-        if (provider === 'spacy' || provider === 'anno') {
-          const endpoint = document.getElementById('sys-ner-endpoint').value.trim();
-          const model = document.getElementById('sys-ner-model').value.trim();
-          if (!endpoint) { showToast('Enter the NER service endpoint', 'error'); saveBtn.disabled = false; resultDiv.innerHTML = ''; return; }
-          patch.ner_endpoint = endpoint;
-          if (model) patch.ner_model = model;
-        }
-
-        await engram.setConfig(patch);
-        resultDiv.innerHTML = '<div style="color:var(--success);font-size:0.85rem"><i class="fa-solid fa-check"></i> NER configuration saved.</div>';
+        await engram.setConfig({ ner_provider: 'builtin', ner_model: '' });
+        resultDiv.innerHTML = '<div style="color:var(--success);font-size:0.85rem"><i class="fa-solid fa-check"></i> NER set to built-in rules.</div>';
+        systemUpdateNerBadge('builtin');
         showToast('NER configuration saved', 'success');
       } catch (err) {
         resultDiv.innerHTML = `<div style="color:var(--error);font-size:0.85rem"><i class="fa-solid fa-circle-exclamation"></i> ${escapeHtml(err.message)}</div>`;
-        showToast('Save failed', 'error');
       } finally {
         saveBtn.disabled = false;
+      }
+    });
+  }
+
+  // Download & Enable (GLiNER — downloads model, then saves config)
+  const dlBtn = document.getElementById('sys-ner-download-save');
+  if (dlBtn) {
+    dlBtn.addEventListener('click', async () => {
+      const modelId = document.getElementById('sys-ner-model-select')?.value;
+      if (!modelId) { showToast('Select a GLiNER model first', 'error'); return; }
+
+      const model = SYSTEM_NER_MODELS.find(m => m.id === modelId);
+      if (!model) { showToast('Unknown model', 'error'); return; }
+
+      const resultDiv = document.getElementById('sys-ner-result');
+      const statusDiv = document.getElementById('sys-ner-model-status');
+      dlBtn.disabled = true;
+
+      // Check if already installed
+      try {
+        const base = engram.apiBase;
+        const nerHdrs = {};
+        if (auth.token) nerHdrs['Authorization'] = `Bearer ${auth.token}`;
+        const checkResp = await fetch(base + '/config/ner-model?id=' + encodeURIComponent(modelId), { headers: nerHdrs });
+        const checkData = await checkResp.json();
+        if (checkData.ready) {
+          // Already downloaded — just save config
+          resultDiv.innerHTML = loadingHTML('Model already installed. Saving config...');
+          await engram.setConfig({ ner_provider: 'anno', ner_model: modelId });
+          resultDiv.innerHTML = '<div style="color:var(--success);font-size:0.85rem"><i class="fa-solid fa-check"></i> GLiNER enabled with ' + escapeHtml(model.label) + '.</div>';
+          systemUpdateNerBadge('anno');
+          if (statusDiv) statusDiv.innerHTML = '<div style="color:var(--success);font-size:0.85rem"><i class="fa-solid fa-circle-check"></i> Model installed (' + escapeHtml(checkData.model_size_mb?.toFixed(1) || '?') + ' MB)</div>';
+          showToast('GLiNER enabled', 'success');
+          dlBtn.disabled = false;
+          return;
+        }
+      } catch (_) { /* proceed to download */ }
+
+      // Download
+      resultDiv.innerHTML = `<div style="font-size:0.85rem"><i class="fa-solid fa-spinner fa-spin"></i> Downloading ${escapeHtml(model.label)} (${escapeHtml(model.size)})... This may take a few minutes.</div>`;
+      if (statusDiv) statusDiv.innerHTML = '<div style="font-size:0.85rem;color:var(--text-muted)"><i class="fa-solid fa-spinner fa-spin"></i> Downloading tokenizer + model from HuggingFace...</div>';
+
+      try {
+        const base = engram.apiBase;
+        const dlHdrs = { 'Content-Type': 'application/json' };
+        if (auth.token) dlHdrs['Authorization'] = `Bearer ${auth.token}`;
+        const resp = await fetch(base + '/config/ner-download', {
+          method: 'POST',
+          headers: dlHdrs,
+          body: JSON.stringify({
+            model_id: modelId,
+            model_url: model.modelUrl,
+            tokenizer_url: model.tokenizerUrl,
+          }),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({ error: 'download failed' }));
+          throw new Error(err.error || 'Download failed: ' + resp.status);
+        }
+        const data = await resp.json();
+
+        // Save config
+        await engram.setConfig({ ner_provider: 'anno', ner_model: modelId });
+
+        const sizeMb = data.model_size_mb?.toFixed(1) || '?';
+        resultDiv.innerHTML = `<div style="color:var(--success);font-size:0.85rem"><i class="fa-solid fa-check"></i> ${escapeHtml(model.label)} downloaded (${sizeMb} MB) and enabled.</div>`;
+        if (statusDiv) statusDiv.innerHTML = `<div style="color:var(--success);font-size:0.85rem"><i class="fa-solid fa-circle-check"></i> Model installed (${sizeMb} MB)</div>`;
+        systemUpdateNerBadge('anno');
+        showToast('GLiNER model installed and enabled', 'success');
+      } catch (err) {
+        resultDiv.innerHTML = `<div style="color:var(--error);font-size:0.85rem"><i class="fa-solid fa-circle-exclamation"></i> ${escapeHtml(err.message)}</div>`;
+        if (statusDiv) statusDiv.innerHTML = '';
+        showToast('Download failed', 'error');
+      } finally {
+        dlBtn.disabled = false;
       }
     });
   }
 }
 
 function systemUpdateNerUI(provider) {
-  const endpointGroup = document.getElementById('sys-ner-endpoint-group');
-  const modelGroup = document.getElementById('sys-ner-model-group');
-  const needsEndpoint = provider === 'spacy' || provider === 'anno';
-  if (endpointGroup) endpointGroup.style.display = needsEndpoint ? '' : 'none';
-  if (modelGroup) modelGroup.style.display = needsEndpoint ? '' : 'none';
+  const glinerSection = document.getElementById('sys-ner-gliner-section');
+  if (glinerSection) glinerSection.style.display = provider === 'anno' ? '' : 'none';
+
+  // Toggle buttons
+  const saveBtn = document.getElementById('sys-ner-save');
+  const dlBtn = document.getElementById('sys-ner-download-save');
+  if (saveBtn) saveBtn.style.display = provider === 'builtin' ? '' : 'none';
+  if (dlBtn) dlBtn.style.display = provider === 'anno' ? '' : 'none';
 
   // Highlight selected card
   document.querySelectorAll('#sys-ner-provider-cards label').forEach(label => {
     const isSelected = label.dataset.provider === provider;
     label.style.borderColor = isSelected ? 'var(--accent-bright)' : 'var(--border)';
   });
+
+  // Clear result
+  const resultDiv = document.getElementById('sys-ner-result');
+  if (resultDiv) resultDiv.innerHTML = '';
+}
+
+function systemUpdateNerBadge(provider) {
+  const section = document.getElementById('section-ner');
+  if (!section) return;
+  const statusArea = section.querySelector('.section-toggle > div:last-child');
+  if (!statusArea) return;
+  const label = SYSTEM_NER_PROVIDERS.find(p => p.id === provider)?.label || provider;
+  // Replace the status dot (first child of statusArea, before the arrow)
+  const arrow = statusArea.querySelector('.section-arrow');
+  // Remove existing status dots (everything before the arrow)
+  while (statusArea.firstChild && statusArea.firstChild !== arrow) {
+    statusArea.removeChild(statusArea.firstChild);
+  }
+  // Insert new status
+  const temp = document.createElement('div');
+  temp.innerHTML = systemStatusDot('active', label);
+  while (temp.firstChild) {
+    statusArea.insertBefore(temp.firstChild, arrow);
+  }
+}
+
+function systemUpdateNerModelInfo(modelId) {
+  const infoDiv = document.getElementById('sys-ner-model-info');
+  if (!infoDiv) return;
+  const model = SYSTEM_NER_MODELS.find(m => m.id === modelId);
+  if (!model) { infoDiv.innerHTML = ''; return; }
+
+  const licenseColor = model.licenseOk ? 'var(--success)' : 'var(--warning, #e3a008)';
+  const licenseIcon = model.licenseOk ? 'fa-circle-check' : 'fa-triangle-exclamation';
+  const licenseNote = model.licenseOk ? 'Commercial use OK' : 'Non-commercial use only';
+
+  infoDiv.innerHTML = `
+    <div style="padding:0.6rem 0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:0.85rem">
+      <div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:center">
+        <span><i class="fa-solid fa-hard-drive" style="width:14px;color:var(--text-muted)"></i> ${escapeHtml(model.size)}</span>
+        <span><i class="fa-solid fa-globe" style="width:14px;color:var(--text-muted)"></i> ${escapeHtml(model.langs)}</span>
+        <span style="color:${licenseColor}"><i class="fa-solid ${licenseIcon}" style="width:14px"></i> ${escapeHtml(model.license)} &mdash; ${licenseNote}</span>
+      </div>
+      <div style="margin-top:0.4rem">
+        <a href="${escapeHtml(model.url)}" target="_blank" rel="noopener" style="color:var(--accent-bright);font-size:0.8rem">
+          <i class="fa-solid fa-arrow-up-right-from-square"></i> View on HuggingFace
+        </a>
+      </div>
+    </div>`;
+}
+
+async function systemCheckNerModelStatus(modelId) {
+  const statusDiv = document.getElementById('sys-ner-model-status');
+  if (!statusDiv || !modelId) { if (statusDiv) statusDiv.innerHTML = ''; return; }
+  const dlBtn = document.getElementById('sys-ner-download-save');
+
+  try {
+    const base = engram.apiBase;
+    const hdrs = {};
+    if (auth.token) hdrs['Authorization'] = `Bearer ${auth.token}`;
+    const resp = await fetch(base + '/config/ner-model?id=' + encodeURIComponent(modelId), { headers: hdrs });
+    const data = await resp.json();
+    if (data.ready) {
+      statusDiv.innerHTML = `<div style="color:var(--success);font-size:0.85rem"><i class="fa-solid fa-circle-check"></i> Model installed (${data.model_size_mb?.toFixed(1) || '?'} MB). Ready to use.</div>`;
+      if (dlBtn) dlBtn.innerHTML = '<i class="fa-solid fa-check"></i> Enable GLiNER';
+    } else {
+      statusDiv.innerHTML = '<div style="color:var(--text-muted);font-size:0.85rem"><i class="fa-solid fa-cloud-arrow-down"></i> Model not yet downloaded. Click "Download &amp; Enable" to install.</div>';
+      if (dlBtn) dlBtn.innerHTML = '<i class="fa-solid fa-download"></i> Download &amp; Enable';
+    }
+  } catch (_) {
+    statusDiv.innerHTML = '';
+  }
 }
 
 // ── Quantization events ──
@@ -1752,10 +2035,12 @@ async function systemReloadSecrets() {
   } catch (_) {}
 }
 
+// ── Users & Security events ──
+
 // ── Import / Export events ──
 
 function bindImportExportEvents() {
-  // Export
+  // Export — Save As dialog when supported, fallback to auto-download
   const exportBtn = document.getElementById('sys-export-jsonld');
   if (exportBtn) {
     exportBtn.addEventListener('click', async () => {
@@ -1765,11 +2050,42 @@ function bindImportExportEvents() {
 
       try {
         const data = await engram.exportJsonLd();
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/ld+json' });
+        const json = JSON.stringify(data, null, 2);
+        const defaultName = 'engram-export-' + new Date().toISOString().slice(0, 10) + '.jsonld';
+
+        if (window.showSaveFilePicker) {
+          // Modern: Save As dialog
+          try {
+            const handle = await window.showSaveFilePicker({
+              suggestedName: defaultName,
+              types: [{
+                description: 'JSON-LD files',
+                accept: { 'application/ld+json': ['.jsonld', '.json'] },
+              }],
+            });
+            const writable = await handle.createWritable();
+            await writable.write(json);
+            await writable.close();
+            resultDiv.innerHTML = '<div style="color:var(--success);font-size:0.85rem"><i class="fa-solid fa-check"></i> Exported to ' + escapeHtml(handle.name) + '</div>';
+            showToast('Export saved', 'success');
+            exportBtn.disabled = false;
+            return;
+          } catch (e) {
+            if (e.name === 'AbortError') {
+              resultDiv.innerHTML = '';
+              exportBtn.disabled = false;
+              return; // User cancelled
+            }
+            // Fall through to legacy download
+          }
+        }
+
+        // Fallback: auto-download
+        const blob = new Blob([json], { type: 'application/ld+json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'engram-export-' + new Date().toISOString().slice(0, 10) + '.jsonld';
+        a.download = defaultName;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -1785,30 +2101,59 @@ function bindImportExportEvents() {
     });
   }
 
-  // Import
+  // Import — file picker
+  const fileInput = document.getElementById('sys-import-file');
   const importBtn = document.getElementById('sys-import-jsonld-btn');
+  const filenameSpan = document.getElementById('sys-import-filename');
+
+  if (fileInput) {
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files[0];
+      if (file) {
+        filenameSpan.textContent = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)';
+        filenameSpan.style.color = 'var(--text-primary)';
+        importBtn.disabled = false;
+      } else {
+        filenameSpan.textContent = 'No file selected';
+        filenameSpan.style.color = 'var(--text-muted)';
+        importBtn.disabled = true;
+      }
+    });
+  }
+
+  // Trust slider label sync
+  const trustSlider = document.getElementById('sys-import-trust');
+  const trustVal = document.getElementById('sys-import-trust-val');
+  if (trustSlider && trustVal) {
+    trustSlider.addEventListener('input', () => { trustVal.textContent = trustSlider.value; });
+  }
+
   if (importBtn) {
     importBtn.addEventListener('click', async () => {
-      const text = document.getElementById('sys-import-jsonld').value.trim();
-      if (!text) { showToast('Please paste JSON-LD data', 'error'); return; }
+      const file = fileInput?.files[0];
+      if (!file) { showToast('Select a JSON-LD file first', 'error'); return; }
 
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (err) {
-        showToast('Invalid JSON: ' + err.message, 'error');
-        return;
-      }
-
+      const trust = trustSlider ? parseFloat(trustSlider.value) : 0.5;
       const resultDiv = document.getElementById('sys-import-result');
       importBtn.disabled = true;
-      resultDiv.innerHTML = loadingHTML('Importing...');
+      resultDiv.innerHTML = loadingHTML('Reading and importing...');
 
       try {
-        const result = await engram.importJsonLd(data);
-        let msg = 'Import complete.';
-        if (result.nodes_created != null) msg += ' ' + result.nodes_created + ' facts created.';
-        if (result.edges_created != null) msg += ' ' + result.edges_created + ' connections created.';
+        const text = await file.text();
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          throw new Error('Invalid JSON in file: ' + e.message);
+        }
+
+        const result = await engram.importJsonLd({ data: data, source: 'file:' + file.name, trust: trust });
+        const parts = [];
+        if (result.nodes_imported) parts.push(result.nodes_imported + ' facts created');
+        if (result.edges_imported) parts.push(result.edges_imported + ' connections created');
+        if (result.nodes_merged) parts.push(result.nodes_merged + ' facts merged');
+        if (result.edges_merged) parts.push(result.edges_merged + ' connections merged');
+        const msg = parts.length ? parts.join(', ') + '.' : 'No changes.';
         resultDiv.innerHTML = '<div style="color:var(--success);font-size:0.85rem"><i class="fa-solid fa-check"></i> ' + escapeHtml(msg) + '</div>';
         showToast('Import complete', 'success');
       } catch (err) {

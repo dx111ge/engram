@@ -6,8 +6,8 @@ use std::sync::{Arc, RwLock};
 use crate::error::IngestError;
 use crate::traits::{Extractor, LanguageDetector, Parser, Resolver, Transformer};
 use crate::types::{
-    Content, DetectedLanguage, ExtractionMethod, PipelineConfig, PipelineResult, ProcessedFact,
-    Provenance, RawItem, TransformResult,
+    AnalyzeResult, Content, DetectedLanguage, ExtractionMethod, PipelineConfig, PipelineResult,
+    ProcessedFact, Provenance, RawItem, TransformResult,
 };
 
 /// A parsed text segment with its source metadata preserved.
@@ -396,6 +396,81 @@ impl Pipeline {
         );
 
         Ok(result)
+    }
+
+    /// Analyze text: runs parse, language detect, NER, and entity resolution
+    /// but does NOT store anything to the graph. Returns extracted entities for preview.
+    pub fn analyze(&self, items: Vec<RawItem>) -> Result<AnalyzeResult, IngestError> {
+        let start = std::time::Instant::now();
+
+        if items.is_empty() {
+            return Ok(AnalyzeResult {
+                entities: Vec::new(),
+                language: "en".into(),
+                duration_ms: 0,
+            });
+        }
+
+        // Stage 1: Parse
+        let mut result = PipelineResult::default();
+        let segments = self.parse_items(&items, &mut result)?;
+
+        if segments.is_empty() {
+            return Ok(AnalyzeResult {
+                entities: Vec::new(),
+                language: "en".into(),
+                duration_ms: start.elapsed().as_millis() as u64,
+            });
+        }
+
+        // Stage 2: Detect language
+        let lang_segments: Vec<(ParsedSegment, DetectedLanguage)> = segments
+            .into_iter()
+            .map(|seg| {
+                let lang = if self.config.stages.language_detect {
+                    self.detect_language(&seg.text)
+                } else {
+                    DetectedLanguage { code: "en".into(), confidence: 0.0 }
+                };
+                (seg, lang)
+            })
+            .collect();
+
+        let detected_lang = lang_segments
+            .first()
+            .map(|(_, l)| l.code.clone())
+            .unwrap_or_else(|| "en".into());
+
+        // Stage 3+4: NER + Resolve (no store)
+        let mut entities = Vec::new();
+
+        if self.config.stages.ner && !self.extractors.is_empty() {
+            for (seg, lang) in &lang_segments {
+                let mut extracted = self.run_extractors(&seg.text, lang);
+
+                if self.config.stages.entity_resolve && !self.resolvers.is_empty() {
+                    let graph = self.graph.read().map_err(|_| IngestError::Graph("graph lock poisoned".into()))?;
+                    for entity in &mut extracted {
+                        if entity.resolved_to.is_none() {
+                            for resolver in &self.resolvers {
+                                if let crate::types::ResolutionResult::Matched(nid) = resolver.resolve(entity, &graph) {
+                                    entity.resolved_to = Some(nid);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                entities.extend(extracted);
+            }
+        }
+
+        Ok(AnalyzeResult {
+            entities,
+            language: detected_lang,
+            duration_ms: start.elapsed().as_millis() as u64,
+        })
     }
 
     /// Execute the pipeline on pre-processed facts (skip parse/NER/resolve).

@@ -47,6 +47,16 @@ println!("{}", card.to_json());
 }
 ```
 
+### Authentication
+
+When authentication is enabled, A2A requests must include a bearer token. Use an API key for persistent access:
+
+```
+Authorization: Bearer egk_your_key_here
+```
+
+Generate API keys via the web UI (Security tab) or the HTTP API (`POST /auth/api-keys`). API keys inherit the creating user's role and trust level.
+
 ## Skills
 
 Engram exposes 9 skills via A2A:

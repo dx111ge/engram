@@ -1,7 +1,10 @@
-/// Anno NER backend: feature-gated ONNX model integration.
+/// Anno NER backend: GLiNER zero-shot NER via external `engram-ner` binary.
 ///
-/// Uses GLiNER2 or similar zero-shot NER models via ONNX runtime.
-/// The model is user-installed (`engram model install ner <id>`).
+/// The `engram-ner` binary wraps gline-rs (ONNX GLiNER inference) and communicates
+/// via JSON Lines over stdin/stdout. This avoids an ort version conflict between
+/// engram-core's embedder (ort rc.12) and gline-rs (ort rc.9).
+///
+/// The model is user-installed at `~/.engram/models/ner/<model-name>/`.
 ///
 /// This module is compiled only with `--features anno`.
 
@@ -10,26 +13,21 @@ use crate::traits::Extractor;
 #[cfg(feature = "anno")]
 use crate::types::{DetectedLanguage, ExtractedEntity, ExtractionMethod};
 
-/// Configuration for the ONNX NER backend.
+/// Configuration for the GLiNER NER backend.
 #[derive(Debug, Clone)]
 pub struct AnnoConfig {
-    /// Path to the ONNX model file.
-    pub model_path: std::path::PathBuf,
-    /// Path to the tokenizer JSON.
-    pub tokenizer_path: std::path::PathBuf,
+    /// Path to the model directory (containing model.onnx and tokenizer.json).
+    pub model_dir: std::path::PathBuf,
     /// Entity types to extract (for zero-shot models).
     pub entity_types: Vec<String>,
     /// Minimum confidence threshold for extracted entities.
     pub min_confidence: f32,
-    /// Maximum sequence length for the model.
-    pub max_seq_length: usize,
 }
 
 impl Default for AnnoConfig {
     fn default() -> Self {
         Self {
-            model_path: std::path::PathBuf::from("model.onnx"),
-            tokenizer_path: std::path::PathBuf::from("tokenizer.json"),
+            model_dir: std::path::PathBuf::new(),
             entity_types: vec![
                 "PERSON".into(),
                 "ORG".into(),
@@ -38,49 +36,123 @@ impl Default for AnnoConfig {
                 "EVENT".into(),
             ],
             min_confidence: 0.5,
-            max_seq_length: 512,
         }
     }
 }
 
-/// ONNX-based NER backend.
+/// GLiNER NER backend via external `engram-ner` process.
 ///
-/// Loads an ONNX NER model (e.g. GLiNER2) and runs inference.
 /// Feature-gated: only compiled with `--features anno`.
 #[cfg(feature = "anno")]
 pub struct AnnoBackend {
     config: AnnoConfig,
-    // TODO(8.7): ONNX runtime session will be held here.
-    // Requires `ort` crate (ONNX Runtime for Rust) as a dependency
-    // when the anno feature is fully implemented.
+    /// Path to the engram-ner binary.
+    ner_binary: std::path::PathBuf,
 }
 
 #[cfg(feature = "anno")]
 impl AnnoBackend {
-    /// Create a new ONNX NER backend.
+    /// Create a new GLiNER NER backend.
     ///
-    /// Returns an error if the model files don't exist or can't be loaded.
+    /// Locates the `engram-ner` binary next to the current executable,
+    /// then verifies the model directory exists.
     pub fn new(config: AnnoConfig) -> Result<Self, crate::IngestError> {
-        if !config.model_path.exists() {
+        let ner_binary = find_ner_binary().ok_or_else(|| {
+            crate::IngestError::Config(
+                "engram-ner binary not found. It should be in the same directory as engram."
+                    .into(),
+            )
+        })?;
+
+        if !config.model_dir.exists() {
             return Err(crate::IngestError::Config(format!(
-                "NER model not found: {}. Run: engram model install ner <model-id>",
-                config.model_path.display()
-            )));
-        }
-        if !config.tokenizer_path.exists() {
-            return Err(crate::IngestError::Config(format!(
-                "tokenizer not found: {}",
-                config.tokenizer_path.display()
+                "NER model directory not found: {}",
+                config.model_dir.display()
             )));
         }
 
-        Ok(Self { config })
+        let model_path = config.model_dir.join("model.onnx");
+        if !model_path.exists() {
+            return Err(crate::IngestError::Config(format!(
+                "model.onnx not found in {}. Run: engram model install ner <model-id>",
+                config.model_dir.display()
+            )));
+        }
+
+        Ok(Self { config, ner_binary })
     }
 
-    /// Check if the model is ready for inference.
+    /// Check if the backend is ready for inference.
     pub fn is_ready(&self) -> bool {
-        self.config.model_path.exists() && self.config.tokenizer_path.exists()
+        self.config.model_dir.join("model.onnx").exists()
+            && self.config.model_dir.join("tokenizer.json").exists()
     }
+
+    /// Run NER on a batch of texts via the engram-ner subprocess.
+    fn run_ner(&self, texts: &[&str]) -> Result<Vec<Vec<NerEntity>>, String> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let request = serde_json::json!({
+            "model_dir": self.config.model_dir.to_string_lossy(),
+            "texts": texts,
+            "labels": self.config.entity_types,
+            "threshold": self.config.min_confidence,
+        });
+
+        let mut child = Command::new(&self.ner_binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to spawn engram-ner: {e}"))?;
+
+        // Write request and close stdin to signal EOF
+        {
+            let stdin = child.stdin.as_mut().ok_or("failed to open stdin")?;
+            serde_json::to_writer(&mut *stdin, &request)
+                .map_err(|e| format!("failed to write request: {e}"))?;
+            writeln!(stdin).map_err(|e| format!("failed to write newline: {e}"))?;
+        }
+        // Drop stdin to close it
+        drop(child.stdin.take());
+
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("engram-ner process error: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("engram-ner exited with {}: {stderr}", output.status));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let first_line = stdout.lines().next().unwrap_or("");
+
+        let resp: serde_json::Value = serde_json::from_str(first_line)
+            .map_err(|e| format!("invalid response from engram-ner: {e}"))?;
+
+        if resp.get("ok") == Some(&serde_json::Value::Bool(true)) {
+            let results: Vec<Vec<NerEntity>> =
+                serde_json::from_value(resp["results"].clone())
+                    .map_err(|e| format!("failed to parse results: {e}"))?;
+            Ok(results)
+        } else {
+            let error = resp["error"].as_str().unwrap_or("unknown error");
+            Err(error.to_string())
+        }
+    }
+}
+
+/// Entity returned by the engram-ner process.
+#[cfg(feature = "anno")]
+#[derive(serde::Deserialize)]
+struct NerEntity {
+    text: String,
+    label: String,
+    score: f32,
+    start: usize,
+    end: usize,
 }
 
 #[cfg(feature = "anno")]
@@ -90,29 +162,36 @@ impl Extractor for AnnoBackend {
             return Vec::new();
         }
 
-        // TODO(8.7): Actual ONNX inference implementation.
-        // This will:
-        // 1. Tokenize `text` using the loaded tokenizer
-        // 2. Run inference through the ONNX session
-        // 3. Decode token-level predictions into entity spans
-        // 4. Filter by min_confidence
-        // 5. Return ExtractedEntity list
-        //
-        // For now, return empty — the model loading infrastructure
-        // needs the `ort` crate which is added when anno feature is
-        // fully wired.
+        let _ = lang; // GLiNER handles multilingual natively
 
-        tracing::warn!(
-            model = %self.config.model_path.display(),
-            "anno backend: ONNX inference not yet implemented"
-        );
-
-        let _ = lang; // will be used for language-specific tokenization
-        Vec::new()
+        match self.run_ner(&[text]) {
+            Ok(mut results) => {
+                if let Some(entities) = results.pop() {
+                    entities
+                        .into_iter()
+                        .map(|e| ExtractedEntity {
+                            text: e.text,
+                            entity_type: e.label,
+                            span: (e.start, e.end),
+                            confidence: e.score,
+                            method: ExtractionMethod::StatisticalModel,
+                            language: String::new(),
+                            resolved_to: None,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "engram-ner inference failed");
+                Vec::new()
+            }
+        }
     }
 
     fn name(&self) -> &str {
-        "anno-onnx"
+        "gliner-onnx"
     }
 
     fn method(&self) -> ExtractionMethod {
@@ -120,29 +199,56 @@ impl Extractor for AnnoBackend {
     }
 
     fn supported_languages(&self) -> Vec<String> {
-        // Depends on the installed model — GLiNER supports 20+ languages
+        // Depends on the installed model — GLiNER Multi supports 100+ languages
         vec![]
     }
 }
 
+/// Find the `engram-ner` binary next to the current executable.
+fn find_ner_binary() -> Option<std::path::PathBuf> {
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+
+    #[cfg(target_os = "windows")]
+    let name = "engram-ner.exe";
+    #[cfg(not(target_os = "windows"))]
+    let name = "engram-ner";
+
+    let path = exe_dir.join(name);
+    if path.exists() {
+        Some(path)
+    } else {
+        // Also check PATH
+        which_in_path(name)
+    }
+}
+
+/// Check if a binary exists in PATH.
+fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|p| p.exists())
+    })
+}
+
 /// Check if an NER model is installed at the standard location.
 pub fn find_ner_model(model_name: &str) -> Option<AnnoConfig> {
-    // Standard model location: ~/.engram/models/ner/<model-name>/
-    let home = dirs_next().unwrap_or_default();
+    let home = dirs_next()?;
     let model_dir = home.join(".engram").join("models").join("ner").join(model_name);
 
-    let model_path = model_dir.join("model.onnx");
-    let tokenizer_path = model_dir.join("tokenizer.json");
-
-    if model_path.exists() && tokenizer_path.exists() {
+    if model_dir.join("model.onnx").exists() && model_dir.join("tokenizer.json").exists() {
         Some(AnnoConfig {
-            model_path,
-            tokenizer_path,
+            model_dir,
             ..Default::default()
         })
     } else {
         None
     }
+}
+
+/// Check if the engram-ner binary is available.
+pub fn is_ner_binary_available() -> bool {
+    find_ner_binary().is_some()
 }
 
 /// Get the user's home directory.

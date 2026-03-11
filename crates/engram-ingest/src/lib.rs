@@ -66,7 +66,7 @@ pub use traits::{
     SourceParams, Transformer,
 };
 pub use types::{
-    Content, ConflictRecord, DetectedLanguage, ExtractedEntity, ExtractedRelation,
+    AnalyzeResult, Content, ConflictRecord, DetectedLanguage, ExtractedEntity, ExtractedRelation,
     ExtractionMethod, PipelineConfig, PipelineResult, ProcessedFact, Provenance, RawItem,
     ResolutionResult, StageConfig, TransformResult,
 };

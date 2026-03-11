@@ -604,6 +604,90 @@ impl Graph {
         }
     }
 
+    /// Find an existing active edge between two nodes with a given relation.
+    /// Returns the edge slot if found, None otherwise.
+    pub fn find_edge_slot(
+        &self,
+        from_label: &str,
+        to_label: &str,
+        rel_type: &str,
+    ) -> Result<Option<u64>> {
+        let from_id = match self.find_node_id(from_label)? {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let to_id = match self.find_node_id(to_label)? {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let edge_type = match self.type_registry.get(rel_type) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        if let Some(edge_slots) = self.adj_out.get(&from_id) {
+            for &s in edge_slots {
+                let edge = self.brain.read_edge(s)?;
+                if edge.is_active()
+                    && edge.from_node == from_id
+                    && edge.to_node == to_id
+                    && edge.edge_type == edge_type
+                {
+                    return Ok(Some(s));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Update the confidence of an edge by slot index.
+    pub fn update_edge_confidence(&mut self, slot: u64, confidence: f32) -> Result<()> {
+        self.brain.update_edge_field(slot, |e| {
+            e.confidence = confidence.clamp(0.0, 1.0);
+        })
+    }
+
+    /// Get the confidence of an edge by slot index.
+    pub fn edge_confidence(&self, slot: u64) -> Result<f32> {
+        let edge = self.brain.read_edge(slot)?;
+        Ok(edge.confidence)
+    }
+
+    /// Get the confidence of a node by label.
+    pub fn node_confidence(&self, label: &str) -> Result<Option<f32>> {
+        if let Some(slot) = self.find_slot_by_label(label)? {
+            let node = self.brain.read_node(slot)?;
+            Ok(Some(node.confidence))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Set the confidence of a node by label. Returns the old confidence.
+    pub fn set_node_confidence(&mut self, label: &str, confidence: f32) -> Result<Option<f32>> {
+        if let Some(slot) = self.find_slot_by_label(label)? {
+            let old_conf = self.brain.read_node(slot)?.confidence;
+            let clamped = confidence.clamp(0.0, 1.0);
+            self.brain.update_node_field(slot, |n| {
+                n.confidence = clamped;
+            })?;
+            if let Some(node_id) = self.find_node_id(label)? {
+                if (old_conf - clamped).abs() > f32::EPSILON {
+                    self.emit(GraphEvent::FactUpdated {
+                        node_id,
+                        label: Arc::from(label),
+                        old_confidence: old_conf,
+                        new_confidence: clamped,
+                    });
+                    self.check_threshold_crossing(node_id, label, old_conf, clamped);
+                }
+            }
+            Ok(Some(old_conf))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Soft-delete an edge by its slot index. Returns true if the edge was deleted.
     pub fn delete_edge_by_slot(&mut self, slot: u64, _provenance: &Provenance) -> Result<bool> {
         let edge = self.brain.read_edge(slot)?;

@@ -27,6 +27,19 @@ The server reads JSON-RPC requests from stdin and writes responses to stdout, on
 
 ## Configuration
 
+### Authentication
+
+When the engram server has authentication enabled (admin account created), MCP connections need an API key. Generate one via the Security tab in the web UI or the HTTP API:
+
+```bash
+curl -X POST http://localhost:3030/auth/api-keys \
+  -H 'Authorization: Bearer YOUR_SESSION_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"MCP Server"}'
+```
+
+Pass the API key via the `ENGRAM_API_KEY` environment variable in your MCP config.
+
 ### Claude Code
 
 Add to your project's `.mcp.json` or global MCP settings:
@@ -36,7 +49,10 @@ Add to your project's `.mcp.json` or global MCP settings:
   "mcpServers": {
     "engram": {
       "command": "engram",
-      "args": ["mcp", "/path/to/knowledge.brain"]
+      "args": ["mcp", "/path/to/knowledge.brain"],
+      "env": {
+        "ENGRAM_API_KEY": "egk_your_key_here"
+      }
     }
   }
 }
@@ -51,7 +67,10 @@ Add to your MCP server configuration:
   "engram": {
     "command": "engram",
     "args": ["mcp", "/path/to/knowledge.brain"],
-    "transport": "stdio"
+    "transport": "stdio",
+    "env": {
+      "ENGRAM_API_KEY": "egk_your_key_here"
+    }
   }
 }
 ```
@@ -65,7 +84,10 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "engram": {
       "command": "/path/to/engram",
-      "args": ["mcp", "/path/to/knowledge.brain"]
+      "args": ["mcp", "/path/to/knowledge.brain"],
+      "env": {
+        "ENGRAM_API_KEY": "egk_your_key_here"
+      }
     }
   }
 }

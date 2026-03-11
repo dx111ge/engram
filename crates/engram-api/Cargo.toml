@@ -10,6 +10,7 @@ default = []
 llm = []
 mesh = ["engram-mesh"]
 ingest = ["engram-ingest"]
+anno = ["engram-ingest/anno"]
 actions = ["engram-action"]
 reason = ["engram-reason"]
 assess = ["engram-assess"]
@@ -34,7 +35,7 @@ tokio = { workspace = true }
 axum = { version = "0.8", features = ["ws", "multipart"] }
 futures = "0.3"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 urlencoding = "2"
 tonic = { version = "0.13", optional = true }

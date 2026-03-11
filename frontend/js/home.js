@@ -63,15 +63,10 @@ async function loadHomeData() {
       document.getElementById('stat-nodes').textContent = nodeCount.toLocaleString();
       document.getElementById('stat-edges').textContent = edgeCount.toLocaleString();
 
-      // Determine embedder status
-      const embedderConfigured = !!(compute && (compute.embedder_model || compute.embedder_endpoint));
-
-      // Show onboarding area
+      // Show onboarding area (topics only — embedder config lives on System tab)
       const onboardingArea = document.getElementById('home-onboarding-area');
       if (onboardingArea) {
-        if (!embedderConfigured) {
-          showEmbedderOnboarding(onboardingArea);
-        } else if (nodeCount === 0) {
+        if (nodeCount === 0) {
           showTopicsOnboarding(onboardingArea, false);
         } else {
           showTopicsCompact(onboardingArea);
@@ -165,26 +160,25 @@ async function loadSystemSummary(compute, config, nodeCount, edgeCount) {
   // API status
   const apiOnline = !!(compute || config);
 
-  // Embedder info
-  let embedderHtml = '';
-  if (compute && compute.embedder_model) {
-    let embedText = escapeHtml(compute.embedder_model);
-    if (compute.embedder_dim) embedText += ' (' + compute.embedder_dim + 'D)';
-    embedderHtml = `<span style="color:var(--success)">${embedText}</span>`;
-  } else if (compute && compute.embedder_endpoint) {
-    embedderHtml = `<span style="color:var(--success)">${escapeHtml(compute.embedder_endpoint)}</span>`;
-  } else {
-    embedderHtml = `<span class="text-muted">Not configured</span> <a href="#/system" style="font-size:0.8rem;color:var(--accent-bright)">[Set up]</a>`;
-  }
-
-  // LLM info
-  let llmHtml = '';
-  if (config && config.llm_model) {
-    llmHtml = `<span style="color:var(--success)">${escapeHtml(config.llm_model)}</span>`;
-  } else if (config && config.llm_endpoint) {
-    llmHtml = `<span style="color:var(--success)">${escapeHtml(config.llm_endpoint)}</span>`;
-  } else {
-    llmHtml = `<span class="text-muted">Not configured</span> <a href="#/system" style="font-size:0.8rem;color:var(--accent-bright)">[Set up]</a>`;
+  // Hardware info
+  let cpuHtml = '--';
+  let gpuHtml = '<span class="text-muted">None</span>';
+  let npuHtml = '';
+  if (compute) {
+    cpuHtml = `${compute.cpu_cores} cores`;
+    if (compute.has_avx2) cpuHtml += ' <span class="text-muted" style="font-size:0.75rem">AVX2</span>';
+    if (compute.has_gpu && compute.gpu_name) {
+      gpuHtml = `<span style="color:var(--success)">${escapeHtml(compute.gpu_name)}</span>`;
+      if (compute.gpu_backend) gpuHtml += ` <span class="text-muted" style="font-size:0.75rem">${escapeHtml(compute.gpu_backend)}</span>`;
+    }
+    if (compute.has_npu && compute.npu_name) {
+      npuHtml = `
+        <div style="display:flex;align-items:center;gap:0.4rem">
+          <i class="fa-solid fa-brain" style="color:var(--text-muted)"></i>
+          <span class="text-secondary">NPU:</span>
+          <span style="color:var(--success)">${escapeHtml(compute.npu_name)}</span>
+        </div>`;
+    }
   }
 
   // Feature dot helper
@@ -202,7 +196,7 @@ async function loadSystemSummary(compute, config, nodeCount, edgeCount) {
   container.innerHTML = `
     <div class="card mb-2">
       <div class="card-header">
-        <h3><i class="fa-solid fa-stethoscope"></i> System Health</h3>
+        <h3><i class="fa-solid fa-microchip"></i> Hardware</h3>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(220px, 1fr));gap:0.6rem 1.5rem;font-size:0.85rem;padding:0.25rem 0">
         <div style="display:flex;align-items:center;gap:0.4rem">
@@ -213,25 +207,16 @@ async function loadSystemSummary(compute, config, nodeCount, edgeCount) {
             : '<span style="color:var(--error)">Offline</span>'}
         </div>
         <div style="display:flex;align-items:center;gap:0.4rem">
-          <i class="fa-solid fa-vector-square" style="color:var(--text-muted)"></i>
-          <span class="text-secondary">Embedder:</span>
-          ${embedderHtml}
+          <i class="fa-solid fa-microchip" style="color:var(--text-muted)"></i>
+          <span class="text-secondary">CPU:</span>
+          <span>${cpuHtml}</span>
         </div>
         <div style="display:flex;align-items:center;gap:0.4rem">
-          <i class="fa-solid fa-robot" style="color:var(--text-muted)"></i>
-          <span class="text-secondary">LLM:</span>
-          ${llmHtml}
+          <i class="fa-solid fa-display" style="color:var(--text-muted)"></i>
+          <span class="text-secondary">GPU:</span>
+          ${gpuHtml}
         </div>
-        <div style="display:flex;align-items:center;gap:0.4rem">
-          <i class="fa-solid fa-circle-nodes" style="color:var(--text-muted)"></i>
-          <span class="text-secondary">Facts:</span>
-          <span>${(nodeCount ?? 0).toLocaleString()}</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:0.4rem">
-          <i class="fa-solid fa-arrow-right-arrow-left" style="color:var(--text-muted)"></i>
-          <span class="text-secondary">Connections:</span>
-          <span>${(edgeCount ?? 0).toLocaleString()}</span>
-        </div>
+        ${npuHtml}
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:0.75rem;margin-top:0.75rem;padding-bottom:0.25rem">
         ${featureDot('Ingest', sourcesEnabled)}
@@ -349,360 +334,230 @@ async function loadSourcesSummary() {
     </div>`;
 }
 
-// --- Embedder Onboarding (compact banner) ---
-function showEmbedderOnboarding(container) {
-  container.innerHTML = `
-    <div class="card mb-2">
-      <div class="card-header">
-        <h3><i class="fa-solid fa-wand-magic-sparkles"></i> Set Up Embedding Model</h3>
-        <span style="font-size:0.78rem;padding:0.15rem 0.5rem;border-radius:999px;background:var(--accent-bright);color:#fff">Step 1 of 2</span>
-      </div>
-      <p style="font-size:0.9rem;color:var(--text-secondary);margin-bottom:0.5rem">
-        Choose your embedding model for semantic search. This determines how engram understands meaning.
-      </p>
-      <div style="display:flex;align-items:center;gap:0.4rem;padding:0.4rem 0.6rem;background:rgba(227,160,8,0.1);border:1px solid rgba(227,160,8,0.3);border-radius:var(--radius-sm);font-size:0.82rem;color:var(--confidence-mid);margin-bottom:0.75rem">
-        <i class="fa-solid fa-triangle-exclamation"></i>
-        <span>Changing your model after loading data requires a full reindex.</span>
-      </div>
-      <div style="display:flex;flex-wrap:wrap;gap:0.5rem">
-        <a href="#/system" class="btn btn-sm btn-secondary">
-          <i class="fa-solid fa-microchip"></i> ONNX Local
-        </a>
-        <a href="#/system" class="btn btn-sm btn-secondary">
-          <i class="fa-solid fa-server"></i> Ollama
-        </a>
-        <a href="#/system" class="btn btn-sm btn-secondary">
-          <i class="fa-solid fa-cloud"></i> OpenAI
-        </a>
-      </div>
-    </div>`;
-}
+// --- Seed Knowledge: statement-first approach with NER analysis ---
 
-// --- Default + custom topics ---
-function getDefaultTopics() {
-  return [
-    { id: 'tech',      icon: 'fa-microchip',       label: 'Technology',     examples: ['JavaScript is a programming language', 'React is a frontend framework', 'PostgreSQL is a relational database'] },
-    { id: 'science',   icon: 'fa-flask',            label: 'Science',        examples: ['DNA stores genetic information', 'Photosynthesis converts light to energy', 'The speed of light is 299792458 m/s'] },
-    { id: 'business',  icon: 'fa-briefcase',        label: 'Business',       examples: ['Revenue minus costs equals profit', 'Market cap measures company value', 'ROI stands for Return on Investment'] },
-    { id: 'people',    icon: 'fa-users',            label: 'People & Orgs',  examples: ['Linus Torvalds created Linux', 'Tim Berners-Lee invented the web', 'Alan Turing pioneered computing'] },
-    { id: 'geo',       icon: 'fa-earth-americas',   label: 'Geography',      examples: ['Tokyo is the capital of Japan', 'The Amazon is the largest river by volume', 'Mount Everest is 8849 meters tall'] },
-    { id: 'politics',  icon: 'fa-landmark',         label: 'Politics',       examples: ['Democracy means rule by the people', 'The UN was founded in 1945', 'Separation of powers divides government into branches'] },
-    { id: 'health',    icon: 'fa-heart-pulse',       label: 'Health',         examples: ['The human body has 206 bones', 'Insulin regulates blood sugar', 'Vaccines train the immune system'] },
-    { id: 'personal',  icon: 'fa-user-pen',         label: 'Personal Notes', examples: ['My project deadline is next Friday', 'Meeting with team at 3pm', 'Remember to review the API docs'] },
-  ];
-}
-
-function getCustomTopics() {
-  try {
-    const raw = localStorage.getItem('engram_topics');
-    return raw ? JSON.parse(raw) : [];
-  } catch (_) { return []; }
-}
-
-function saveCustomTopics(topics) {
-  localStorage.setItem('engram_topics', JSON.stringify(topics));
-}
-
-const TOPIC_ICON_OPTIONS = [
-  { value: 'fa-star',            label: 'Star' },
-  { value: 'fa-book',            label: 'Book' },
-  { value: 'fa-code',            label: 'Code' },
-  { value: 'fa-music',           label: 'Music' },
-  { value: 'fa-palette',         label: 'Art' },
-  { value: 'fa-gamepad',         label: 'Gaming' },
-  { value: 'fa-utensils',        label: 'Food' },
-  { value: 'fa-plane',           label: 'Travel' },
-  { value: 'fa-graduation-cap',  label: 'Education' },
-  { value: 'fa-film',            label: 'Film' },
-  { value: 'fa-futbol',          label: 'Sports' },
-  { value: 'fa-leaf',            label: 'Nature' },
-  { value: 'fa-gavel',           label: 'Law' },
-  { value: 'fa-chart-line',      label: 'Finance' },
-  { value: 'fa-wrench',          label: 'Tools' },
+const SEED_INSPIRATIONS = [
+  { label: 'Ukraine-Russia war', text: 'Russia invaded Ukraine in February 2022, leading to NATO expansion with Finland and Sweden joining the alliance. The European Union imposed sanctions on Moscow while the United States provided military aid to Kyiv.' },
+  { label: 'Gold investment', text: 'Gold prices surged past $2,400 per ounce as central banks in China, India and Turkey increased reserves amid inflation fears. The Federal Reserve interest rate decisions directly impact gold demand.' },
+  { label: 'AI chip exports', text: 'The United States imposed export controls on NVIDIA and AMD AI chips to China, affecting companies like TSMC and Samsung. Huawei developed the Ascend 910B as an alternative processor.' },
+  { label: 'EU energy policy', text: 'The European Union committed to 42.5% renewable energy by 2030, with Germany and France leading offshore wind investment. Norway supplies natural gas while Russia was cut from the Nord Stream pipeline.' },
+  { label: 'SpaceX Mars', text: 'SpaceX launched Starship from Boca Chica, Texas with CEO Elon Musk targeting Mars colonization by 2030. NASA partnered with SpaceX for the Artemis lunar program.' },
+  { label: 'BRICS expansion', text: 'BRICS expanded to include Saudi Arabia, Egypt and Ethiopia as members push for alternatives to the US dollar. China and Brazil signed bilateral trade agreements bypassing the dollar.' },
 ];
 
-function getAllTopics() {
-  return [...getDefaultTopics(), ...getCustomTopics()];
-}
-
-// --- Step 2: Topics Onboarding (empty DB, embedder configured) ---
-function showTopicsOnboarding(container, compact) {
-  const allTopics = getAllTopics();
+function showTopicsOnboarding(container) {
+  const inspiration = SEED_INSPIRATIONS[Math.floor(Math.random() * SEED_INSPIRATIONS.length)];
 
   container.innerHTML = `
-    <div class="card mb-2" id="onboarding-topics-card">
+    <div class="card mb-2" id="seed-card">
       <div class="card-header">
-        <h3><i class="fa-solid fa-tags"></i> Seed Your Topics</h3>
-        <span style="font-size:0.78rem;padding:0.15rem 0.5rem;border-radius:999px;background:var(--accent-bright);color:#fff">Step 2 of 2</span>
+        <h3><i class="fa-solid fa-seedling"></i> Seed Your Knowledge</h3>
       </div>
-      <p style="font-size:0.92rem;color:var(--text-secondary);margin-bottom:1rem">
-        Pick a topic below to seed your knowledge base with starter facts, or create your own topics.
+      <p style="font-size:0.92rem;color:var(--text-secondary);margin-bottom:0.75rem">
+        Describe what you want to track. Write a statement, paste a paragraph, or pick an example below.
       </p>
 
-      <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));gap:0.75rem;margin-bottom:1rem" id="onboarding-topics-grid">
-        ${renderTopicButtons(allTopics)}
-      </div>
+      <textarea id="seed-text" rows="4" placeholder="e.g. ${inspiration.label} — ${inspiration.text.substring(0, 80)}..."
+        style="width:100%;padding:0.6rem 0.75rem;border:1px solid var(--border);border-radius:var(--radius-sm);
+        background:var(--bg-input);color:var(--text-primary);font-size:0.9rem;resize:vertical;
+        font-family:inherit;line-height:1.5"></textarea>
 
-      <div style="margin-bottom:1rem">
-        <button class="btn btn-sm btn-secondary" id="add-topic-toggle">
-          <i class="fa-solid fa-plus"></i> Add Topic
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.75rem;flex-wrap:wrap">
+        <button class="btn btn-primary" id="seed-analyze-btn">
+          <i class="fa-solid fa-magnifying-glass-chart"></i> Analyze
         </button>
-      </div>
-
-      <div id="add-topic-form" style="display:none;padding:0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:1rem">
-        <div style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
-          <div style="flex:1;min-width:150px">
-            <label style="font-size:0.8rem;color:var(--text-muted);display:block;margin-bottom:0.25rem">Topic Name</label>
-            <input type="text" id="new-topic-name" placeholder="e.g. Cooking" style="width:100%;padding:0.4rem 0.6rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-input);color:var(--text-primary);font-size:0.9rem">
-          </div>
-          <div style="min-width:120px">
-            <label style="font-size:0.8rem;color:var(--text-muted);display:block;margin-bottom:0.25rem">Icon</label>
-            <select id="new-topic-icon" style="width:100%;padding:0.4rem 0.6rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-input);color:var(--text-primary);font-size:0.9rem">
-              ${TOPIC_ICON_OPTIONS.map(ic => `<option value="${ic.value}">${ic.label}</option>`).join('')}
-            </select>
-          </div>
-          <button class="btn btn-sm btn-primary" id="add-topic-submit">
-            <i class="fa-solid fa-plus"></i> Add
-          </button>
+        <span style="font-size:0.8rem;color:var(--text-muted)">or try:</span>
+        <div style="display:flex;flex-wrap:wrap;gap:0.4rem" id="seed-suggestions">
+          ${SEED_INSPIRATIONS.slice(0, 4).map(s => `
+            <button class="seed-suggestion" data-text="${escapeHtml(s.text)}" style="
+              padding:0.3rem 0.65rem;font-size:0.78rem;border:1px solid var(--border);
+              border-radius:999px;background:var(--bg-secondary);color:var(--text-secondary);
+              cursor:pointer;transition:all 0.15s;white-space:nowrap;
+            ">${escapeHtml(s.label)}</button>
+          `).join('')}
         </div>
       </div>
 
-      <div id="topic-preview" style="display:none">
+      <div id="seed-results" style="display:none;margin-top:1rem">
         <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:0.5rem">
-          <i class="fa-solid fa-eye"></i> Preview: these facts will be added
+          <i class="fa-solid fa-diagram-project"></i> Extracted entities
+          <span id="seed-lang" style="margin-left:0.5rem"></span>
+          <span id="seed-timing" style="margin-left:0.5rem"></span>
         </div>
-        <div id="topic-preview-list" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:1rem"></div>
+        <div id="seed-entity-list" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:1rem"></div>
         <div style="display:flex;gap:0.75rem;align-items:center">
-          <button class="btn btn-primary" id="topic-add-facts">
-            <i class="fa-solid fa-plus"></i> Add These Facts
+          <button class="btn btn-primary" id="seed-commit-btn">
+            <i class="fa-solid fa-plus"></i> Seed Knowledge Base
           </button>
-          <button class="btn btn-secondary" id="topic-back">
+          <button class="btn btn-secondary" id="seed-reset-btn">
             <i class="fa-solid fa-arrow-left"></i> Back
           </button>
-          <span id="topic-status" style="font-size:0.85rem"></span>
+          <span id="seed-status" style="font-size:0.85rem"></span>
         </div>
       </div>
     </div>`;
 
-  attachTopicHandlers(container);
+  attachSeedHandlers(container);
 }
 
-// --- Compact topics (DB has data, embedder configured) ---
+// When DB has data, show compact add-more section
 function showTopicsCompact(container) {
-  const allTopics = getAllTopics();
-
   container.innerHTML = `
-    <div class="card mb-2" id="onboarding-topics-card">
+    <div class="card mb-2" id="seed-card">
       <div class="card-header">
-        <h3><i class="fa-solid fa-tags"></i> Topics</h3>
+        <h3><i class="fa-solid fa-plus-circle"></i> Add Knowledge</h3>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.75rem" id="onboarding-topics-grid">
-        ${allTopics.map(t => `
-          <a href="#/explore?q=${encodeURIComponent(t.label)}" style="
-            display:inline-flex;align-items:center;gap:0.4rem;padding:0.35rem 0.75rem;
-            background:var(--bg-secondary);border:1px solid var(--border);border-radius:999px;
-            font-size:0.85rem;color:var(--text-primary);text-decoration:none;transition:all 0.15s;
-          " class="topic-pill">
-            <i class="fa-solid ${t.icon}" style="color:var(--accent-bright);font-size:0.8rem"></i>
-            ${escapeHtml(t.label)}
-          </a>
-        `).join('')}
-      </div>
-      <div style="margin-bottom:0.5rem">
-        <button class="btn btn-sm btn-secondary" id="add-topic-toggle" style="font-size:0.8rem">
-          <i class="fa-solid fa-plus"></i> Add Topic
+      <div style="display:flex;gap:0.5rem;align-items:stretch">
+        <textarea id="seed-text" rows="2" placeholder="Paste or type new information to analyze and add..."
+          style="flex:1;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:var(--radius-sm);
+          background:var(--bg-input);color:var(--text-primary);font-size:0.85rem;resize:none;
+          font-family:inherit;line-height:1.4"></textarea>
+        <button class="btn btn-primary" id="seed-analyze-btn" style="align-self:stretch;white-space:nowrap">
+          <i class="fa-solid fa-magnifying-glass-chart"></i> Analyze
         </button>
       </div>
-      <div id="add-topic-form" style="display:none;padding:0.75rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:0.5rem">
-        <div style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
-          <div style="flex:1;min-width:150px">
-            <label style="font-size:0.8rem;color:var(--text-muted);display:block;margin-bottom:0.25rem">Topic Name</label>
-            <input type="text" id="new-topic-name" placeholder="e.g. Cooking" style="width:100%;padding:0.4rem 0.6rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-input);color:var(--text-primary);font-size:0.9rem">
-          </div>
-          <div style="min-width:120px">
-            <label style="font-size:0.8rem;color:var(--text-muted);display:block;margin-bottom:0.25rem">Icon</label>
-            <select id="new-topic-icon" style="width:100%;padding:0.4rem 0.6rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-input);color:var(--text-primary);font-size:0.9rem">
-              ${TOPIC_ICON_OPTIONS.map(ic => `<option value="${ic.value}">${ic.label}</option>`).join('')}
-            </select>
-          </div>
-          <button class="btn btn-sm btn-primary" id="add-topic-submit">
-            <i class="fa-solid fa-plus"></i> Add
+      <div id="seed-results" style="display:none;margin-top:0.75rem">
+        <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:0.5rem">
+          <i class="fa-solid fa-diagram-project"></i> Extracted entities
+          <span id="seed-lang" style="margin-left:0.5rem"></span>
+          <span id="seed-timing" style="margin-left:0.5rem"></span>
+        </div>
+        <div id="seed-entity-list" style="display:flex;flex-direction:column;gap:0.3rem;margin-bottom:0.75rem"></div>
+        <div style="display:flex;gap:0.75rem;align-items:center">
+          <button class="btn btn-primary btn-sm" id="seed-commit-btn">
+            <i class="fa-solid fa-plus"></i> Add to Knowledge Base
           </button>
+          <button class="btn btn-secondary btn-sm" id="seed-reset-btn">
+            <i class="fa-solid fa-xmark"></i> Clear
+          </button>
+          <span id="seed-status" style="font-size:0.85rem"></span>
         </div>
       </div>
     </div>`;
 
-  // Add topic toggle + submit handlers
-  const toggleBtn = container.querySelector('#add-topic-toggle');
-  const form = container.querySelector('#add-topic-form');
-  if (toggleBtn && form) {
-    toggleBtn.addEventListener('click', () => {
-      form.style.display = form.style.display === 'none' ? 'block' : 'none';
-    });
-  }
-
-  const submitBtn = container.querySelector('#add-topic-submit');
-  if (submitBtn) {
-    submitBtn.addEventListener('click', () => {
-      const nameInput = document.getElementById('new-topic-name');
-      const iconSelect = document.getElementById('new-topic-icon');
-      const name = nameInput.value.trim();
-      if (!name) { showToast('Please enter a topic name', 'error'); return; }
-
-      const custom = getCustomTopics();
-      const allExisting = getAllTopics();
-      if (allExisting.some(t => t.label.toLowerCase() === name.toLowerCase())) {
-        showToast('Topic already exists', 'error');
-        return;
-      }
-
-      custom.push({
-        id: 'custom_' + Date.now(),
-        icon: iconSelect.value,
-        label: name,
-        examples: [],
-      });
-      saveCustomTopics(custom);
-      showToast('Topic added', 'success');
-      showTopicsCompact(container);
-    });
-  }
+  attachSeedHandlers(container);
 }
 
-function renderTopicButtons(topics) {
-  return topics.map(t => `
-    <button class="wizard-topic-btn" data-topic="${escapeHtml(t.id)}" style="
-      display:flex;align-items:center;gap:0.6rem;padding:0.75rem;
-      background:var(--bg-secondary);border:2px solid var(--border);border-radius:var(--radius-sm);
-      cursor:pointer;transition:all 0.15s;font-size:0.9rem;text-align:left;
-    ">
-      <i class="fa-solid ${t.icon}" style="font-size:1.1rem;color:var(--accent-bright);flex-shrink:0"></i>
-      <span>${escapeHtml(t.label)}</span>
-    </button>
-  `).join('');
-}
+function attachSeedHandlers(container) {
+  let analyzedEntities = [];
+  let analyzedText = '';
 
-function attachTopicHandlers(container) {
-  const topicMap = {};
-  getAllTopics().forEach(t => { topicMap[t.id] = t; });
-
-  let selectedTopic = null;
-
-  // Add topic toggle
-  const toggleBtn = container.querySelector('#add-topic-toggle');
-  const form = container.querySelector('#add-topic-form');
-  if (toggleBtn && form) {
-    toggleBtn.addEventListener('click', () => {
-      form.style.display = form.style.display === 'none' ? 'block' : 'none';
-    });
-  }
-
-  // Add topic submit
-  const submitBtn = container.querySelector('#add-topic-submit');
-  if (submitBtn) {
-    submitBtn.addEventListener('click', () => {
-      const nameInput = document.getElementById('new-topic-name');
-      const iconSelect = document.getElementById('new-topic-icon');
-      const name = nameInput.value.trim();
-      if (!name) { showToast('Please enter a topic name', 'error'); return; }
-
-      const custom = getCustomTopics();
-      const allExisting = getAllTopics();
-      if (allExisting.some(t => t.label.toLowerCase() === name.toLowerCase())) {
-        showToast('Topic already exists', 'error');
-        return;
-      }
-
-      custom.push({
-        id: 'custom_' + Date.now(),
-        icon: iconSelect.value,
-        label: name,
-        examples: [],
-      });
-      saveCustomTopics(custom);
-      showToast('Topic added', 'success');
-
-      // Re-render
-      showTopicsOnboarding(container, false);
-    });
-  }
-
-  // Topic button clicks
-  container.querySelectorAll('.wizard-topic-btn').forEach(btn => {
+  // Suggestion clicks fill the textarea
+  container.querySelectorAll('.seed-suggestion').forEach(btn => {
     btn.addEventListener('click', () => {
-      selectedTopic = topicMap[btn.dataset.topic];
-      if (!selectedTopic) return;
+      const ta = document.getElementById('seed-text');
+      if (ta) ta.value = btn.dataset.text || btn.textContent.trim();
+    });
+  });
 
-      // Highlight selected
-      container.querySelectorAll('.wizard-topic-btn').forEach(b => {
-        b.style.borderColor = b === btn ? 'var(--accent-bright)' : 'var(--border)';
-        b.style.background = b === btn ? 'var(--bg-input)' : 'var(--bg-secondary)';
+  // Analyze button
+  const analyzeBtn = container.querySelector('#seed-analyze-btn');
+  if (analyzeBtn) {
+    analyzeBtn.addEventListener('click', async () => {
+      const ta = document.getElementById('seed-text');
+      const text = ta?.value.trim();
+      if (!text) { showToast('Enter some text to analyze', 'error'); return; }
+
+      analyzeBtn.disabled = true;
+      analyzeBtn.innerHTML = '<span class="spinner"></span> Analyzing...';
+
+      try {
+        const res = await engram.ingestAnalyze(text);
+        analyzedEntities = res.entities || [];
+        analyzedText = text;
+
+        const resultsDiv = document.getElementById('seed-results');
+        const entityList = document.getElementById('seed-entity-list');
+        const langSpan = document.getElementById('seed-lang');
+        const timingSpan = document.getElementById('seed-timing');
+
+        if (langSpan) langSpan.textContent = res.language ? `[${res.language}]` : '';
+        if (timingSpan) timingSpan.textContent = res.duration_ms != null ? `${res.duration_ms}ms` : '';
+
+        if (analyzedEntities.length === 0) {
+          entityList.innerHTML = `
+            <div style="padding:0.5rem;font-size:0.85rem;color:var(--text-muted)">
+              <i class="fa-solid fa-info-circle"></i> No entities extracted. Try a more descriptive statement with names, places, or organizations.
+            </div>`;
+        } else {
+          entityList.innerHTML = analyzedEntities.map((e, i) => `
+            <div class="seed-entity-row" data-idx="${i}" style="
+              display:flex;align-items:center;gap:0.6rem;padding:0.45rem 0.6rem;
+              background:var(--bg-input);border-radius:var(--radius-sm);font-size:0.85rem;
+            ">
+              <input type="checkbox" checked data-entity-idx="${i}"
+                style="flex-shrink:0;accent-color:var(--accent-bright)">
+              <span style="font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(e.text)}</span>
+              <span style="
+                padding:0.15rem 0.45rem;border-radius:999px;font-size:0.72rem;font-weight:600;
+                background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-secondary);
+                white-space:nowrap;text-transform:uppercase;
+              ">${escapeHtml(e.entity_type)}</span>
+              <span style="font-size:0.78rem;color:var(--text-muted);white-space:nowrap">${(e.confidence * 100).toFixed(0)}%</span>
+              ${e.resolved_to != null
+                ? '<i class="fa-solid fa-link" style="color:var(--success);font-size:0.7rem" title="Resolved to existing node"></i>'
+                : '<i class="fa-solid fa-sparkles" style="color:var(--accent-bright);font-size:0.7rem" title="New entity"></i>'}
+            </div>
+          `).join('');
+        }
+
+        if (resultsDiv) resultsDiv.style.display = 'block';
+      } catch (err) {
+        showToast('Analysis failed: ' + (err.message || err), 'error');
+      } finally {
+        analyzeBtn.disabled = false;
+        analyzeBtn.innerHTML = '<i class="fa-solid fa-magnifying-glass-chart"></i> Analyze';
+      }
+    });
+  }
+
+  // Commit button — ingest selected entities
+  const commitBtn = container.querySelector('#seed-commit-btn');
+  if (commitBtn) {
+    commitBtn.addEventListener('click', async () => {
+      // Get checked entity indices
+      const checked = [];
+      container.querySelectorAll('input[data-entity-idx]').forEach(cb => {
+        if (cb.checked) checked.push(parseInt(cb.dataset.entityIdx));
       });
 
-      const previewDiv = document.getElementById('topic-preview');
-      const previewList = document.getElementById('topic-preview-list');
+      if (checked.length === 0) { showToast('Select at least one entity', 'error'); return; }
 
-      if (!selectedTopic.examples || selectedTopic.examples.length === 0) {
-        // Custom topic with no seed facts
-        if (previewDiv) previewDiv.style.display = 'block';
-        if (previewList) previewList.innerHTML = `
-          <div style="font-size:0.85rem;color:var(--text-muted);padding:0.5rem">
-            <i class="fa-solid fa-info-circle"></i> This is a custom topic with no seed facts.
-            Head to <a href="#/add">Add Facts</a> to start adding knowledge.
-          </div>`;
-        const addBtn = document.getElementById('topic-add-facts');
-        if (addBtn) addBtn.style.display = 'none';
-        return;
-      }
+      const statusEl = document.getElementById('seed-status');
+      commitBtn.disabled = true;
+      if (statusEl) statusEl.innerHTML = '<span class="spinner"></span> Storing...';
 
-      // Show preview
-      if (previewDiv) previewDiv.style.display = 'block';
-      if (previewList) {
-        previewList.innerHTML = selectedTopic.examples.map(ex => `
-          <div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.6rem;background:var(--bg-input);border-radius:var(--radius-sm);font-size:0.85rem">
-            <i class="fa-solid fa-circle-plus" style="color:var(--success);flex-shrink:0"></i>
-            <span>${escapeHtml(ex)}</span>
-          </div>
-        `).join('');
-      }
-      const addBtn = document.getElementById('topic-add-facts');
-      if (addBtn) addBtn.style.display = '';
-      document.getElementById('topic-status').innerHTML = '';
-    });
-  });
-
-  // Add facts button
-  container.querySelector('#topic-add-facts')?.addEventListener('click', async () => {
-    if (!selectedTopic || !selectedTopic.examples || selectedTopic.examples.length === 0) return;
-    const btn = document.getElementById('topic-add-facts');
-    const statusEl = document.getElementById('topic-status');
-    btn.disabled = true;
-    statusEl.innerHTML = '<span class="spinner"></span> Adding facts...';
-
-    let added = 0;
-    for (const fact of selectedTopic.examples) {
       try {
-        await engram.tell({ statement: fact });
-        added++;
-      } catch (_) {}
-    }
+        // Send the original text through the full ingest pipeline
+        const res = await engram.ingest({
+          items: [analyzedText],
+          source: 'seed',
+        });
 
-    statusEl.innerHTML = `<span style="color:var(--success)"><i class="fa-solid fa-check"></i> Added ${added} facts</span>`;
-    showToast(`Added ${added} starter facts for ${selectedTopic.label}`, 'success');
-    btn.disabled = false;
+        const count = res.facts_stored || 0;
+        if (statusEl) statusEl.innerHTML = `<span style="color:var(--success)"><i class="fa-solid fa-check"></i> ${count} entities stored</span>`;
+        showToast(`Seeded ${count} entities into knowledge base`, 'success');
 
-    // Refresh stats
-    setTimeout(() => loadHomeData(), 500);
-  });
-
-  // Back button
-  container.querySelector('#topic-back')?.addEventListener('click', () => {
-    const previewDiv = document.getElementById('topic-preview');
-    if (previewDiv) previewDiv.style.display = 'none';
-    container.querySelectorAll('.wizard-topic-btn').forEach(b => {
-      b.style.borderColor = 'var(--border)';
-      b.style.background = 'var(--bg-secondary)';
+        setTimeout(() => loadHomeData(), 500);
+      } catch (err) {
+        if (statusEl) statusEl.innerHTML = `<span style="color:var(--error)"><i class="fa-solid fa-xmark"></i> ${err.message || err}</span>`;
+        showToast('Failed to store: ' + (err.message || err), 'error');
+      } finally {
+        commitBtn.disabled = false;
+      }
     });
-    selectedTopic = null;
-  });
+  }
+
+  // Reset button
+  const resetBtn = container.querySelector('#seed-reset-btn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      const resultsDiv = document.getElementById('seed-results');
+      if (resultsDiv) resultsDiv.style.display = 'none';
+      analyzedEntities = [];
+      analyzedText = '';
+      const statusEl = document.getElementById('seed-status');
+      if (statusEl) statusEl.innerHTML = '';
+    });
+  }
 }

@@ -665,7 +665,8 @@ pub async fn stats(State(state): State<AppState>) -> ApiResult<StatsResponse> {
 pub async fn compute(
     State(state): State<AppState>,
 ) -> Json<crate::state::ComputeInfo> {
-    Json(state.compute.clone())
+    let compute = state.compute.read().unwrap().clone();
+    Json(compute)
 }
 
 // ── POST /quantize ── Enable or disable int8 vector quantization
@@ -683,6 +684,17 @@ pub async fn set_quantization(
     g.set_vector_quantization(mode);
     let memory_bytes = g.vector_memory_bytes();
     let quant = g.vector_quantization_mode();
+    drop(g);
+
+    // Persist to config
+    {
+        let mut cfg = state.config.write().unwrap_or_else(|e| e.into_inner());
+        cfg.quantization_enabled = Some(req.enabled);
+        if let Some(ref path) = state.config_path {
+            let _ = cfg.save(path);
+        }
+    }
+
     Ok(Json(QuantizeResponse {
         mode: match quant {
             engram_core::QuantizationMode::Int8 => "int8".to_string(),
@@ -945,8 +957,11 @@ pub async fn import_jsonld(
     Json(req): Json<JsonLdImportRequest>,
 ) -> ApiResult<JsonLdImportResponse> {
     let prov = provenance(&req.source);
+    let trust = req.trust.unwrap_or(0.5).clamp(0.0, 1.0);
     let mut nodes_imported: u32 = 0;
+    let mut nodes_merged: u32 = 0;
     let mut edges_imported: u32 = 0;
+    let mut edges_merged: u32 = 0;
     let mut errors: Vec<String> = Vec::new();
 
     // Extract @graph array, or treat the whole doc as a single node
@@ -961,67 +976,77 @@ pub async fn import_jsonld(
 
     let mut g = state.graph.write().map_err(|_| write_lock_err())?;
 
-    // First pass: create all nodes
+    // First pass: create or merge nodes
     for item in &items {
         let label = extract_label(item);
         if label.is_empty() {
             continue;
         }
 
-        // Get confidence if present
-        let conf = item.get("engram:confidence")
+        let import_conf = item.get("engram:confidence")
             .or_else(|| item.get("confidence"))
             .and_then(|v| v.as_f64())
             .map(|c| c as f32);
 
-        let store_result = if let Some(c) = conf {
-            g.store_with_confidence(&label, c, &prov)
-        } else {
-            g.store(&label, &prov)
-        };
+        // Check if node already exists
+        let existing = g.find_node_id(&label).unwrap_or(None);
 
-        match store_result {
-            Ok(_slot) => {
-                nodes_imported += 1;
-
-                // Set @type if present
-                if let Some(type_val) = item.get("@type") {
-                    let type_str = match type_val {
-                        serde_json::Value::String(s) => strip_prefix(s),
-                        serde_json::Value::Array(arr) => {
-                            arr.first()
-                                .and_then(|v| v.as_str())
-                                .map(strip_prefix)
-                                .unwrap_or_default()
-                        }
-                        _ => String::new(),
-                    };
-                    if !type_str.is_empty() {
-                        let _ = g.set_node_type(&label, &type_str);
-                    }
+        if let Some(_existing_id) = existing {
+            // Node exists — merge confidence using trust-weighted formula
+            if let Some(c_import) = import_conf {
+                if let Ok(Some(c_local)) = g.node_confidence(&label) {
+                    let c_new = c_local + trust * (c_import - c_local);
+                    let _ = g.set_node_confidence(&label, c_new);
                 }
+            }
+            nodes_merged += 1;
+        } else {
+            // New node — create with imported confidence
+            let store_result = if let Some(c) = import_conf {
+                g.store_with_confidence(&label, c, &prov)
+            } else {
+                g.store(&label, &prov)
+            };
+            match store_result {
+                Ok(_) => { nodes_imported += 1; }
+                Err(e) => { errors.push(format!("store {label}: {e}")); continue; }
+            }
+        }
 
-                // Import properties (skip JSON-LD keywords and relationships)
-                if let Some(obj) = item.as_object() {
-                    for (k, v) in obj {
-                        if k.starts_with('@') || k == "engram:confidence" || k == "engram:memoryTier" {
-                            continue;
-                        }
-                        // If value is a string, treat as property
-                        if let Some(s) = v.as_str() {
-                            let prop_key = strip_prefix(k);
-                            if !prop_key.is_empty() {
-                                let _ = g.set_property(&label, &prop_key, s);
-                            }
-                        }
+        // Set @type if present
+        if let Some(type_val) = item.get("@type") {
+            let type_str = match type_val {
+                serde_json::Value::String(s) => strip_prefix(s),
+                serde_json::Value::Array(arr) => {
+                    arr.first()
+                        .and_then(|v| v.as_str())
+                        .map(strip_prefix)
+                        .unwrap_or_default()
+                }
+                _ => String::new(),
+            };
+            if !type_str.is_empty() {
+                let _ = g.set_node_type(&label, &type_str);
+            }
+        }
+
+        // Import properties (skip JSON-LD keywords and relationships)
+        if let Some(obj) = item.as_object() {
+            for (k, v) in obj {
+                if k.starts_with('@') || k == "engram:confidence" || k == "engram:memoryTier" {
+                    continue;
+                }
+                if let Some(s) = v.as_str() {
+                    let prop_key = strip_prefix(k);
+                    if !prop_key.is_empty() {
+                        let _ = g.set_property(&label, &prop_key, s);
                     }
                 }
             }
-            Err(e) => errors.push(format!("store {label}: {e}")),
         }
     }
 
-    // Second pass: create edges (relationships to other nodes)
+    // Second pass: create or merge edges
     for item in &items {
         let from_label = extract_label(item);
         if from_label.is_empty() {
@@ -1034,13 +1059,12 @@ pub async fn import_jsonld(
                     continue;
                 }
                 let rel = strip_prefix(k);
-                // Check if value is a reference (object with @id) or array of references
                 let targets = if v.is_array() {
                     v.as_array().unwrap().clone()
                 } else if v.is_object() {
                     vec![v.clone()]
                 } else {
-                    continue; // string properties already handled
+                    continue;
                 };
 
                 for target in &targets {
@@ -1056,14 +1080,31 @@ pub async fn import_jsonld(
                                 Err(e) => { errors.push(format!("store {to_label}: {e}")); continue; }
                             }
                         }
-                        // Get edge confidence if present
-                        let conf = target.get("engram:confidence")
+
+                        let c_import = target.get("engram:confidence")
                             .or_else(|| target.get("confidence"))
                             .and_then(|v| v.as_f64())
-                            .map(|c| c as f32);
-                        match g.relate_with_confidence(&from_label, &to_label, &rel, conf.unwrap_or(0.8), &prov) {
-                            Ok(_) => { edges_imported += 1; }
-                            Err(e) => errors.push(format!("relate {from_label} -> {to_label}: {e}")),
+                            .map(|c| c as f32)
+                            .unwrap_or(0.8);
+
+                        // Check if edge already exists
+                        match g.find_edge_slot(&from_label, &to_label, &rel) {
+                            Ok(Some(slot)) => {
+                                // Edge exists — merge confidence
+                                if let Ok(c_local) = g.edge_confidence(slot) {
+                                    let c_new = c_local + trust * (c_import - c_local);
+                                    let _ = g.update_edge_confidence(slot, c_new);
+                                }
+                                edges_merged += 1;
+                            }
+                            Ok(None) => {
+                                // New edge — create
+                                match g.relate_with_confidence(&from_label, &to_label, &rel, c_import, &prov) {
+                                    Ok(_) => { edges_imported += 1; }
+                                    Err(e) => errors.push(format!("relate {from_label} -> {to_label}: {e}")),
+                                }
+                            }
+                            Err(e) => errors.push(format!("find edge {from_label} -> {to_label}: {e}")),
                         }
                     }
                 }
@@ -1078,6 +1119,8 @@ pub async fn import_jsonld(
     Ok(Json(JsonLdImportResponse {
         nodes_imported,
         edges_imported,
+        nodes_merged,
+        edges_merged,
         errors: if errors.is_empty() { None } else { Some(errors) },
     }))
 }
@@ -1462,9 +1505,8 @@ pub async fn proxy_llm(
         let ep = cfg.llm_endpoint.clone()
             .or_else(|| std::env::var("ENGRAM_LLM_ENDPOINT").ok());
         // API key: secrets store first, then config (legacy), then env
-        let key = state.secrets.as_ref()
-            .and_then(|s| s.read().ok())
-            .and_then(|s| s.get("llm.api_key").map(String::from))
+        let key = state.secrets.read().ok()
+            .and_then(|guard| guard.as_ref().and_then(|s| s.get("llm.api_key").map(String::from)))
             .or_else(|| cfg.llm_api_key.clone())
             .or_else(|| std::env::var("ENGRAM_LLM_API_KEY").ok())
             .unwrap_or_default();
@@ -1540,6 +1582,71 @@ pub async fn proxy_llm(
     Ok(Json(json_value))
 }
 
+/// GET /proxy/models — fetch available models from the configured LLM endpoint (avoids CORS).
+pub async fn proxy_llm_models(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let (endpoint, api_key) = {
+        let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
+        let ep = cfg.llm_endpoint.clone()
+            .or_else(|| std::env::var("ENGRAM_LLM_ENDPOINT").ok());
+        let key = state.secrets.read().ok()
+            .and_then(|guard| guard.as_ref().and_then(|s| s.get("llm.api_key").map(String::from)))
+            .or_else(|| cfg.llm_api_key.clone())
+            .or_else(|| std::env::var("ENGRAM_LLM_API_KEY").ok())
+            .unwrap_or_default();
+        (ep, key)
+    };
+
+    let endpoint = endpoint.ok_or_else(|| {
+        api_err(StatusCode::SERVICE_UNAVAILABLE,
+            "LLM not configured. Set endpoint via POST /config or ENGRAM_LLM_ENDPOINT env var.")
+    })?;
+
+    // Build /v1/models URL from the raw endpoint
+    let base = endpoint.trim().trim_end_matches('/');
+    let models_url = if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        // Strip any path after host (e.g. /v1/chat/completions) and use /v1/models
+        let after_scheme = base.strip_prefix("https://")
+            .or_else(|| base.strip_prefix("http://"))
+            .unwrap_or(base);
+        let scheme_end = base.len() - after_scheme.len();
+        let host_end = after_scheme.find('/').map(|i| scheme_end + i).unwrap_or(base.len());
+        format!("{}/v1/models", &base[..host_end])
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut req = client.get(&models_url);
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {api_key}"));
+    }
+
+    let resp = req.send().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("Failed to reach LLM: {e}")))?;
+
+    if !resp.status().is_success() {
+        let code = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(api_err(
+            StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY),
+            format!("LLM returned {code}: {body}"),
+        ));
+    }
+
+    let body = resp.text().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("Invalid JSON from LLM: {e}")))?;
+
+    Ok(Json(json))
+}
+
 fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{}", tag);
     let close = format!("</{}>", tag);
@@ -1561,12 +1668,79 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
 
 // ── POST /ingest — ingest pipeline ──
 
+/// Build a pipeline with all available NER backends wired up.
+#[cfg(feature = "ingest")]
+fn build_pipeline(
+    graph: std::sync::Arc<std::sync::RwLock<engram_core::graph::Graph>>,
+    config: engram_ingest::PipelineConfig,
+) -> engram_ingest::Pipeline {
+    use engram_ingest::{NerChain, ChainStrategy};
+
+    let mut pipeline = engram_ingest::Pipeline::new(graph.clone(), config);
+
+    // Build a MergeAll NER chain: run ALL backends, merge + dedup results.
+    // This ensures gazetteer resolved_to IDs are preserved AND GLiNER finds
+    // new entities the gazetteer doesn't know about yet.
+    let mut chain = NerChain::new(ChainStrategy::MergeAll);
+
+    // 1. Rule-based NER (emails, IPs, dates — always available, fast)
+    chain.add_backend(Box::new(engram_ingest::RuleBasedNer::default()));
+
+    // 2. Graph-derived gazetteer (known entities with resolved node IDs)
+    {
+        let brain_path = {
+            let g = graph.read().unwrap();
+            g.path().to_path_buf()
+        };
+        let mut gaz = engram_ingest::GraphGazetteer::new(&brain_path, 0.3);
+        {
+            let g = graph.read().unwrap();
+            gaz.build_from_graph(&g);
+        }
+        let gaz = std::sync::Arc::new(tokio::sync::RwLock::new(gaz));
+        chain.add_backend(Box::new(engram_ingest::GazetteerExtractor::new(gaz)));
+    }
+
+    // 3. GLiNER/anno backend (zero-shot NER for new entities)
+    #[cfg(feature = "anno")]
+    {
+        use engram_ingest::anno_backend::{AnnoBackend, find_ner_model};
+        if let Some(mut cfg) = find_ner_model("gliner_small-v2.1") {
+            cfg.entity_types = vec![
+                "person".into(), "organization".into(), "location".into(),
+                "date".into(), "event".into(), "product".into(),
+            ];
+            cfg.min_confidence = 0.3;
+            match AnnoBackend::new(cfg) {
+                Ok(backend) => {
+                    tracing::info!("GLiNER NER backend loaded");
+                    chain.add_backend(Box::new(backend));
+                }
+                Err(e) => {
+                    tracing::warn!("GLiNER NER backend unavailable: {e}");
+                }
+            }
+        }
+    }
+
+    tracing::info!("NER chain: MergeAll with {} backends", chain.backend_count());
+    pipeline.add_extractor(Box::new(chain));
+
+    // Add conservative entity resolver
+    pipeline.add_resolver(Box::new(engram_ingest::ConservativeResolver::default()));
+
+    // Add language detector
+    pipeline.set_language_detector(Box::new(engram_ingest::DefaultLanguageDetector::default()));
+
+    pipeline
+}
+
 #[cfg(feature = "ingest")]
 pub async fn ingest(
     State(state): State<AppState>,
     Json(req): Json<IngestRequest>,
 ) -> ApiResult<IngestResponse> {
-    use engram_ingest::{Pipeline, PipelineConfig, types::StageConfig};
+    use engram_ingest::{PipelineConfig, types::StageConfig};
 
     let source = req.source.unwrap_or_else(|| "api-ingest".into());
 
@@ -1590,7 +1764,7 @@ pub async fn ingest(
         ..Default::default()
     };
 
-    let pipeline = Pipeline::new(state.graph.clone(), config);
+    let pipeline = build_pipeline(state.graph.clone(), config);
 
     // Convert IngestItems to RawItems
     let items: Vec<engram_ingest::types::RawItem> = req.items
@@ -1620,12 +1794,17 @@ pub async fn ingest(
         })
         .collect();
 
-    // Execute pipeline
-    let result = if req.parallel.unwrap_or(false) {
-        pipeline.execute_parallel(items)
-    } else {
-        pipeline.execute(items)
-    }
+    // Execute pipeline in spawn_blocking (gazetteer uses blocking_read)
+    let parallel = req.parallel.unwrap_or(false);
+    let result = tokio::task::spawn_blocking(move || {
+        if parallel {
+            pipeline.execute_parallel(items)
+        } else {
+            pipeline.execute(items)
+        }
+    })
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     state.mark_dirty();
@@ -1648,6 +1827,61 @@ pub async fn ingest() -> impl axum::response::IntoResponse {
      Json(ErrorResponse { error: "ingest feature not enabled — rebuild with --features ingest".into() }))
 }
 
+/// POST /ingest/analyze — run NER on text without storing, for preview
+#[cfg(feature = "ingest")]
+pub async fn ingest_analyze(
+    State(state): State<AppState>,
+    Json(req): Json<AnalyzeRequest>,
+) -> ApiResult<AnalyzeResponse> {
+    use engram_ingest::PipelineConfig;
+
+    let config = PipelineConfig::default();
+    let pipeline = build_pipeline(state.graph.clone(), config);
+
+    let items = vec![engram_ingest::types::RawItem {
+        content: engram_ingest::types::Content::Text(req.text),
+        source_url: None,
+        source_name: "analyze".into(),
+        fetched_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+        metadata: Default::default(),
+    }];
+
+    // Run pipeline in spawn_blocking to avoid tokio runtime panic
+    // from gazetteer's blocking_read()
+    let result = tokio::task::spawn_blocking(move || pipeline.analyze(items))
+        .await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let entities = result
+        .entities
+        .into_iter()
+        .map(|e| AnalyzeEntityResponse {
+            text: e.text,
+            entity_type: e.entity_type,
+            confidence: e.confidence,
+            method: format!("{:?}", e.method),
+            span: e.span,
+            resolved_to: e.resolved_to,
+        })
+        .collect();
+
+    Ok(Json(AnalyzeResponse {
+        entities,
+        language: result.language,
+        duration_ms: result.duration_ms,
+    }))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn ingest_analyze() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled — rebuild with --features ingest".into() }))
+}
+
 /// POST /ingest/file — ingest from file upload (multipart)
 #[cfg(feature = "ingest")]
 pub async fn ingest_file(
@@ -1655,7 +1889,7 @@ pub async fn ingest_file(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     body: axum::body::Bytes,
 ) -> ApiResult<IngestResponse> {
-    use engram_ingest::{Pipeline, PipelineConfig, types::StageConfig};
+    use engram_ingest::{PipelineConfig, types::StageConfig};
 
     let source = params.get("source").cloned().unwrap_or_else(|| "file-upload".into());
 
@@ -1678,7 +1912,7 @@ pub async fn ingest_file(
         ..Default::default()
     };
 
-    let pipeline = Pipeline::new(state.graph.clone(), config);
+    let pipeline = build_pipeline(state.graph.clone(), config);
 
     // Try to parse body as UTF-8 text
     let text = String::from_utf8(body.to_vec())
@@ -1698,11 +1932,15 @@ pub async fn ingest_file(
     }];
 
     let parallel = params.get("parallel").is_some_and(|v| v == "true" || v == "1");
-    let result = if parallel {
-        pipeline.execute_parallel(items)
-    } else {
-        pipeline.execute(items)
-    }
+    let result = tokio::task::spawn_blocking(move || {
+        if parallel {
+            pipeline.execute_parallel(items)
+        } else {
+            pipeline.execute(items)
+        }
+    })
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     state.mark_dirty();
@@ -2513,6 +2751,7 @@ pub async fn get_config(
         "ner_endpoint": cfg.ner_endpoint,
         "mesh_enabled": cfg.mesh_enabled,
         "mesh_topology": cfg.mesh_topology,
+        "quantization_enabled": cfg.quantization_enabled.unwrap_or(true),
     }))
 }
 
@@ -2658,6 +2897,7 @@ pub async fn upload_onnx_model(
                 let mut g = state.graph.write().map_err(|_| write_lock_err())?;
                 g.set_embedder(Box::new(embedder));
                 drop(g);
+                state.set_embedder_info("ONNX Local".into(), dim, "local".into());
                 tracing::info!("hot-loaded ONNX embedder ({}D) from {}", dim, model_path);
                 activated = true;
             }
@@ -2712,6 +2952,243 @@ pub async fn check_onnx_model(
         "tokenizer_path": tokenizer_path,
         "model_size_mb": model_size as f64 / 1_048_576.0,
     })))
+}
+
+/// POST /config/onnx-download — Download ONNX embedding model from HuggingFace.
+///
+/// Accepts JSON: { "model_url": "...", "tokenizer_url": "..." }
+/// Downloads both files server-side and installs them as the active embedder.
+pub async fn download_onnx_model(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    use tokio::io::AsyncWriteExt;
+
+    let model_url = body["model_url"].as_str()
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "model_url required"))?;
+    let tokenizer_url = body["tokenizer_url"].as_str()
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "tokenizer_url required"))?;
+
+    // Validate URLs point to huggingface.co
+    for url in [model_url, tokenizer_url] {
+        if !url.starts_with("https://huggingface.co/") {
+            return Err(api_err(StatusCode::BAD_REQUEST, "only HuggingFace URLs are allowed"));
+        }
+    }
+
+    let brain_path = state.config_path.as_ref()
+        .and_then(|p| p.to_str())
+        .and_then(|s| s.strip_suffix(".config"))
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine brain file path"))?;
+
+    let model_path = format!("{}.model.onnx", brain_path);
+    let tokenizer_path = format!("{}.tokenizer.json", brain_path);
+
+    let client = reqwest::Client::new();
+
+    // Download tokenizer first (small, quick validation)
+    tracing::info!("downloading tokenizer from {}", tokenizer_url);
+    let resp = client.get(tokenizer_url).send().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("tokenizer download failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(api_err(StatusCode::BAD_GATEWAY, format!("tokenizer download returned {}", resp.status())));
+    }
+    let tokenizer_bytes = resp.bytes().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("tokenizer read failed: {e}")))?;
+    tokio::fs::write(&tokenizer_path, &tokenizer_bytes).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write tokenizer failed: {e}")))?;
+
+    // Download model (large, stream to disk)
+    tracing::info!("downloading model from {}", model_url);
+    let resp = client.get(model_url).send().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("model download failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(api_err(StatusCode::BAD_GATEWAY, format!("model download returned {}", resp.status())));
+    }
+    let content_length = resp.content_length().unwrap_or(0);
+
+    let mut file = tokio::fs::File::create(&model_path).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create model file failed: {e}")))?;
+
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    use futures::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("download stream error: {e}")))?;
+        file.write_all(&chunk).await
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write model failed: {e}")))?;
+        downloaded += chunk.len() as u64;
+    }
+    file.flush().await.map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("flush failed: {e}")))?;
+
+    tracing::info!("downloaded {} MB model to {}", downloaded / 1_048_576, model_path);
+
+    // Hot-load the ONNX embedder
+    let mut activated = false;
+    let mut load_error: Option<String> = None;
+    #[cfg(feature = "onnx")]
+    {
+        match engram_core::OnnxEmbedder::load(
+            std::path::Path::new(&model_path),
+            std::path::Path::new(&tokenizer_path),
+        ) {
+            Ok(embedder) => {
+                let dim = embedder.dim();
+                let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+                g.set_embedder(Box::new(embedder));
+                drop(g);
+                state.set_embedder_info("ONNX Local".into(), dim, "local".into());
+                tracing::info!("hot-loaded ONNX embedder ({}D)", dim);
+                activated = true;
+            }
+            Err(e) => {
+                tracing::warn!("ONNX load failed after download: {e}");
+                load_error = Some(e.to_string());
+            }
+        }
+    }
+
+    let message = if activated {
+        "ONNX embedder downloaded and activated.".to_string()
+    } else if let Some(ref err) = load_error {
+        format!("ONNX model downloaded but hot-load failed: {err}. Restart the server to activate.")
+    } else {
+        "ONNX model downloaded. Restart the server to activate.".to_string()
+    };
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "model_path": model_path,
+        "tokenizer_path": tokenizer_path,
+        "model_size_mb": downloaded as f64 / 1_048_576.0,
+        "content_length_mb": content_length as f64 / 1_048_576.0,
+        "activated": activated,
+        "message": message,
+    })))
+}
+
+// ── POST /config/ner-download — Download GLiNER NER model from HuggingFace ──
+
+pub async fn download_ner_model(
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    use tokio::io::AsyncWriteExt;
+
+    let model_id = body["model_id"].as_str()
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "model_id required"))?;
+    let model_url = body["model_url"].as_str()
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "model_url required"))?;
+    let tokenizer_url = body["tokenizer_url"].as_str()
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "tokenizer_url required"))?;
+
+    // Validate URLs point to huggingface.co
+    for url in [model_url, tokenizer_url] {
+        if !url.starts_with("https://huggingface.co/") {
+            return Err(api_err(StatusCode::BAD_REQUEST, "only HuggingFace URLs are allowed"));
+        }
+    }
+
+    // Sanitize model_id (alphanumeric, hyphens, underscores, dots only)
+    if model_id.contains("..") || model_id.contains('/') || model_id.contains('\\') {
+        return Err(api_err(StatusCode::BAD_REQUEST, "invalid model_id"));
+    }
+
+    // Target: ~/.engram/models/ner/{model_id}/
+    let home = dirs_next_home()
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
+    let model_dir = home.join(".engram").join("models").join("ner").join(model_id);
+    tokio::fs::create_dir_all(&model_dir).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create dir failed: {e}")))?;
+
+    let model_path = model_dir.join("model.onnx");
+    let tokenizer_path = model_dir.join("tokenizer.json");
+
+    let client = reqwest::Client::new();
+
+    // Download tokenizer first (small)
+    tracing::info!("NER: downloading tokenizer from {}", tokenizer_url);
+    let resp = client.get(tokenizer_url).send().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("tokenizer download failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(api_err(StatusCode::BAD_GATEWAY, format!("tokenizer download returned {}", resp.status())));
+    }
+    let tokenizer_bytes = resp.bytes().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("tokenizer read failed: {e}")))?;
+    tokio::fs::write(&tokenizer_path, &tokenizer_bytes).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write tokenizer failed: {e}")))?;
+
+    // Download model (large, stream to disk)
+    tracing::info!("NER: downloading model from {}", model_url);
+    let resp = client.get(model_url).send().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("model download failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(api_err(StatusCode::BAD_GATEWAY, format!("model download returned {}", resp.status())));
+    }
+    let content_length = resp.content_length().unwrap_or(0);
+
+    let mut file = tokio::fs::File::create(&model_path).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create model file failed: {e}")))?;
+
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    use futures::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("download stream error: {e}")))?;
+        file.write_all(&chunk).await
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write model failed: {e}")))?;
+        downloaded += chunk.len() as u64;
+    }
+    file.flush().await.map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("flush failed: {e}")))?;
+
+    tracing::info!("NER: downloaded {} MB model to {}", downloaded / 1_048_576, model_dir.display());
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "model_id": model_id,
+        "model_dir": model_dir.to_string_lossy(),
+        "model_size_mb": downloaded as f64 / 1_048_576.0,
+        "content_length_mb": content_length as f64 / 1_048_576.0,
+    })))
+}
+
+/// GET /config/ner-model?id={model_id} — Check if a NER model is installed.
+pub async fn check_ner_model(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<serde_json::Value> {
+    let model_id = params.get("id")
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "id query parameter required"))?;
+
+    let home = dirs_next_home()
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
+    let model_dir = home.join(".engram").join("models").join("ner").join(model_id);
+
+    let has_model = model_dir.join("model.onnx").exists();
+    let has_tokenizer = model_dir.join("tokenizer.json").exists();
+    let ready = has_model && has_tokenizer;
+
+    let model_size = if has_model {
+        std::fs::metadata(model_dir.join("model.onnx"))
+            .map(|m| m.len() as f64 / 1_048_576.0)
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    Ok(Json(serde_json::json!({
+        "model_id": model_id,
+        "ready": ready,
+        "has_model": has_model,
+        "has_tokenizer": has_tokenizer,
+        "model_size_mb": model_size,
+        "model_dir": model_dir.to_string_lossy(),
+    })))
+}
+
+/// Cross-platform home directory lookup.
+fn dirs_next_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
 }
 
 // ── POST /reindex — Re-embed all nodes ──────────────────────────────
@@ -3259,14 +3736,14 @@ fn feature_not_enabled(name: &str) -> (StatusCode, Json<ErrorResponse>) {
 pub async fn list_secrets(
     State(state): State<AppState>,
 ) -> ApiResult<serde_json::Value> {
-    if let Some(ref secrets) = state.secrets {
-        let s = secrets.read().map_err(|_| {
-            api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
-        })?;
+    let guard = state.secrets.read().map_err(|_| {
+        api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
+    })?;
+    if let Some(ref s) = *guard {
         let keys: Vec<&str> = s.keys();
         Ok(Json(serde_json::json!({ "keys": keys })))
     } else {
-        Ok(Json(serde_json::json!({ "keys": [], "message": "no secrets store (start server with master password)" })))
+        Ok(Json(serde_json::json!({ "keys": [], "message": "secrets store not unlocked (admin must login first)" })))
     }
 }
 
@@ -3281,17 +3758,17 @@ pub async fn set_secret(
         .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "missing 'value' field"))?
         .to_string();
 
-    if let Some(ref secrets) = state.secrets {
-        let mut s = secrets.write().map_err(|_| {
-            api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
-        })?;
+    let mut guard = state.secrets.write().map_err(|_| {
+        api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
+    })?;
+    if let Some(ref mut s) = *guard {
         s.set(&key, value);
         s.save().map_err(|e| {
             api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to save secrets: {e}"))
         })?;
         Ok(Json(serde_json::json!({ "set": key })))
     } else {
-        Err(api_err(StatusCode::SERVICE_UNAVAILABLE, "no secrets store"))
+        Err(api_err(StatusCode::SERVICE_UNAVAILABLE, "secrets store not unlocked"))
     }
 }
 
@@ -3300,10 +3777,10 @@ pub async fn delete_secret(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> ApiResult<serde_json::Value> {
-    if let Some(ref secrets) = state.secrets {
-        let mut s = secrets.write().map_err(|_| {
-            api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
-        })?;
+    let mut guard = state.secrets.write().map_err(|_| {
+        api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
+    })?;
+    if let Some(ref mut s) = *guard {
         let removed = s.remove(&key);
         if removed {
             s.save().map_err(|e| {
@@ -3312,7 +3789,7 @@ pub async fn delete_secret(
         }
         Ok(Json(serde_json::json!({ "deleted": removed, "key": key })))
     } else {
-        Err(api_err(StatusCode::SERVICE_UNAVAILABLE, "no secrets store"))
+        Err(api_err(StatusCode::SERVICE_UNAVAILABLE, "secrets store not unlocked"))
     }
 }
 
@@ -3321,10 +3798,10 @@ pub async fn check_secret(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> ApiResult<serde_json::Value> {
-    if let Some(ref secrets) = state.secrets {
-        let s = secrets.read().map_err(|_| {
-            api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
-        })?;
+    let guard = state.secrets.read().map_err(|_| {
+        api_err(StatusCode::INTERNAL_SERVER_ERROR, "secrets lock poisoned")
+    })?;
+    if let Some(ref s) = *guard {
         Ok(Json(serde_json::json!({ "key": key, "exists": s.has(&key) })))
     } else {
         Ok(Json(serde_json::json!({ "key": key, "exists": false })))

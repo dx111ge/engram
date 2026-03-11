@@ -132,7 +132,8 @@ impl NerChain {
 
 /// Deduplicate entities with overlapping spans.
 /// When spans overlap, keep the one with higher confidence.
-/// When spans are identical, keep the one with higher confidence.
+/// If the dropped entity had a `resolved_to` node ID (e.g. from gazetteer),
+/// merge it into the winner so entity resolution info is not lost.
 fn dedup_entities(mut entities: Vec<ExtractedEntity>) -> Vec<ExtractedEntity> {
     if entities.len() <= 1 {
         return entities;
@@ -148,12 +149,20 @@ fn dedup_entities(mut entities: Vec<ExtractedEntity>) -> Vec<ExtractedEntity> {
 
     let mut result: Vec<ExtractedEntity> = Vec::new();
     for entity in entities {
-        let overlaps = result.iter().any(|existing| {
+        let overlap_idx = result.iter().position(|existing| {
             // Overlap check: spans intersect
             existing.span.0 < entity.span.1 && entity.span.0 < existing.span.1
         });
-        if !overlaps {
-            result.push(entity);
+        match overlap_idx {
+            Some(idx) => {
+                // Winner already in result; merge resolved_to from the dropped entity
+                if result[idx].resolved_to.is_none() && entity.resolved_to.is_some() {
+                    result[idx].resolved_to = entity.resolved_to;
+                }
+            }
+            None => {
+                result.push(entity);
+            }
         }
     }
 

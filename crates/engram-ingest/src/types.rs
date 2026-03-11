@@ -298,6 +298,19 @@ pub enum TransformResult {
     Error(String),
 }
 
+// ── Analyze result (dry-run NER without storing) ──
+
+/// Result of an analyze (dry-run) operation — extracted entities without storing.
+#[derive(Debug, Clone)]
+pub struct AnalyzeResult {
+    /// Entities extracted by NER.
+    pub entities: Vec<ExtractedEntity>,
+    /// Detected language code.
+    pub language: String,
+    /// Processing duration in milliseconds.
+    pub duration_ms: u64,
+}
+
 // ── Pipeline result ──
 
 /// Summary of a pipeline execution run.
