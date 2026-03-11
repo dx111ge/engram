@@ -1093,6 +1093,52 @@ fn urlencode(s: &str) -> String {
 }
 
 /// Extract a label from a JSON-LD node. Tries rdfs:label, schema:name, then @id.
+/// Normalize an LLM endpoint URL to produce a full `/chat/completions` URL.
+///
+/// Handles all common provider patterns:
+///   `http://localhost:11434`                -> `http://localhost:11434/v1/chat/completions`
+///   `http://localhost:11434/v1`             -> `http://localhost:11434/v1/chat/completions`
+///   `http://localhost:11434/v1/chat/completions` -> as-is
+///   `https://api.openai.com/v1`            -> `https://api.openai.com/v1/chat/completions`
+///   `http://localhost:8000/v1`             -> `http://localhost:8000/v1/chat/completions`  (vLLM)
+///   `http://localhost:1234/v1`             -> `http://localhost:1234/v1/chat/completions`  (LM Studio)
+pub(crate) fn normalize_llm_endpoint(raw: &str) -> String {
+    let s = raw.trim().trim_end_matches('/');
+
+    // Already a full chat completions URL
+    if s.ends_with("/chat/completions") {
+        return s.to_string();
+    }
+
+    // Strip /completions if user partially entered it
+    let s = s.strip_suffix("/completions").unwrap_or(s);
+
+    // Has a recognized API prefix -- just append /chat/completions
+    if s.ends_with("/v1") || s.ends_with("/api") || s.ends_with("/v2") {
+        return format!("{s}/chat/completions");
+    }
+
+    // Bare host+port (no meaningful path) -- add /v1/chat/completions
+    let after_scheme = if let Some(rest) = s.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = s.strip_prefix("http://") {
+        rest
+    } else {
+        return format!("{s}/chat/completions");
+    };
+
+    let path = match after_scheme.find('/') {
+        Some(i) => &after_scheme[i..],
+        None => "",
+    };
+
+    if path.is_empty() || path == "/" {
+        format!("{s}/v1/chat/completions")
+    } else {
+        format!("{s}/chat/completions")
+    }
+}
+
 fn extract_label(item: &serde_json::Value) -> String {
     if let Some(label) = item.get("rdfs:label").and_then(|v| v.as_str()) {
         return label.to_string();
@@ -1445,7 +1491,7 @@ pub async fn proxy_llm(
         .unwrap_or(1024);
     let tools = body.get("tools").cloned();
 
-    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+    let url = normalize_llm_endpoint(&endpoint);
 
     let mut request_body = serde_json::json!({
         "model": model,
@@ -2458,6 +2504,7 @@ pub async fn get_config(
         "llm_model": effective_llm_model,
         "has_llm_api_key": has_llm_api_key,
         "llm_temperature": cfg.llm_temperature,
+        "llm_thinking": cfg.llm_thinking.unwrap_or(false),
         "pipeline_batch_size": cfg.pipeline_batch_size,
         "pipeline_workers": cfg.pipeline_workers,
         "pipeline_skip_stages": cfg.pipeline_skip_stages,
@@ -2549,6 +2596,139 @@ pub async fn set_config(
     Ok(Json(serde_json::json!({
         "status": "ok",
         "message": "configuration updated"
+    })))
+}
+
+// ── ONNX model upload ────────────────────────────────────────────────
+
+/// POST /config/onnx-model — Upload ONNX embedding model and tokenizer files.
+/// Accepts multipart/form-data with "model" and "tokenizer" file fields.
+/// Files are streamed to disk as sidecars next to the .brain file.
+pub async fn upload_onnx_model(
+    State(state): State<AppState>,
+    mut multipart: axum::extract::Multipart,
+) -> ApiResult<serde_json::Value> {
+    use std::io::Write;
+
+    // Derive brain base path from config_path (strip .config suffix)
+    let brain_path = state.config_path.as_ref()
+        .and_then(|p| p.to_str())
+        .and_then(|s| s.strip_suffix(".config"))
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine brain file path"))?;
+
+    let model_path = format!("{}.model.onnx", brain_path);
+    let tokenizer_path = format!("{}.tokenizer.json", brain_path);
+
+    // Process each multipart field
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        api_err(StatusCode::BAD_REQUEST, format!("multipart error: {e}"))
+    })? {
+        let name = field.name().unwrap_or("").to_string();
+        let dest = match name.as_str() {
+            "model" => &model_path,
+            "tokenizer" => &tokenizer_path,
+            _ => continue,
+        };
+        let data = field.bytes().await.map_err(|e| {
+            api_err(StatusCode::BAD_REQUEST, format!("read field '{name}' failed: {e}"))
+        })?;
+        let mut f = std::fs::File::create(dest)
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write {name} failed: {e}")))?;
+        f.write_all(&data)
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write {name} failed: {e}")))?;
+    }
+
+    // Check what files exist now
+    let model_exists = std::path::Path::new(&model_path).exists();
+    let tokenizer_exists = std::path::Path::new(&tokenizer_path).exists();
+    let model_size = if model_exists {
+        std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0)
+    } else { 0 };
+
+    // Hot-load the ONNX embedder if both files are present
+    let mut activated = false;
+    #[cfg(feature = "onnx")]
+    if model_exists && tokenizer_exists {
+        match engram_core::OnnxEmbedder::load(
+            std::path::Path::new(&model_path),
+            std::path::Path::new(&tokenizer_path),
+        ) {
+            Ok(embedder) => {
+                let dim = embedder.dim();
+                let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+                g.set_embedder(Box::new(embedder));
+                drop(g);
+                tracing::info!("hot-loaded ONNX embedder ({}D) from {}", dim, model_path);
+                activated = true;
+            }
+            Err(e) => {
+                tracing::warn!("ONNX embedder load failed (files saved but not activated): {e}");
+            }
+        }
+    }
+
+    let message = if !model_exists || !tokenizer_exists {
+        "Partial upload. Both model.onnx and tokenizer.json are required."
+    } else if activated {
+        "ONNX embedder activated. You can now reindex."
+    } else {
+        "ONNX model files installed. Restart the server to activate."
+    };
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "model_path": model_path,
+        "tokenizer_path": tokenizer_path,
+        "model_exists": model_exists,
+        "tokenizer_exists": tokenizer_exists,
+        "model_size_mb": model_size as f64 / 1_048_576.0,
+        "activated": activated,
+        "message": message,
+    })))
+}
+
+/// GET /config/onnx-model — Check if ONNX model files exist.
+pub async fn check_onnx_model(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let brain_path = state.config_path.as_ref()
+        .and_then(|p| p.to_str())
+        .and_then(|s| s.strip_suffix(".config"))
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine brain file path"))?;
+
+    let model_path = format!("{}.model.onnx", brain_path);
+    let tokenizer_path = format!("{}.tokenizer.json", brain_path);
+    let model_exists = std::path::Path::new(&model_path).exists();
+    let tokenizer_exists = std::path::Path::new(&tokenizer_path).exists();
+    let model_size = if model_exists {
+        std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0)
+    } else { 0 };
+
+    Ok(Json(serde_json::json!({
+        "ready": model_exists && tokenizer_exists,
+        "model_exists": model_exists,
+        "tokenizer_exists": tokenizer_exists,
+        "model_path": model_path,
+        "tokenizer_path": tokenizer_path,
+        "model_size_mb": model_size as f64 / 1_048_576.0,
+    })))
+}
+
+// ── POST /reindex — Re-embed all nodes ──────────────────────────────
+
+/// POST /reindex — Re-embed all active nodes using the current embedder.
+/// Call after changing the embedding model or endpoint.
+pub async fn reindex(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+    let count = g.reindex()
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    drop(g);
+    state.mark_dirty();
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "reindexed": count,
     })))
 }
 

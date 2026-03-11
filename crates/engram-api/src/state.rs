@@ -42,6 +42,8 @@ pub struct EngineConfig {
     #[serde(skip_serializing)]
     pub llm_api_key: Option<String>,
     pub llm_temperature: Option<f32>,
+    /// Whether the configured model is a thinking/reasoning model (e.g. DeepSeek-R1, o3-mini)
+    pub llm_thinking: Option<bool>,
     pub pipeline_batch_size: Option<u32>,
     pub pipeline_workers: Option<u32>,
     pub pipeline_skip_stages: Option<Vec<String>>,
@@ -92,6 +94,9 @@ impl EngineConfig {
         }
         if other.llm_temperature.is_some() {
             self.llm_temperature = other.llm_temperature;
+        }
+        if other.llm_thinking.is_some() {
+            self.llm_thinking = other.llm_thinking;
         }
         if other.pipeline_batch_size.is_some() {
             self.pipeline_batch_size = other.pipeline_batch_size;

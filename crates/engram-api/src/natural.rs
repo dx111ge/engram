@@ -628,11 +628,7 @@ mod llm {
         let (client, endpoint, model) = llm_client()?;
         let api_key = env::var("ENGRAM_LLM_API_KEY").unwrap_or_default();
 
-        let url = if endpoint.ends_with("/chat/completions") {
-            endpoint.clone()
-        } else {
-            format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'))
-        };
+        let url = crate::handlers::normalize_llm_endpoint(&endpoint);
 
         let body = ChatRequest {
             model,

@@ -22,7 +22,7 @@ impl ApiEmbedder {
     /// Create from explicit parameters.
     pub fn new(endpoint: String, model: String, dim: usize, api_key: Option<String>) -> Self {
         Self {
-            endpoint: endpoint.trim_end_matches('/').to_string(),
+            endpoint: normalize_endpoint(&endpoint),
             model,
             dim,
             api_key,
@@ -148,6 +148,70 @@ impl Embedder for ApiEmbedder {
     fn model_id(&self) -> &str {
         &self.model
     }
+}
+
+/// Normalize an embedding endpoint URL so that appending `/embeddings` produces
+/// a valid API path for any common provider.
+///
+/// All major embedding servers expose an OpenAI-compatible endpoint at `/v1/embeddings`.
+/// Users may enter just the base URL (e.g. `http://localhost:11434`) without the `/v1`
+/// path prefix. This function detects that and adds `/v1` automatically.
+///
+/// Rules:
+///   1. Strip trailing slashes.
+///   2. If the path already ends with `/embeddings` or `/embed`, use as-is (user gave full path).
+///   3. If the path ends with a recognized API prefix (`/v1`, `/api`), keep it.
+///   4. Otherwise (bare host like `http://localhost:11434`), append `/v1`.
+///
+/// Result: caller can always do `format!("{}/embeddings", normalized)` and get a valid URL.
+///
+/// Examples:
+///   `http://localhost:11434`          -> `http://localhost:11434/v1`       (Ollama, LM Studio)
+///   `http://localhost:11434/v1`       -> `http://localhost:11434/v1`       (already correct)
+///   `http://localhost:11434/api`      -> `http://localhost:11434/api`      (Ollama native)
+///   `https://api.openai.com/v1`      -> `https://api.openai.com/v1`      (OpenAI)
+///   `http://localhost:8000/v1`        -> `http://localhost:8000/v1`       (vLLM)
+///   `http://localhost:1234/v1`        -> `http://localhost:1234/v1`       (LM Studio)
+///   `http://host:8080/v1/embeddings` -> `http://host:8080/v1`            (user gave full path)
+fn normalize_endpoint(raw: &str) -> String {
+    let s = raw.trim().trim_end_matches('/');
+
+    // If user pasted the full embeddings URL, strip the tail so we don't double it
+    if let Some(base) = s.strip_suffix("/embeddings") {
+        return base.to_string();
+    }
+    if let Some(base) = s.strip_suffix("/embed") {
+        return base.to_string();
+    }
+
+    // If the path already ends with a known API prefix, keep it
+    if s.ends_with("/v1") || s.ends_with("/api") || s.ends_with("/v2") {
+        return s.to_string();
+    }
+
+    // Bare host+port (no meaningful path) -- add /v1 (OpenAI-compatible standard)
+    // Detect by checking the path component after the authority
+    let after_scheme = if let Some(rest) = s.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = s.strip_prefix("http://") {
+        rest
+    } else {
+        // Unknown scheme, return as-is
+        return s.to_string();
+    };
+
+    let path = match after_scheme.find('/') {
+        Some(i) => &after_scheme[i..],
+        None => "",
+    };
+
+    // Empty path or just "/" means bare host -- add /v1
+    if path.is_empty() || path == "/" {
+        return format!("{}/v1", s);
+    }
+
+    // Has some other path we don't recognize -- keep as-is, user knows best
+    s.to_string()
 }
 
 /// Minimal JSON string escape.
@@ -437,5 +501,41 @@ mod tests {
         // SAFETY: test environment, single-threaded access to env var
         unsafe { std::env::remove_var("ENGRAM_EMBED_ENDPOINT"); }
         assert!(ApiEmbedder::from_env().is_none());
+    }
+
+    #[test]
+    fn normalize_endpoint_bare_host() {
+        // Bare host should get /v1 appended
+        assert_eq!(normalize_endpoint("http://localhost:11434"), "http://localhost:11434/v1");
+        assert_eq!(normalize_endpoint("http://localhost:8000"), "http://localhost:8000/v1");
+        assert_eq!(normalize_endpoint("http://localhost:1234"), "http://localhost:1234/v1");
+    }
+
+    #[test]
+    fn normalize_endpoint_with_v1() {
+        // Already has /v1 -- keep as-is
+        assert_eq!(normalize_endpoint("http://localhost:11434/v1"), "http://localhost:11434/v1");
+        assert_eq!(normalize_endpoint("https://api.openai.com/v1"), "https://api.openai.com/v1");
+        assert_eq!(normalize_endpoint("http://localhost:8000/v1"), "http://localhost:8000/v1");
+    }
+
+    #[test]
+    fn normalize_endpoint_with_api() {
+        // Has /api prefix -- keep as-is (Ollama native)
+        assert_eq!(normalize_endpoint("http://localhost:11434/api"), "http://localhost:11434/api");
+    }
+
+    #[test]
+    fn normalize_endpoint_full_path() {
+        // User pasted the full embeddings URL -- strip /embeddings
+        assert_eq!(normalize_endpoint("http://localhost:11434/v1/embeddings"), "http://localhost:11434/v1");
+        assert_eq!(normalize_endpoint("http://localhost:11434/api/embeddings"), "http://localhost:11434/api");
+        assert_eq!(normalize_endpoint("http://host:8080/v1/embed"), "http://host:8080/v1");
+    }
+
+    #[test]
+    fn normalize_endpoint_trailing_slash() {
+        assert_eq!(normalize_endpoint("http://localhost:11434/"), "http://localhost:11434/v1");
+        assert_eq!(normalize_endpoint("http://localhost:11434/v1/"), "http://localhost:11434/v1");
     }
 }

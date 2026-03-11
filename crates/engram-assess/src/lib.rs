@@ -11,6 +11,6 @@ pub mod engine;
 pub mod store;
 pub mod types;
 
-pub use engine::AssessmentEngine;
+pub use engine::{add_evidence, evaluate, AssessmentEngine};
 pub use store::AssessmentStore;
 pub use types::*;

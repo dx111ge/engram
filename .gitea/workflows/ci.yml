@@ -13,18 +13,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Check
-        run: cargo check --workspace
+        run: cargo check --workspace --features all
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --features all
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --features all -- -D warnings
       - name: Format
         run: cargo fmt --all -- --check
-
-  feature-flags:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Test with feature flags
-        run: cargo test --workspace --features "mesh,llm,grpc"

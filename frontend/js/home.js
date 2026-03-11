@@ -1,5 +1,5 @@
 /* ============================================
-   engram - Home View
+   engram - Home View (Dashboard)
    ============================================ */
 
 router.register('/', async () => {
@@ -14,22 +14,24 @@ router.register('/', async () => {
     <div class="grid-3 mb-2" id="home-stats">
       <div class="card stat-card">
         <div class="stat-icon"><i class="fa-solid fa-circle-nodes"></i></div>
-        <div class="stat-value" id="stat-nodes">--</div>
+        <div class="stat-value glow-text" id="stat-nodes">--</div>
         <div class="stat-label">Facts stored</div>
       </div>
       <div class="card stat-card">
         <div class="stat-icon"><i class="fa-solid fa-arrow-right-arrow-left"></i></div>
-        <div class="stat-value" id="stat-edges">--</div>
+        <div class="stat-value glow-text" id="stat-edges">--</div>
         <div class="stat-label">Connections</div>
       </div>
       <div class="card stat-card">
         <div class="stat-icon"><i class="fa-solid fa-heart-pulse"></i></div>
-        <div class="stat-value" id="stat-health">--</div>
+        <div class="stat-value glow-text" id="stat-health">--</div>
         <div class="stat-label">Status</div>
       </div>
     </div>
 
     <div id="home-system-area"></div>
+
+    <div id="home-sources-area"></div>
 
     <div id="home-onboarding-area"></div>
 
@@ -48,10 +50,11 @@ router.register('/', async () => {
 
 async function loadHomeData() {
   try {
-    const [stats, health, compute] = await Promise.all([
+    const [stats, health, compute, config] = await Promise.all([
       engram.stats().catch(() => null),
       engram.health().catch(() => null),
       engram.compute().catch(() => null),
+      engram.getConfig().catch(() => null),
     ]);
 
     if (stats) {
@@ -76,7 +79,10 @@ async function loadHomeData() {
       }
 
       // Load system summary (non-blocking)
-      loadSystemSummary();
+      loadSystemSummary(compute, config, nodeCount, edgeCount);
+
+      // Load sources (non-blocking)
+      loadSourcesSummary();
 
       // Recent activity / overview
       const activityEl = document.getElementById('recent-activity');
@@ -105,6 +111,8 @@ async function loadHomeData() {
     } else {
       document.getElementById('stat-nodes').textContent = '?';
       document.getElementById('stat-edges').textContent = '?';
+      loadSystemSummary(null, null, 0, 0);
+      loadSourcesSummary();
       const activityEl = document.getElementById('recent-activity');
       activityEl.innerHTML = `
         <div class="empty-state" style="padding:1.5rem">
@@ -125,15 +133,21 @@ async function loadHomeData() {
   } catch (_) {}
 }
 
-// --- System Summary ---
-async function loadSystemSummary() {
+// --- System Summary (health-focused) ---
+async function loadSystemSummary(compute, config, nodeCount, edgeCount) {
   const container = document.getElementById('home-system-area');
   if (!container) return;
 
-  let compute = null;
+  // If compute wasn't passed, fetch it
+  if (compute === undefined) {
+    compute = await engram.compute().catch(() => null);
+  }
+  if (config === undefined) {
+    config = await engram.getConfig().catch(() => null);
+  }
+
   let sourcesEnabled = false, actionsEnabled = false, reasonEnabled = false, meshEnabled = false;
 
-  // Fetch with timeout helper for reason/gaps
   function fetchWithTimeout(path, timeoutMs) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -142,178 +156,224 @@ async function loadSystemSummary() {
   }
 
   await Promise.allSettled([
-    engram.compute().then(r => { compute = r; }).catch(() => {}),
     engram._fetch('/sources').then(() => { sourcesEnabled = true; }).catch(() => {}),
     engram._fetch('/actions/rules').then(() => { actionsEnabled = true; }).catch(() => {}),
     fetchWithTimeout('/reason/gaps', 2000).then(() => { reasonEnabled = true; }).catch(() => {}),
     engram._fetch('/mesh/identity').then(() => { meshEnabled = true; }).catch(() => {}),
   ]);
 
-  // CPU info
-  let cpuText = 'Unknown';
-  if (compute && compute.cpu_cores) {
-    cpuText = compute.cpu_cores + ' cores';
-    if (compute.has_avx2) cpuText += ', AVX2';
-    else if (compute.has_neon) cpuText += ', NEON';
-  }
-
-  // GPU info
-  let gpuText = 'none';
-  if (compute && compute.has_gpu && compute.gpu_name) {
-    gpuText = escapeHtml(compute.gpu_name);
-    if (compute.gpu_backend) gpuText += ' (' + escapeHtml(compute.gpu_backend) + ')';
-  }
-
-  // NPU info
-  let npuText = null;
-  if (compute && compute.has_npu) {
-    npuText = compute.npu_name ? escapeHtml(compute.npu_name) : 'available';
-    if (compute.npu_backend) npuText += ' (' + escapeHtml(compute.npu_backend) + ')';
-  }
+  // API status
+  const apiOnline = !!(compute || config);
 
   // Embedder info
-  let embedText = 'not configured';
+  let embedderHtml = '';
   if (compute && compute.embedder_model) {
-    embedText = escapeHtml(compute.embedder_model);
+    let embedText = escapeHtml(compute.embedder_model);
     if (compute.embedder_dim) embedText += ' (' + compute.embedder_dim + 'D)';
+    embedderHtml = `<span style="color:var(--success)">${embedText}</span>`;
   } else if (compute && compute.embedder_endpoint) {
-    embedText = escapeHtml(compute.embedder_endpoint);
+    embedderHtml = `<span style="color:var(--success)">${escapeHtml(compute.embedder_endpoint)}</span>`;
+  } else {
+    embedderHtml = `<span class="text-muted">Not configured</span> <a href="#/system" style="font-size:0.8rem;color:var(--accent-bright)">[Set up]</a>`;
   }
 
-  // Feature badge helper
-  function badge(label, enabled) {
+  // LLM info
+  let llmHtml = '';
+  if (config && config.llm_model) {
+    llmHtml = `<span style="color:var(--success)">${escapeHtml(config.llm_model)}</span>`;
+  } else if (config && config.llm_endpoint) {
+    llmHtml = `<span style="color:var(--success)">${escapeHtml(config.llm_endpoint)}</span>`;
+  } else {
+    llmHtml = `<span class="text-muted">Not configured</span> <a href="#/system" style="font-size:0.8rem;color:var(--accent-bright)">[Set up]</a>`;
+  }
+
+  // Feature dot helper
+  function featureDot(label, enabled) {
     if (enabled) {
-      return '<span style="display:inline-flex;align-items:center;gap:0.3rem;padding:0.15rem 0.5rem;border-radius:999px;font-size:0.78rem;background:rgba(46,160,67,0.15);color:var(--success);border:1px solid rgba(46,160,67,0.3)">'
-        + '<i class="fa-solid fa-check" style="font-size:0.65rem"></i> ' + label + '</span>';
+      return `<span class="feature-status" style="display:inline-flex;align-items:center;gap:0.3rem;font-size:0.8rem">
+        <i class="fa-solid fa-circle" style="font-size:0.45rem;color:var(--success)"></i> ${escapeHtml(label)}
+      </span>`;
     }
-    return '<span style="display:inline-flex;align-items:center;gap:0.3rem;padding:0.15rem 0.5rem;border-radius:999px;font-size:0.78rem;background:var(--bg-secondary);color:var(--text-muted);border:1px solid var(--border)">'
-      + label + '</span>';
-  }
-
-  let npuRow = '';
-  if (npuText) {
-    npuRow = `
-        <div style="display:flex;align-items:center;gap:0.4rem">
-          <i class="fa-solid fa-brain" style="color:var(--text-muted)"></i>
-          <span style="color:var(--text-secondary)">NPU:</span>
-          <span>${npuText}</span>
-        </div>`;
+    return `<span class="feature-status" style="display:inline-flex;align-items:center;gap:0.3rem;font-size:0.8rem;color:var(--text-muted)">
+      <i class="fa-solid fa-circle" style="font-size:0.45rem;color:var(--accent-bright)"></i> ${escapeHtml(label)}
+    </span>`;
   }
 
   container.innerHTML = `
     <div class="card mb-2">
       <div class="card-header">
-        <h3><i class="fa-solid fa-microchip"></i> System</h3>
+        <h3><i class="fa-solid fa-stethoscope"></i> System Health</h3>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:1.5rem;font-size:0.85rem;padding:0.25rem 0">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(220px, 1fr));gap:0.6rem 1.5rem;font-size:0.85rem;padding:0.25rem 0">
         <div style="display:flex;align-items:center;gap:0.4rem">
-          <i class="fa-solid fa-server" style="color:var(--text-muted)"></i>
-          <span style="color:var(--text-secondary)">CPU:</span>
-          <span>${cpuText}</span>
+          <i class="fa-solid fa-signal" style="color:var(--text-muted)"></i>
+          <span class="text-secondary">API:</span>
+          ${apiOnline
+            ? '<span style="color:var(--success)">Online</span>'
+            : '<span style="color:var(--error)">Offline</span>'}
         </div>
-        <div style="display:flex;align-items:center;gap:0.4rem">
-          <i class="fa-solid fa-display" style="color:var(--text-muted)"></i>
-          <span style="color:var(--text-secondary)">GPU:</span>
-          <span>${gpuText}</span>
-        </div>${npuRow}
         <div style="display:flex;align-items:center;gap:0.4rem">
           <i class="fa-solid fa-vector-square" style="color:var(--text-muted)"></i>
-          <span style="color:var(--text-secondary)">Embedder:</span>
-          <span>${embedText}</span>
+          <span class="text-secondary">Embedder:</span>
+          ${embedderHtml}
+        </div>
+        <div style="display:flex;align-items:center;gap:0.4rem">
+          <i class="fa-solid fa-robot" style="color:var(--text-muted)"></i>
+          <span class="text-secondary">LLM:</span>
+          ${llmHtml}
+        </div>
+        <div style="display:flex;align-items:center;gap:0.4rem">
+          <i class="fa-solid fa-circle-nodes" style="color:var(--text-muted)"></i>
+          <span class="text-secondary">Facts:</span>
+          <span>${(nodeCount ?? 0).toLocaleString()}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.4rem">
+          <i class="fa-solid fa-arrow-right-arrow-left" style="color:var(--text-muted)"></i>
+          <span class="text-secondary">Connections:</span>
+          <span>${(edgeCount ?? 0).toLocaleString()}</span>
         </div>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:0.75rem;padding-bottom:0.25rem">
-        ${badge('Ingest', sourcesEnabled)}
-        ${badge('Actions', actionsEnabled)}
-        ${badge('Reasoning', reasonEnabled)}
-        ${badge('Mesh', meshEnabled)}
+      <div style="display:flex;flex-wrap:wrap;gap:0.75rem;margin-top:0.75rem;padding-bottom:0.25rem">
+        ${featureDot('Ingest', sourcesEnabled)}
+        ${featureDot('Actions', actionsEnabled)}
+        ${featureDot('Reasoning', reasonEnabled)}
+        ${featureDot('Mesh', meshEnabled)}
       </div>
     </div>`;
 }
 
-// --- Step 1: Embedder Onboarding ---
-function showEmbedderOnboarding(container) {
-  const options = [
-    {
-      id: 'onnx',
-      icon: 'fa-microchip',
-      title: 'ONNX Local',
-      quality: 'Good',
-      performance: 'Excellent',
-      cost: 'Free',
-      license: 'MIT',
-      description: 'Runs in-process, fastest option, no external dependencies.',
-    },
-    {
-      id: 'ollama',
-      icon: 'fa-server',
-      title: 'Ollama Local',
-      quality: 'Good',
-      performance: 'Good',
-      cost: 'Free',
-      license: 'Apache/MIT',
-      description: 'More model variety, runs as a separate local service.',
-    },
-    {
-      id: 'openai',
-      icon: 'fa-cloud',
-      title: 'OpenAI API',
-      quality: 'Excellent',
-      performance: 'Network-dependent',
-      cost: 'Paid per token',
-      license: 'Commercial',
-      description: 'Highest quality embeddings, requires API key.',
-    },
-  ];
+// --- Sources Summary ---
+async function loadSourcesSummary() {
+  const container = document.getElementById('home-sources-area');
+  if (!container) return;
 
-  function ratingDot(level) {
-    const colors = {
-      'Excellent': 'var(--success)',
-      'Good': 'var(--confidence-mid)',
-      'Free': 'var(--success)',
-      'Paid per token': 'var(--confidence-low)',
-      'Network-dependent': 'var(--confidence-mid)',
-      'MIT': 'var(--success)',
-      'Apache/MIT': 'var(--success)',
-      'Commercial': 'var(--confidence-mid)',
-    };
-    const color = colors[level] || 'var(--text-muted)';
-    return `<span style="color:${color}">${escapeHtml(level)}</span>`;
+  let sources = null;
+  try {
+    sources = await engram.listSources();
+  } catch (_) {
+    // listSources not available or errored
+    container.innerHTML = `
+      <div class="card mb-2">
+        <div class="card-header">
+          <h3><i class="fa-solid fa-database"></i> Sources</h3>
+        </div>
+        <div style="padding:0.5rem 0;font-size:0.85rem;display:flex;align-items:center;gap:0.5rem">
+          <i class="fa-solid fa-circle" style="font-size:0.45rem;color:var(--accent-bright)"></i>
+          <span>Available</span>
+          <a href="#/sources" style="font-size:0.8rem;color:var(--accent-bright)">[Set up]</a>
+        </div>
+      </div>`;
+    return;
+  }
+
+  if (!sources || !Array.isArray(sources) || sources.length === 0) {
+    container.innerHTML = `
+      <div class="card mb-2">
+        <div class="card-header">
+          <h3><i class="fa-solid fa-database"></i> Active Sources</h3>
+          <button class="btn btn-sm btn-primary" onclick="if(typeof openSourceWizard==='function')openSourceWizard();else location.hash='#/sources'">
+            <i class="fa-solid fa-plus"></i> Add Source
+          </button>
+        </div>
+        <div style="padding:0.75rem 0">
+          ${emptyStateHTML('fa-plug', 'No sources configured yet. Add a source to start ingesting knowledge.')}
+        </div>
+      </div>`;
+    return;
+  }
+
+  // Fetch usage info for each source (non-blocking, best-effort)
+  const usageMap = {};
+  await Promise.allSettled(
+    sources.map(async (src) => {
+      const name = typeof src === 'string' ? src : (src.name || src.id || '');
+      if (!name) return;
+      try {
+        usageMap[name] = await engram.sourceUsage(name);
+      } catch (_) {}
+    })
+  );
+
+  function renderSourceRow(src) {
+    const name = typeof src === 'string' ? src : (src.name || src.id || 'unknown');
+    const status = (typeof src === 'object' && src.status) ? src.status : 'active';
+    const isError = status === 'error' || status === 'failed';
+    const usage = usageMap[name];
+
+    const dotColor = isError ? 'var(--error)' : 'var(--success)';
+    const statusLabel = isError ? 'Error' : 'Active';
+
+    let statsHtml = '';
+    if (usage) {
+      const facts = usage.facts ?? usage.fact_count ?? usage.nodes ?? '--';
+      const errors = usage.errors ?? usage.error_count ?? 0;
+      const lastRun = usage.last_run || usage.last_fetch || null;
+      let lastRunText = '--';
+      if (lastRun) {
+        try {
+          const d = new Date(lastRun);
+          const diff = Date.now() - d.getTime();
+          if (diff < 60000) lastRunText = 'just now';
+          else if (diff < 3600000) lastRunText = Math.floor(diff / 60000) + ' min ago';
+          else if (diff < 86400000) lastRunText = Math.floor(diff / 3600000) + 'h ago';
+          else lastRunText = Math.floor(diff / 86400000) + 'd ago';
+        } catch (_) { lastRunText = '--'; }
+      }
+      statsHtml = `<span class="text-muted" style="font-size:0.8rem">${facts} facts | ${lastRunText} | ${errors} errors</span>`;
+    }
+
+    return `
+      <div class="source-compact" style="display:flex;align-items:center;gap:0.75rem;padding:0.5rem 0;border-bottom:1px solid var(--border)">
+        <div class="source-status" style="display:flex;align-items:center;gap:0.4rem;min-width:0;flex:1">
+          <i class="fa-solid fa-circle" style="font-size:0.45rem;color:${dotColor}"></i>
+          <span style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(name)}</span>
+          <span style="font-size:0.78rem;color:${dotColor}">${escapeHtml(statusLabel)}</span>
+        </div>
+        <div class="source-usage" style="flex-shrink:0">
+          ${statsHtml}
+        </div>
+      </div>`;
   }
 
   container.innerHTML = `
     <div class="card mb-2">
       <div class="card-header">
-        <h3><i class="fa-solid fa-wand-magic-sparkles"></i> Set Up Your Embedding Model</h3>
+        <h3><i class="fa-solid fa-database"></i> Active Sources</h3>
+        <button class="btn btn-sm btn-primary" onclick="if(typeof openSourceWizard==='function')openSourceWizard();else location.hash='#/sources'">
+          <i class="fa-solid fa-plus"></i> Add Source
+        </button>
+      </div>
+      <div style="padding:0.25rem 0">
+        ${sources.map(renderSourceRow).join('')}
+      </div>
+    </div>`;
+}
+
+// --- Embedder Onboarding (compact banner) ---
+function showEmbedderOnboarding(container) {
+  container.innerHTML = `
+    <div class="card mb-2">
+      <div class="card-header">
+        <h3><i class="fa-solid fa-wand-magic-sparkles"></i> Set Up Embedding Model</h3>
         <span style="font-size:0.78rem;padding:0.15rem 0.5rem;border-radius:999px;background:var(--accent-bright);color:#fff">Step 1 of 2</span>
       </div>
-      <p style="font-size:0.92rem;color:var(--text-secondary);margin-bottom:0.5rem">
-        This is the most important decision before adding data. Your embedding model determines how engram
-        understands meaning. This cannot be easily changed later without re-processing all data.
+      <p style="font-size:0.9rem;color:var(--text-secondary);margin-bottom:0.5rem">
+        Choose your embedding model for semantic search. This determines how engram understands meaning.
       </p>
-      <div style="display:flex;align-items:center;gap:0.4rem;padding:0.5rem 0.75rem;background:rgba(227,160,8,0.1);border:1px solid rgba(227,160,8,0.3);border-radius:var(--radius-sm);font-size:0.85rem;color:var(--confidence-mid);margin-bottom:1.25rem">
+      <div style="display:flex;align-items:center;gap:0.4rem;padding:0.4rem 0.6rem;background:rgba(227,160,8,0.1);border:1px solid rgba(227,160,8,0.3);border-radius:var(--radius-sm);font-size:0.82rem;color:var(--confidence-mid);margin-bottom:0.75rem">
         <i class="fa-solid fa-triangle-exclamation"></i>
-        <span>Choose carefully -- changing your embedding model after loading data requires a full reindex.</span>
+        <span>Changing your model after loading data requires a full reindex.</span>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(260px, 1fr));gap:1rem">
-        ${options.map(opt => `
-          <div style="border:2px solid var(--border);border-radius:var(--radius-sm);padding:1rem;background:var(--bg-secondary);display:flex;flex-direction:column;gap:0.6rem">
-            <div style="display:flex;align-items:center;gap:0.5rem;font-size:1.05rem;font-weight:600">
-              <i class="fa-solid ${opt.icon}" style="color:var(--accent-bright);font-size:1.2rem"></i>
-              ${escapeHtml(opt.title)}
-            </div>
-            <p style="font-size:0.85rem;color:var(--text-secondary);margin:0">${escapeHtml(opt.description)}</p>
-            <div style="font-size:0.8rem;display:flex;flex-direction:column;gap:0.25rem;margin-top:auto">
-              <div><span style="color:var(--text-muted)">Quality:</span> ${ratingDot(opt.quality)}</div>
-              <div><span style="color:var(--text-muted)">Performance:</span> ${ratingDot(opt.performance)}</div>
-              <div><span style="color:var(--text-muted)">Cost:</span> ${ratingDot(opt.cost)}</div>
-              <div><span style="color:var(--text-muted)">License:</span> ${ratingDot(opt.license)}</div>
-            </div>
-            <a href="#/settings" class="btn btn-sm btn-primary" style="margin-top:0.5rem;text-align:center">
-              <i class="fa-solid fa-gear"></i> Configure
-            </a>
-          </div>
-        `).join('')}
+      <div style="display:flex;flex-wrap:wrap;gap:0.5rem">
+        <a href="#/system" class="btn btn-sm btn-secondary">
+          <i class="fa-solid fa-microchip"></i> ONNX Local
+        </a>
+        <a href="#/system" class="btn btn-sm btn-secondary">
+          <i class="fa-solid fa-server"></i> Ollama
+        </a>
+        <a href="#/system" class="btn btn-sm btn-secondary">
+          <i class="fa-solid fa-cloud"></i> OpenAI
+        </a>
       </div>
     </div>`;
 }
@@ -372,7 +432,7 @@ function showTopicsOnboarding(container, compact) {
   container.innerHTML = `
     <div class="card mb-2" id="onboarding-topics-card">
       <div class="card-header">
-        <h3><i class="fa-solid fa-tags"></i> Your Topics</h3>
+        <h3><i class="fa-solid fa-tags"></i> Seed Your Topics</h3>
         <span style="font-size:0.78rem;padding:0.15rem 0.5rem;border-radius:999px;background:var(--accent-bright);color:#fff">Step 2 of 2</span>
       </div>
       <p style="font-size:0.92rem;color:var(--text-secondary);margin-bottom:1rem">
@@ -427,7 +487,7 @@ function showTopicsOnboarding(container, compact) {
   attachTopicHandlers(container);
 }
 
-// --- Step 3: Compact topics (DB has data, embedder configured) ---
+// --- Compact topics (DB has data, embedder configured) ---
 function showTopicsCompact(container) {
   const allTopics = getAllTopics();
 
@@ -472,7 +532,7 @@ function showTopicsCompact(container) {
       </div>
     </div>`;
 
-  // Add topic toggle + submit handlers (no preview needed in compact mode)
+  // Add topic toggle + submit handlers
   const toggleBtn = container.querySelector('#add-topic-toggle');
   const form = container.querySelector('#add-topic-form');
   if (toggleBtn && form) {

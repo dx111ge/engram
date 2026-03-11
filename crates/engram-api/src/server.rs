@@ -113,6 +113,14 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         // Configuration
         .route("/config", get(handlers::get_config))
         .route("/config", post(handlers::set_config))
+        .route("/config/onnx-model", get(handlers::check_onnx_model))
+        .merge(
+            Router::new()
+                .route("/config/onnx-model", post(handlers::upload_onnx_model))
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)) // 1 GB for ONNX uploads
+        )
+        // Reindex
+        .route("/reindex", post(handlers::reindex))
         // System
         .route("/health", get(handlers::health))
         .route("/stats", get(handlers::stats))

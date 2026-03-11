@@ -256,50 +256,37 @@ const router = {
 
 // --- App Initialization ---
 document.addEventListener('DOMContentLoaded', () => {
-  // Mobile nav toggle
+  // Nav toggle for smaller desktop windows
   document.getElementById('nav-toggle').addEventListener('click', () => {
     document.getElementById('nav-links').classList.toggle('open');
   });
 
-  // Close mobile nav on link click
+  // Close nav on link click
   document.querySelectorAll('.nav-links a').forEach(a => {
     a.addEventListener('click', () => {
       document.getElementById('nav-links').classList.remove('open');
     });
   });
 
-  // Settings modal
-  const settingsBtn = document.getElementById('settings-btn');
-  const settingsModal = document.getElementById('settings-modal');
-  const apiInput = document.getElementById('api-url-input');
-
-  settingsBtn.addEventListener('click', () => {
-    apiInput.value = engram.apiBase;
-    settingsModal.classList.add('visible');
+  // Gear button navigates to system page
+  document.getElementById('settings-btn').addEventListener('click', () => {
+    location.hash = '#/system';
   });
 
-  document.querySelectorAll('.modal-close').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const modalId = btn.getAttribute('data-modal');
-      if (modalId) document.getElementById(modalId).classList.remove('visible');
-    });
-  });
-
-  settingsModal.addEventListener('click', (e) => {
-    if (e.target === settingsModal) settingsModal.classList.remove('visible');
-  });
-
-  document.getElementById('save-api-url').addEventListener('click', () => {
-    const val = apiInput.value.trim().replace(/\/+$/, '');
-    if (val) {
-      localStorage.setItem('engram_api', val);
-      showToast('API URL updated', 'success');
-    } else {
-      localStorage.removeItem('engram_api');
-      showToast('API URL reset to default', 'info');
+  // Chat panel toggle
+  document.getElementById('chat-toggle').addEventListener('click', () => {
+    const panel = document.getElementById('chat-panel');
+    panel.classList.toggle('open');
+    panel.classList.toggle('closed');
+    if (panel.classList.contains('open')) {
+      document.getElementById('chat-input').focus();
+      initChatIfNeeded();
     }
-    settingsModal.classList.remove('visible');
-    checkHealth();
+  });
+
+  document.getElementById('chat-close-btn').addEventListener('click', () => {
+    document.getElementById('chat-panel').classList.remove('open');
+    document.getElementById('chat-panel').classList.add('closed');
   });
 
   // Health check loop

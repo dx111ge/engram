@@ -26,58 +26,58 @@
     <ul class="nav-links" id="nav-links">
       <li><a href="#/" data-route="/"><i class="fa-solid fa-house"></i> Home</a></li>
       <li><a href="#/explore" data-route="/explore"><i class="fa-solid fa-compass"></i> Explore</a></li>
-      <li><a href="#/add" data-route="/add"><i class="fa-solid fa-plus-circle"></i> Add</a></li>
-      <li><a href="#/sources" data-route="/sources"><i class="fa-solid fa-satellite-dish"></i> Sources</a></li>
-      <li><a href="#/insights" data-route="/insights"><i class="fa-solid fa-lightbulb"></i> Insights</a></li>
-      <li><a href="#/assess" data-route="/assess"><i class="fa-solid fa-scale-balanced"></i> Assess</a></li>
-      <li><a href="#/chat" data-route="/chat"><i class="fa-solid fa-comments"></i> Chat</a></li>
-      <li><a href="#/mesh" data-route="/mesh"><i class="fa-solid fa-network-wired"></i> Mesh</a></li>
-      <li><a href="#/info" data-route="/info"><i class="fa-solid fa-circle-info"></i> Info</a></li>
+      <li><a href="#/insights" data-route="/insights"><i class="fa-solid fa-chart-line"></i> Insights</a></li>
+      <li><a href="#/system" data-route="/system"><i class="fa-solid fa-sliders"></i> System</a></li>
     </ul>
     <div class="nav-status">
       <span id="health-indicator" class="health-dot offline" title="Checking..."></span>
-      <button class="btn-icon" id="settings-btn" title="Settings">
+      <button class="btn-icon" id="settings-btn" title="System Settings">
         <i class="fa-solid fa-gear"></i>
       </button>
     </div>
   </nav>
-
-  <!-- Settings Modal -->
-  <div class="modal-overlay" id="settings-modal">
-    <div class="modal">
-      <div class="modal-header">
-        <h3><i class="fa-solid fa-gear"></i> API Settings</h3>
-        <button class="btn-icon modal-close" data-modal="settings-modal"><i class="fa-solid fa-xmark"></i></button>
-      </div>
-      <div class="modal-body">
-        <label for="api-url-input">API Base URL</label>
-        <input type="text" id="api-url-input" placeholder="http://localhost:3030">
-        <p class="help-text">The engram HTTP API endpoint. Default: http://localhost:3030</p>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary modal-close" data-modal="settings-modal">Cancel</button>
-        <button class="btn btn-primary" id="save-api-url">Save</button>
-      </div>
-    </div>
-  </div>
 
   <!-- Main content area -->
   <main id="app">
     <!-- Views are rendered here by the router -->
   </main>
 
+  <!-- Chat Toggle Button -->
+  <button class="chat-toggle-btn" id="chat-toggle" title="Knowledge Chat">
+    <i class="fa-solid fa-comments"></i>
+  </button>
+
+  <!-- Chat Panel -->
+  <div class="chat-panel closed" id="chat-panel">
+    <div class="chat-panel-header">
+      <div style="display:flex;align-items:center;gap:0.5rem">
+        <i class="fa-solid fa-brain" style="color:var(--accent-bright)"></i>
+        <span style="font-weight:600">Knowledge Chat</span>
+        <span id="chat-llm-status" class="feature-status"></span>
+      </div>
+      <div style="display:flex;gap:0.25rem">
+        <button class="btn-icon" id="chat-clear-btn" title="Clear chat"><i class="fa-solid fa-trash-can"></i></button>
+        <button class="btn-icon" id="chat-close-btn" title="Close"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+    </div>
+    <div class="chat-panel-messages" id="chat-messages"></div>
+    <div id="chat-tool-status"></div>
+    <div class="chat-panel-input">
+      <textarea id="chat-input" rows="2" placeholder="Ask about your knowledge base..."></textarea>
+      <button class="btn btn-primary" id="btn-chat-send" style="align-self:flex-end">
+        <i class="fa-solid fa-paper-plane"></i>
+      </button>
+    </div>
+  </div>
+
   <!-- Scripts -->
   <script src="js/app.js"></script>
   <script src="js/home.js"></script>
   <script src="js/explore.js"></script>
-  <script src="js/add.js"></script>
   <script src="js/sources.js"></script>
   <script src="js/insights.js"></script>
-  <script src="js/info.js"></script>
-  <script src="js/mesh.js"></script>
   <script src="js/chat.js"></script>
-  <script src="js/assess.js"></script>
-  <script src="js/settings.js"></script>
+  <script src="js/system.js"></script>
   <script src="js/node.js"></script>
 </body>
 </html>
