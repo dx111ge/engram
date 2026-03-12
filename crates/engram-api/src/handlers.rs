@@ -1661,6 +1661,66 @@ pub async fn proxy_llm_models(
     Ok(Json(json))
 }
 
+/// POST /proxy/fetch-models — fetch available models from ANY endpoint (for wizard/setup).
+/// Body: { "endpoint": "http://localhost:11434/api/embed" }
+/// Returns the raw JSON from {base}/api/tags (Ollama) or {base}/v1/models (OpenAI-compatible).
+pub async fn proxy_fetch_models(
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let endpoint = body.get("endpoint").and_then(|v| v.as_str()).unwrap_or("");
+    if endpoint.is_empty() {
+        return Err(api_err(StatusCode::BAD_REQUEST, "Missing 'endpoint' field"));
+    }
+
+    // Derive base URL by stripping known paths
+    let base = endpoint.trim().trim_end_matches('/')
+        .replace("/v1/chat/completions", "")
+        .replace("/v1/embeddings", "")
+        .replace("/api/embed", "")
+        .replace("/api/generate", "");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Try Ollama-style /api/tags first
+    let ollama_url = format!("{base}/api/tags");
+    if let Ok(resp) = client.get(&ollama_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(text) = resp.text().await {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if json.get("models").and_then(|m| m.as_array()).map(|a| !a.is_empty()).unwrap_or(false) {
+                        return Ok(Json(json));
+                    }
+                }
+            }
+        }
+    }
+
+    // Try OpenAI-style /v1/models
+    let openai_url = format!("{base}/v1/models");
+    let api_key = body.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+    let mut req = client.get(&openai_url);
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {api_key}"));
+    }
+    let resp = req.send().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("Failed to reach endpoint: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(api_err(StatusCode::BAD_GATEWAY,
+            format!("Endpoint returned {}", resp.status().as_u16())));
+    }
+
+    let text = resp.text().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let json: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("Invalid JSON: {e}")))?;
+
+    Ok(Json(json))
+}
+
 fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{}", tag);
     let close = format!("</{}>", tag);
@@ -3185,6 +3245,61 @@ pub async fn download_onnx_model(
     })))
 }
 
+// ── POST /config/ollama-pull — Pull a model from Ollama ──
+
+pub async fn ollama_pull(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let model = body["model"].as_str()
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "model required"))?;
+
+    // Get Ollama endpoint from config, or default
+    let ollama_base = {
+        let cfg = state.config.read().map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "config lock"))?;
+        cfg.embed_endpoint.clone()
+            .or_else(|| cfg.llm_endpoint.clone())
+            .unwrap_or_else(|| "http://localhost:11434".to_string())
+    };
+    // Extract base URL (strip path)
+    let base = if let Some(idx) = ollama_base.find("/api/") {
+        &ollama_base[..idx]
+    } else if let Some(idx) = ollama_base.find("/v1/") {
+        &ollama_base[..idx]
+    } else {
+        ollama_base.trim_end_matches('/')
+    };
+
+    let pull_url = format!("{}/api/pull", base);
+    tracing::info!("pulling Ollama model '{}' from {}", model, pull_url);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600)) // 10 min timeout for large models
+        .build()
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("client error: {e}")))?;
+
+    let resp = client.post(&pull_url)
+        .json(&serde_json::json!({ "name": model, "stream": false }))
+        .send()
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("Ollama pull failed: {e}. Is Ollama running at {}?", base)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(api_err(StatusCode::BAD_GATEWAY, format!("Ollama pull returned {}: {}", status, body)));
+    }
+
+    let result = resp.text().await.unwrap_or_default();
+    tracing::info!("Ollama pull complete for '{}'", model);
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "model": model,
+        "response": result,
+    })))
+}
+
 // ── POST /config/ner-download — Download GLiNER NER model from HuggingFace ──
 
 pub async fn download_ner_model(
@@ -4170,6 +4285,8 @@ pub async fn config_status(
 
     let ready = cfg.embed_endpoint.is_some();
 
+    let wizard_dismissed = cfg.wizard_dismissed.unwrap_or(false);
+
     Ok(Json(ConfigStatusResponse {
         configured,
         missing,
@@ -4178,7 +4295,25 @@ pub async fn config_status(
         node_count,
         edge_count,
         is_empty_graph: node_count == 0 && edge_count == 0,
+        wizard_dismissed,
     }))
+}
+
+// ── POST /config/wizard-complete ──
+
+pub async fn wizard_complete(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    {
+        let mut cfg = state.config.write().map_err(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "config lock poisoned".into() }))
+        })?;
+        cfg.wizard_dismissed = Some(true);
+    }
+    state.save_config().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("failed to save config: {}", e) }))
+    })?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // ── GET /config/kb ──

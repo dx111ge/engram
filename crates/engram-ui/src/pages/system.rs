@@ -2,8 +2,8 @@ use leptos::prelude::*;
 
 use crate::api::ApiClient;
 use crate::api::types::{
-    ComputeResponse, ConfigResponse, ConfigStatusResponse, HealthResponse, KbEndpointCreate,
-    KbEndpointInfo, KbTestResult, MeshAuditEntry, PeerInfo, ResetResponse, SecretListItem,
+    ComputeResponse, ConfigResponse, ConfigStatusResponse, HealthResponse,
+    MeshAuditEntry, PeerInfo, ResetResponse, SecretListItem,
     StatsResponse,
 };
 use crate::components::collapsible_section::CollapsibleSection;
@@ -516,14 +516,8 @@ pub fn SystemPage() -> impl IntoView {
         let endpoint = llm_endpoint.get_untracked();
         async move {
             set_llm_test_status.set("Fetching models...".into());
-            // Derive the base URL from the chat completions endpoint
-            let base = endpoint
-                .replace("/v1/chat/completions", "")
-                .replace("/api/embed", "")
-                .replace("/v1/embeddings", "");
-            let models_url = format!("{base}/api/tags");
-            // Try Ollama-style first
-            match api.get_text(&format!("/proxy/fetch?url={}", js_sys::encode_uri_component(&models_url))).await {
+            // Use backend proxy to fetch models (handles Ollama + OpenAI-compatible)
+            match api.post_text("/proxy/fetch-models", &serde_json::json!({ "endpoint": endpoint })).await {
                 Ok(text) => {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                         let mut models = Vec::new();
@@ -565,6 +559,8 @@ pub fn SystemPage() -> impl IntoView {
     let (ner_selected_model, set_ner_selected_model) = signal(String::new());
     let (ner_model_status, set_ner_model_status) = signal(String::new());
     let (ner_download_status, set_ner_download_status) = signal(String::new());
+    let (rel_model_status, set_rel_model_status) = signal(String::new());
+    let (rel_download_status, set_rel_download_status) = signal(String::new());
 
     // Quantization signal declared early so config Effect can set it
     let (quant_enabled, set_quant_enabled) = signal(true);
@@ -795,7 +791,7 @@ pub fn SystemPage() -> impl IntoView {
 
     let api_for_onnx = api.clone();
     let api_for_ner = api.clone();
-    let api_for_kb = api.clone();
+    let _api_for_kb = api.clone(); // KB Endpoints removed from UI
     let api_for_db = api.clone();
 
     view! {
@@ -958,6 +954,63 @@ pub fn SystemPage() -> impl IntoView {
                                 }
                             }).collect::<Vec<_>>()}
                         </div>
+
+                        // ── Custom HuggingFace model ──
+                        <details style="margin-top: 0.75rem;">
+                            <summary class="text-secondary" style="cursor: pointer; font-size: 0.85rem;"><i class="fa-brands fa-github" style="margin-right: 0.25rem;"></i>"Custom HuggingFace Model"</summary>
+                            <div style="margin-top: 0.5rem;">
+                                <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.5rem;">
+                                    "Enter any sentence-transformer ONNX model from huggingface.co. Must contain onnx/model.onnx and tokenizer.json."
+                                </p>
+                                <div class="form-row">
+                                    <label>"HuggingFace Model ID"</label>
+                                    <input type="text" class="form-control" id="onnx-custom-hf-id"
+                                        placeholder="e.g. sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+                                    />
+                                </div>
+                                <div class="button-group" style="margin-top: 0.5rem;">
+                                    <button class="btn btn-primary" on:click={
+                                        let api = api_dl.clone();
+                                        move |_| {
+                                            let api = api.clone();
+                                            wasm_bindgen_futures::spawn_local(async move {
+                                                use wasm_bindgen::JsCast;
+                                                let doc = web_sys::window().unwrap().document().unwrap();
+                                                let input = doc.get_element_by_id("onnx-custom-hf-id")
+                                                    .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok());
+                                                let hf_id = input.map(|i| i.value()).unwrap_or_default();
+                                                if hf_id.trim().is_empty() {
+                                                    set_onnx_status.set("Please enter a HuggingFace model ID.".into());
+                                                    return;
+                                                }
+                                                let hf_id = hf_id.trim();
+                                                // If no slash, assume sentence-transformers namespace
+                                                let repo = if hf_id.contains('/') { hf_id.to_string() } else { format!("sentence-transformers/{}", hf_id) };
+                                                set_onnx_status.set(format!("Downloading {}...", repo));
+                                                let body = serde_json::json!({
+                                                    "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", repo),
+                                                    "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", repo),
+                                                });
+                                                match api.post_text("/config/onnx-download", &body).await {
+                                                    Ok(r) => {
+                                                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
+                                                            let size = v.get("model_size_mb").and_then(|v| v.as_f64());
+                                                            let size_str = size.map(|s| format!(" ({:.1} MB)", s)).unwrap_or_default();
+                                                            set_onnx_status.set(format!("{} installed{}.", repo, size_str));
+                                                        } else {
+                                                            set_onnx_status.set(format!("{} installed.", repo));
+                                                        }
+                                                    }
+                                                    Err(e) => set_onnx_status.set(format!("Download failed: {e}")),
+                                                }
+                                            });
+                                        }
+                                    }>
+                                        <i class="fa-solid fa-cloud-arrow-down"></i>" Download from HuggingFace"
+                                    </button>
+                                </div>
+                            </div>
+                        </details>
 
                         // ── Manual upload ──
                         <details style="margin-top: 0.75rem;">
@@ -1451,7 +1504,7 @@ pub fn SystemPage() -> impl IntoView {
                             })
                         }}
 
-                        // Download & Enable button
+                        // Download & Enable button (preset models)
                         <div class="button-group" style="margin-top: 0.5rem;">
                             <button class="btn btn-primary" on:click={
                                 let api_dl = api_dl_ner.clone();
@@ -1515,9 +1568,256 @@ pub fn SystemPage() -> impl IntoView {
                                 <i class="fa-solid fa-cloud-arrow-down"></i>" Download & Enable"
                             </button>
                         </div>
+
+                        // ── Custom HuggingFace NER model ──
+                        <details style="margin-top: 0.75rem;">
+                            <summary class="text-secondary" style="cursor: pointer; font-size: 0.85rem;"><i class="fa-brands fa-github" style="margin-right: 0.25rem;"></i>"Custom HuggingFace GLiNER Model"</summary>
+                            <div style="margin-top: 0.5rem;">
+                                <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.5rem;">
+                                    "Enter any GLiNER-compatible ONNX model ID from huggingface.co. Must contain onnx/model.onnx and tokenizer.json."
+                                </p>
+                                <div class="form-row">
+                                    <label>"HuggingFace Model ID"</label>
+                                    <input type="text" class="form-control" id="ner-custom-hf-id"
+                                        placeholder="e.g. onnx-community/gliner_multi_pii-v1"
+                                    />
+                                </div>
+                                <div class="button-group" style="margin-top: 0.5rem;">
+                                    <button class="btn btn-primary" on:click={
+                                        let api_dl = api_dl_ner.clone();
+                                        let api_save = api_save_after_dl.clone();
+                                        move |_| {
+                                            let api_dl = api_dl.clone();
+                                            let api_save = api_save.clone();
+                                            wasm_bindgen_futures::spawn_local(async move {
+                                                use wasm_bindgen::JsCast;
+                                                let doc = web_sys::window().unwrap().document().unwrap();
+                                                let input = doc.get_element_by_id("ner-custom-hf-id")
+                                                    .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok());
+                                                let hf_id = input.map(|i| i.value()).unwrap_or_default();
+                                                if hf_id.trim().is_empty() {
+                                                    set_ner_download_status.set("Please enter a HuggingFace model ID.".into());
+                                                    return;
+                                                }
+                                                let hf_id = hf_id.trim();
+                                                let repo = if hf_id.contains('/') { hf_id.to_string() } else { format!("onnx-community/{}", hf_id) };
+                                                // Extract model_id from repo (last part after /)
+                                                let model_id = repo.split('/').last().unwrap_or(&repo).to_string();
+                                                set_ner_download_status.set(format!("Downloading {}...", repo));
+                                                let body = serde_json::json!({
+                                                    "model_id": model_id,
+                                                    "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", repo),
+                                                    "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", repo),
+                                                });
+                                                match api_dl.post_text("/config/ner-download", &body).await {
+                                                    Ok(r) => {
+                                                        set_ner_download_status.set(String::new());
+                                                        let status_msg = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
+                                                            let size = v.get("model_size_mb").and_then(|v| v.as_f64());
+                                                            if let Some(mb) = size {
+                                                                format!("Model installed ({:.1} MB). Ready to use.", mb)
+                                                            } else {
+                                                                "Model installed. Ready to use.".to_string()
+                                                            }
+                                                        } else {
+                                                            format!("Installed: {r}")
+                                                        };
+                                                        set_ner_model_status.set(status_msg);
+                                                        // Auto-save config
+                                                        let cfg_body = serde_json::json!({
+                                                            "ner_provider": "anno",
+                                                            "ner_model": model_id,
+                                                        });
+                                                        let _ = api_save.post_text("/config", &cfg_body).await;
+                                                        set_status_msg.set(format!("Custom GLiNER model {} installed and NER config saved.", repo));
+                                                    }
+                                                    Err(e) => {
+                                                        set_ner_download_status.set(String::new());
+                                                        set_ner_model_status.set(format!("Download failed: {e}"));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }>
+                                        <i class="fa-solid fa-cloud-arrow-down"></i>" Download from HuggingFace"
+                                    </button>
+                                </div>
+                            </div>
+                        </details>
                     </div>
                 })
             }}
+            // ── GLiREL Relation Extraction Model ──
+            {
+                let api_rel = api.clone();
+                move || {
+                let is_anno = ner_provider.get() == "anno";
+                let api_rel_dl = api_rel.clone();
+                let api_rel_check = api_rel.clone();
+                let api_rel_custom = api_rel.clone();
+                is_anno.then(|| view! {
+                    <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
+                        <h4 style="margin-top: 0;"><i class="fa-solid fa-link"></i>" GLiREL Relation Model"</h4>
+                        <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+                            "Relation extraction model paired with GLiNER. Discovers relationships between entities."
+                        </p>
+
+                        // Quick install buttons for GLiREL models
+                        <div style="margin: 0.5rem 0;">
+                            <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.5rem;"><strong>"Quick Install"</strong></p>
+                            {["small", "medium", "large"].into_iter().map(|size| {
+                                let label = format!("GLiREL {} v2.1", match size { "small" => "Small", "medium" => "Medium", _ => "Large" });
+                                let model_id = format!("glirel_{}-v2.1", size);
+                                let repo = format!("onnx-community/glirel_{}-v2.1", size);
+                                let api = api_rel_dl.clone();
+                                let mid = model_id.clone();
+                                let rp = repo.clone();
+                                view! {
+                                    <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                                        <div style="flex: 1; min-width: 0;">
+                                            <code style="font-size: 0.85rem;">{label}</code>
+                                        </div>
+                                        <button class="btn btn-sm btn-primary" style="white-space: nowrap; padding: 0.2rem 0.5rem; font-size: 0.75rem;" on:click={
+                                            let api = api.clone();
+                                            let mid = mid.clone();
+                                            let rp = rp.clone();
+                                            move |_| {
+                                                let api = api.clone();
+                                                let mid = mid.clone();
+                                                let rp = rp.clone();
+                                                set_rel_download_status.set(format!("Downloading {}...", rp));
+                                                wasm_bindgen_futures::spawn_local(async move {
+                                                    let body = serde_json::json!({
+                                                        "model_id": mid,
+                                                        "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", rp),
+                                                        "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", rp),
+                                                    });
+                                                    match api.post_text("/config/rel-download", &body).await {
+                                                        Ok(r) => {
+                                                            set_rel_download_status.set(String::new());
+                                                            let msg = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
+                                                                let size = v.get("model_size_mb").and_then(|v| v.as_f64());
+                                                                if let Some(mb) = size {
+                                                                    format!("Model installed ({:.1} MB). Ready to use.", mb)
+                                                                } else {
+                                                                    "Model installed. Ready to use.".to_string()
+                                                                }
+                                                            } else {
+                                                                "Installed.".to_string()
+                                                            };
+                                                            set_rel_model_status.set(msg);
+                                                        }
+                                                        Err(e) => {
+                                                            set_rel_download_status.set(String::new());
+                                                            set_rel_model_status.set(format!("Download failed: {e}"));
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        }>
+                                            <i class="fa-solid fa-cloud-arrow-down"></i>" Install"
+                                        </button>
+                                    </div>
+                                }
+                            }).collect::<Vec<_>>()}
+                        </div>
+
+                        // Status display
+                        {move || {
+                            let st = rel_model_status.get();
+                            if st.is_empty() {
+                                None
+                            } else if st.contains("installed") || st.contains("Installed") || st.contains("Ready") {
+                                Some(view! {
+                                    <div style="margin: 0.25rem 0; padding: 0.35rem 0.5rem; background: rgba(46,204,113,0.1); border: 1px solid rgba(46,204,113,0.3); border-radius: 4px; font-size: 0.8rem;">
+                                        <i class="fa-solid fa-circle-check" style="color: #2ecc71; margin-right: 0.25rem;"></i>{st.clone()}
+                                    </div>
+                                }.into_any())
+                            } else {
+                                Some(view! {
+                                    <div style="margin: 0.25rem 0; padding: 0.35rem 0.5rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; font-size: 0.8rem;">
+                                        <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>{st.clone()}
+                                    </div>
+                                }.into_any())
+                            }
+                        }}
+
+                        // Download progress
+                        {move || {
+                            let st = rel_download_status.get();
+                            (!st.is_empty()).then(|| view! {
+                                <div class="info-box" style="margin: 0.25rem 0; font-size: 0.8rem;">
+                                    <i class="fa-solid fa-spinner fa-spin" style="margin-right: 0.25rem;"></i>{st}
+                                </div>
+                            })
+                        }}
+
+                        // Custom HuggingFace REL model
+                        <details style="margin-top: 0.5rem;">
+                            <summary class="text-secondary" style="cursor: pointer; font-size: 0.85rem;"><i class="fa-brands fa-github" style="margin-right: 0.25rem;"></i>"Custom HuggingFace GLiREL Model"</summary>
+                            <div style="margin-top: 0.5rem;">
+                                <div class="form-row">
+                                    <label>"HuggingFace Model ID"</label>
+                                    <input type="text" class="form-control" id="rel-custom-hf-id"
+                                        placeholder="e.g. onnx-community/glirel_multi-v1"
+                                    />
+                                </div>
+                                <div class="button-group" style="margin-top: 0.5rem;">
+                                    <button class="btn btn-primary" on:click={
+                                        let api = api_rel_custom.clone();
+                                        move |_| {
+                                            let api = api.clone();
+                                            wasm_bindgen_futures::spawn_local(async move {
+                                                use wasm_bindgen::JsCast;
+                                                let doc = web_sys::window().unwrap().document().unwrap();
+                                                let input = doc.get_element_by_id("rel-custom-hf-id")
+                                                    .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok());
+                                                let hf_id = input.map(|i| i.value()).unwrap_or_default();
+                                                if hf_id.trim().is_empty() {
+                                                    set_rel_download_status.set("Please enter a HuggingFace model ID.".into());
+                                                    return;
+                                                }
+                                                let hf_id = hf_id.trim();
+                                                let repo = if hf_id.contains('/') { hf_id.to_string() } else { format!("onnx-community/{}", hf_id) };
+                                                let model_id = repo.split('/').last().unwrap_or(&repo).to_string();
+                                                set_rel_download_status.set(format!("Downloading {}...", repo));
+                                                let body = serde_json::json!({
+                                                    "model_id": model_id,
+                                                    "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", repo),
+                                                    "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", repo),
+                                                });
+                                                match api.post_text("/config/rel-download", &body).await {
+                                                    Ok(r) => {
+                                                        set_rel_download_status.set(String::new());
+                                                        let msg = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
+                                                            let size = v.get("model_size_mb").and_then(|v| v.as_f64());
+                                                            if let Some(mb) = size {
+                                                                format!("Model installed ({:.1} MB). Ready to use.", mb)
+                                                            } else {
+                                                                "Model installed. Ready to use.".to_string()
+                                                            }
+                                                        } else {
+                                                            "Installed.".to_string()
+                                                        };
+                                                        set_rel_model_status.set(msg);
+                                                    }
+                                                    Err(e) => {
+                                                        set_rel_download_status.set(String::new());
+                                                        set_rel_model_status.set(format!("Download failed: {e}"));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }>
+                                        <i class="fa-solid fa-cloud-arrow-down"></i>" Download from HuggingFace"
+                                    </button>
+                                </div>
+                            </div>
+                        </details>
+                    </div>
+                })
+            }}
+
             <div class="button-group" style="margin-top: 0.5rem;">
                 <button class="btn btn-success" on:click=move |_| { save_ner.dispatch(()); }>
                     <i class="fa-solid fa-floppy-disk"></i>" Save NER Config"
@@ -1859,244 +2159,8 @@ pub fn SystemPage() -> impl IntoView {
             </button>
         </CollapsibleSection>
 
-        // ── 9. KB Endpoints ──
-        <KbEndpointsSection api=api_for_kb set_status_msg=set_status_msg />
-
-        // ── 10. Database Management ──
+        // ── 9. Database Management ──
         <DatabaseManagementSection api=api_for_db set_status_msg=set_status_msg />
-    }
-}
-
-// ── KB Endpoints section (SPARQL knowledge bases) ──
-
-#[component]
-fn KbEndpointsSection(
-    api: ApiClient,
-    set_status_msg: WriteSignal<String>,
-) -> impl IntoView {
-    let (endpoints, set_endpoints) = signal(Vec::<KbEndpointInfo>::new());
-    let (kb_name, set_kb_name) = signal(String::new());
-    let (kb_url, set_kb_url) = signal(String::new());
-    let (kb_auth, set_kb_auth) = signal("none".to_string());
-    let (kb_auth_key, set_kb_auth_key) = signal(String::new());
-    let (kb_max_lookups, set_kb_max_lookups) = signal(String::new());
-    let (test_result, set_test_result) = signal(Option::<String>::None);
-    let (refresh, set_refresh) = signal(0u32);
-
-    // Load KB endpoints
-    let api_load = api.clone();
-    let load_endpoints = Action::new_local(move |_: &()| {
-        let api = api_load.clone();
-        async move {
-            if let Ok(list) = api.get::<Vec<KbEndpointInfo>>("/config/kb").await {
-                set_endpoints.set(list);
-            }
-        }
-    });
-
-    Effect::new(move |_| {
-        let _ = refresh.get();
-        load_endpoints.dispatch(());
-    });
-
-    // Add endpoint
-    let api_add = api.clone();
-    let do_add = Action::new_local(move |_: &()| {
-        let api = api_add.clone();
-        let body = KbEndpointCreate {
-            name: kb_name.get_untracked(),
-            url: kb_url.get_untracked(),
-            auth_type: {
-                let a = kb_auth.get_untracked();
-                if a == "none" { None } else { Some(a) }
-            },
-            auth_secret_key: {
-                let k = kb_auth_key.get_untracked();
-                if k.is_empty() { None } else { Some(k) }
-            },
-            entity_link_template: None,
-            relation_query_template: None,
-            max_lookups_per_call: kb_max_lookups.get_untracked().parse().ok(),
-        };
-        async move {
-            match api.post_text("/config/kb", &body).await {
-                Ok(_) => {
-                    set_status_msg.set("KB endpoint added".into());
-                    set_kb_name.set(String::new());
-                    set_kb_url.set(String::new());
-                    set_refresh.update(|c| *c += 1);
-                }
-                Err(e) => set_status_msg.set(format!("Error: {e}")),
-            }
-        }
-    });
-
-    // Delete endpoint
-    let api_del = api.clone();
-    let (del_trigger, set_del_trigger) = signal(Option::<String>::None);
-    Effect::new(move |_| {
-        if let Some(name) = del_trigger.get() {
-            let api = api_del.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                let encoded = js_sys::encode_uri_component(&name);
-                match api.delete_json::<serde_json::Value>(&format!("/config/kb/{encoded}")).await {
-                    Ok(_) => set_status_msg.set(format!("Removed: {name}")),
-                    Err(e) => set_status_msg.set(format!("Error: {e}")),
-                }
-                set_refresh.update(|c| *c += 1);
-            });
-            set_del_trigger.set(None);
-        }
-    });
-
-    // Test endpoint
-    let api_test = api.clone();
-    let (test_trigger, set_test_trigger) = signal(Option::<String>::None);
-    Effect::new(move |_| {
-        if let Some(name) = test_trigger.get() {
-            let api = api_test.clone();
-            set_test_result.set(Some("Testing...".into()));
-            wasm_bindgen_futures::spawn_local(async move {
-                let encoded = js_sys::encode_uri_component(&name);
-                match api.post::<_, KbTestResult>(&format!("/config/kb/{encoded}/test"), &serde_json::json!({})).await {
-                    Ok(r) => {
-                        if r.success {
-                            set_test_result.set(Some(format!(
-                                "{name}: OK ({}ms)",
-                                r.latency_ms.unwrap_or(0)
-                            )));
-                        } else {
-                            set_test_result.set(Some(format!(
-                                "{name}: FAILED - {}",
-                                r.error.unwrap_or_else(|| "unknown".into())
-                            )));
-                        }
-                    }
-                    Err(e) => set_test_result.set(Some(format!("Error: {e}"))),
-                }
-            });
-            set_test_trigger.set(None);
-        }
-    });
-
-    view! {
-        <CollapsibleSection title="KB Endpoints" icon="fa-solid fa-database" collapsed=true>
-            <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.75rem;">
-                "SPARQL knowledge bases for entity linking and relation bootstrapping."
-            </p>
-
-            {move || test_result.get().map(|msg| view! {
-                <div class="card" style="padding: 0.5rem; margin-bottom: 0.75rem;">
-                    <i class="fa-solid fa-info-circle" style="color: var(--accent-bright);"></i>
-                    " " {msg}
-                </div>
-            })}
-
-            // Existing endpoints
-            {move || {
-                let eps = endpoints.get();
-                if eps.is_empty() {
-                    view! {
-                        <p class="text-muted">"No KB endpoints configured."</p>
-                    }.into_any()
-                } else {
-                    view! {
-                        <table class="data-table">
-                            <thead>
-                                <tr><th>"Name"</th><th>"URL"</th><th>"Enabled"</th><th>"Actions"</th></tr>
-                            </thead>
-                            <tbody>
-                                {eps.into_iter().map(|ep| {
-                                    let name = ep.name.clone();
-                                    let name_del = ep.name.clone();
-                                    let name_test = ep.name.clone();
-                                    view! {
-                                        <tr>
-                                            <td><code>{name}</code></td>
-                                            <td class="text-secondary" style="font-size: 0.85rem; max-width: 300px; overflow: hidden; text-overflow: ellipsis;">
-                                                {ep.url}
-                                            </td>
-                                            <td>
-                                                {if ep.enabled {
-                                                    view! { <span class="badge badge-core">"on"</span> }.into_any()
-                                                } else {
-                                                    view! { <span class="badge badge-archival">"off"</span> }.into_any()
-                                                }}
-                                            </td>
-                                            <td>
-                                                <div class="flex gap-sm">
-                                                    <button class="btn btn-secondary btn-sm" on:click=move |_| {
-                                                        set_test_trigger.set(Some(name_test.clone()));
-                                                    }>
-                                                        <i class="fa-solid fa-plug"></i>" Test"
-                                                    </button>
-                                                    <button class="btn btn-danger btn-sm" on:click=move |_| {
-                                                        set_del_trigger.set(Some(name_del.clone()));
-                                                    }>
-                                                        <i class="fa-solid fa-trash"></i>
-                                                    </button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    }
-                                }).collect::<Vec<_>>()}
-                            </tbody>
-                        </table>
-                    }.into_any()
-                }
-            }}
-
-            // Add form
-            <h4 style="margin-top: 1rem;">"Add KB Endpoint"</h4>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>"Name"</label>
-                    <input type="text" placeholder="wikidata"
-                        prop:value=kb_name
-                        on:input=move |ev| set_kb_name.set(event_target_value(&ev)) />
-                </div>
-                <div class="form-group">
-                    <label>"SPARQL Endpoint URL"</label>
-                    <input type="text" placeholder="https://query.wikidata.org/sparql"
-                        prop:value=kb_url
-                        on:input=move |ev| set_kb_url.set(event_target_value(&ev)) />
-                </div>
-            </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>"Auth Type"</label>
-                    <select prop:value=kb_auth on:change=move |ev| set_kb_auth.set(event_target_value(&ev))>
-                        <option value="none">"None"</option>
-                        <option value="bearer">"Bearer Token"</option>
-                        <option value="basic">"Basic Auth"</option>
-                        <option value="api_key">"API Key"</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>"Max Lookups per Call"</label>
-                    <input type="number" placeholder="50"
-                        prop:value=kb_max_lookups
-                        on:input=move |ev| set_kb_max_lookups.set(event_target_value(&ev)) />
-                </div>
-            </div>
-            {move || if kb_auth.get() != "none" {
-                Some(view! {
-                    <div class="form-group">
-                        <label>"Auth Secret Key (from Secrets store)"</label>
-                        <input type="text" placeholder="secret key name"
-                            prop:value=kb_auth_key
-                            on:input=move |ev| set_kb_auth_key.set(event_target_value(&ev)) />
-                    </div>
-                })
-            } else { None }}
-            <div class="button-group">
-                <button class="btn btn-success"
-                    on:click=move |_| { do_add.dispatch(()); }
-                    disabled=move || kb_name.get().is_empty() || kb_url.get().is_empty()>
-                    <i class="fa-solid fa-plus"></i>" Add Endpoint"
-                </button>
-            </div>
-        </CollapsibleSection>
     }
 }
 

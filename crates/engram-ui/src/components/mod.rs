@@ -14,3 +14,4 @@ pub mod chat_panel;
 pub mod chat_types;
 pub mod source_wizard;
 pub mod assessment_wizard;
+pub mod onboarding_wizard;

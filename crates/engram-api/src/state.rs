@@ -80,6 +80,9 @@ pub struct EngineConfig {
     pub quantization_enabled: Option<bool>,
     /// Knowledge base endpoints (SPARQL, etc.).
     pub kb_endpoints: Option<Vec<KbEndpointConfig>>,
+    /// Whether the onboarding wizard has been dismissed.
+    #[serde(default)]
+    pub wizard_dismissed: Option<bool>,
 }
 
 impl EngineConfig {
@@ -150,6 +153,9 @@ impl EngineConfig {
         }
         if other.kb_endpoints.is_some() {
             self.kb_endpoints = other.kb_endpoints.clone();
+        }
+        if other.wizard_dismissed.is_some() {
+            self.wizard_dismissed = other.wizard_dismissed;
         }
     }
 }

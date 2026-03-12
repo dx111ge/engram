@@ -3,10 +3,12 @@ use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
 
 use crate::api::ApiClient;
+use crate::api::types::ConfigStatusResponse;
 use crate::auth;
 use crate::components::auth_screen::AuthScreen;
 use crate::components::chat_panel::ChatPanel;
 use crate::components::nav::Nav;
+use crate::components::onboarding_wizard::OnboardingWizard;
 use crate::components::toast::{Toast, ToastContainer};
 use crate::pages;
 
@@ -29,6 +31,34 @@ pub fn App() -> impl IntoView {
     provide_context(chat_open);
 
     let is_authed = move || auth_state.get().is_some();
+
+    // Wizard visibility signal
+    let (wizard_open, set_wizard_open) = signal(false);
+
+    // Check config status when authenticated — show wizard if empty graph & not dismissed
+    let api_for_check = use_context::<ApiClient>().unwrap_or_else(|| ApiClient::new(&base_url));
+    let check_status = Action::new_local(move |_: &()| {
+        let api = api_for_check.clone();
+        let set_open = set_wizard_open;
+        async move {
+            if let Ok(status) = api.get::<ConfigStatusResponse>("/config/status").await {
+                if status.is_empty_graph && !status.wizard_dismissed {
+                    set_open.set(true);
+                }
+            }
+        }
+    });
+
+    // Trigger the check once auth state becomes Some
+    Effect::new(move || {
+        if auth_state.get().is_some() {
+            check_status.dispatch(());
+        }
+    });
+
+    let on_wizard_complete = Callback::new(move |()| {
+        set_wizard_open.set(false);
+    });
 
     view! {
         <Router>
@@ -55,6 +85,7 @@ pub fn App() -> impl IntoView {
                                 <Route path=path!("/insights") view=pages::insights::InsightsPage />
                             </Routes>
                         </main>
+                        <OnboardingWizard open=wizard_open on_complete=on_wizard_complete />
                         <ChatPanel />
                         <ToastContainer />
                     }.into_any()

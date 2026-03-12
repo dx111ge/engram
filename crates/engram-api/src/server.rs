@@ -95,6 +95,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/proxy/rss", get(handlers::proxy_news_rss))
         .route("/proxy/llm", post(handlers::proxy_llm))
         .route("/proxy/models", get(handlers::proxy_llm_models))
+        .route("/proxy/fetch-models", post(handlers::proxy_fetch_models))
         .route("/proxy/search", get(handlers::proxy_web_search))
         // Assessments
         .route("/assessments", post(handlers::create_assessment))
@@ -119,6 +120,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/onnx-model", get(handlers::check_onnx_model))
         .route("/config/onnx-download", post(handlers::download_onnx_model))
         .route("/config/ner-download", post(handlers::download_ner_model))
+        .route("/config/ollama-pull", post(handlers::ollama_pull))
         .route("/config/ner-model", get(handlers::check_ner_model))
         .route("/config/rel-download", post(handlers::download_rel_model))
         .route("/config/rel-model", get(handlers::check_rel_model))
@@ -126,6 +128,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/admin/reset", post(handlers::admin_reset))
         // Config status & KB management
         .route("/config/status", get(handlers::config_status))
+        .route("/config/wizard-complete", post(handlers::wizard_complete))
         .route("/config/kb", get(handlers::list_kb_endpoints))
         .route("/config/kb", post(handlers::add_kb_endpoint))
         .route("/config/kb/{name}", delete(handlers::delete_kb_endpoint))

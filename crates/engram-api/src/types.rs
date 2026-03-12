@@ -368,6 +368,7 @@ pub struct ConfigStatusResponse {
     pub node_count: u64,
     pub edge_count: u64,
     pub is_empty_graph: bool,
+    pub wizard_dismissed: bool,
 }
 
 #[derive(Serialize)]

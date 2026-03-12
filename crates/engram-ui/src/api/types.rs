@@ -294,6 +294,8 @@ pub struct ConfigStatusResponse {
     pub edge_count: u64,
     #[serde(default)]
     pub is_empty_graph: bool,
+    #[serde(default)]
+    pub wizard_dismissed: bool,
 }
 
 // ── Secrets ──

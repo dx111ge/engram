@@ -1528,6 +1528,418 @@ input[type="range"] {
 }
 
 /* ============================================
+   ONBOARDING WIZARD
+   ============================================ */
+
+.wizard-modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 720px;
+  max-width: 95vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+/* Progress bar at the top */
+.wizard-progress {
+  position: relative;
+  height: 32px;
+  background: var(--bg-input);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.wizard-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-bright), #00b894);
+  transition: width 0.4s ease;
+}
+
+.wizard-step-label {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+/* Knowledge Quality Meter */
+.wizard-quality {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+}
+
+.wizard-quality-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.wizard-quality-label span {
+  font-size: 0.9rem;
+  color: var(--accent-bright);
+  font-weight: 700;
+}
+
+.wizard-quality-bar {
+  height: 8px;
+  background: var(--bg-input);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.wizard-quality-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.4s ease, background 0.4s ease;
+}
+
+.wizard-quality-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wizard-quality-items span {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.wizard-quality-items span.active {
+  background: rgba(0, 184, 148, 0.15);
+  color: #00b894;
+  border-color: rgba(0, 184, 148, 0.3);
+}
+
+/* Content area */
+.wizard-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  min-height: 320px;
+}
+
+.wizard-step h2 {
+  font-size: 1.2rem;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.wizard-desc {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+.wizard-required {
+  font-size: 0.82rem;
+  color: var(--warning);
+  margin-bottom: 12px;
+}
+
+.wizard-required i {
+  font-size: 0.7rem;
+  margin-right: 4px;
+}
+
+/* Info boxes (pipeline explanation, cold start, etc.) */
+.wizard-info-box {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-bright);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.wizard-info-box strong {
+  color: var(--text-primary);
+}
+
+.wizard-info-box p {
+  margin-bottom: 6px;
+}
+
+.wizard-info-box p:last-child {
+  margin-bottom: 0;
+}
+
+/* Provider/option cards */
+.wizard-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wizard-card {
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+  background: var(--bg-card);
+}
+
+.wizard-card:hover {
+  border-color: var(--accent-light);
+  background: var(--bg-hover);
+}
+
+.wizard-card.selected {
+  border-color: var(--accent-bright);
+  background: rgba(74, 158, 255, 0.08);
+}
+
+.wizard-card h3 {
+  font-size: 0.95rem;
+  margin-bottom: 6px;
+  color: var(--text-primary);
+}
+
+.wizard-card h3 i {
+  margin-right: 6px;
+  color: var(--accent-bright);
+}
+
+.wizard-card-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 16px;
+  font-size: 0.78rem;
+}
+
+.wizard-card-grid span {
+  color: var(--text-muted);
+}
+
+.wizard-card-grid span strong {
+  color: var(--text-secondary);
+}
+
+.wizard-card-note {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+  font-style: italic;
+}
+
+.wizard-card-note i {
+  margin-right: 4px;
+  color: var(--accent-bright);
+}
+
+/* Model selection chips */
+.wizard-model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.wizard-model-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  cursor: pointer;
+  transition: all var(--transition);
+  text-align: left;
+  min-width: 140px;
+}
+
+.wizard-model-chip:hover {
+  border-color: var(--accent-light);
+  background: var(--bg-hover);
+}
+
+.wizard-model-chip.active {
+  border-color: var(--accent-bright);
+  background: rgba(74, 158, 255, 0.12);
+}
+
+.wizard-model-chip strong {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.wizard-model-chip small {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.wizard-custom-model {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.wizard-custom-model label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  display: block;
+}
+.wizard-custom-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.wizard-custom-input-row .form-control {
+  flex: 1;
+}
+.wizard-hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+/* Seed step */
+.wizard-seed-examples {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.wizard-seed-examples button {
+  font-size: 0.78rem;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.wizard-seed-examples button:hover {
+  border-color: var(--accent-bright);
+  color: var(--text-primary);
+}
+
+.wizard-seed-input {
+  width: 100%;
+  min-height: 80px;
+  padding: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-stack);
+  font-size: 0.88rem;
+  resize: vertical;
+  margin-bottom: 12px;
+}
+
+.wizard-seed-input:focus {
+  outline: none;
+  border-color: var(--accent-bright);
+}
+
+.wizard-seed-result {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+
+/* Ready step */
+.wizard-ready {
+  text-align: center;
+}
+
+.wizard-summary {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  margin: 16px auto;
+  max-width: 420px;
+  text-align: left;
+}
+
+.wizard-summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.wizard-summary-row:last-child {
+  border-bottom: none;
+}
+
+.wizard-summary-label {
+  color: var(--text-secondary);
+}
+
+.wizard-summary-row .fa-check-circle {
+  color: var(--success);
+}
+
+.wizard-summary-row .fa-times-circle,
+.wizard-summary-row .fa-minus-circle {
+  color: var(--text-muted);
+}
+
+/* Error display */
+.wizard-error {
+  background: rgba(214, 48, 49, 0.1);
+  border: 1px solid rgba(214, 48, 49, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin: 0 24px;
+  font-size: 0.82rem;
+  color: #ef5350;
+}
+
+/* Navigation footer */
+.wizard-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-card);
+}
+
+.wizard-nav .btn {
+  min-width: 100px;
+}
+
+/* ============================================
    RESPONSIVE ADDITIONS
    ============================================ */
 @media (max-width: 700px) {
@@ -1539,6 +1951,15 @@ input[type="range"] {
     align-items: flex-start;
   }
   .ingest-grid {
+    grid-template-columns: 1fr;
+  }
+  .wizard-modal {
+    width: 100%;
+    max-width: 100%;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+  .wizard-card-grid {
     grid-template-columns: 1fr;
   }
 }
