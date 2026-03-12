@@ -1,107 +1,93 @@
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 
-// vis.js extern bindings -- vis-network loaded via CDN in index.html
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = vis, js_name = Network)]
-    type VisNetwork;
-
-    #[wasm_bindgen(constructor, js_namespace = vis, js_name = Network)]
-    fn new(container: &web_sys::HtmlElement, data: &JsValue, options: &JsValue) -> VisNetwork;
-
-    #[wasm_bindgen(method, js_name = setData)]
-    fn set_data(this: &VisNetwork, data: &JsValue);
-
-    #[wasm_bindgen(method)]
-    fn on(this: &VisNetwork, event: &str, callback: &Closure<dyn FnMut(JsValue)>);
-
-    #[wasm_bindgen(method)]
-    fn destroy(this: &VisNetwork);
-
-    #[wasm_bindgen(method)]
-    fn fit(this: &VisNetwork);
-}
-
-/// Graph visualization component wrapping vis.js Network.
+/// Graph visualization component wrapping 3d-force-graph via JS bridge.
 #[component]
 pub fn GraphCanvas(
-    /// JSON array of nodes: [{id, label, ...}]
+    /// JSON array of nodes: [{id, label, color, size, title}]
     #[prop(into)] nodes: Signal<Vec<serde_json::Value>>,
-    /// JSON array of edges: [{from, to, label, ...}]
+    /// JSON array of edges: [{from, to, label, title}]
     #[prop(into)] edges: Signal<Vec<serde_json::Value>>,
     /// Callback when a node is clicked
     #[prop(optional)] on_select_node: Option<Callback<String>>,
+    /// Callback when a node is right-clicked (expand)
+    #[prop(optional)] on_double_click: Option<Callback<String>>,
 ) -> impl IntoView {
     let container_ref = NodeRef::<leptos::html::Div>::new();
 
-    // Use Rc<RefCell> to hold the vis.js network instance (not Send+Sync, WASM is single-threaded)
-    let network = std::rc::Rc::new(std::cell::RefCell::new(Option::<VisNetwork>::None));
-
-    let network_clone = network.clone();
     Effect::new(move |_| {
-        let network = &network_clone;
         let Some(el) = container_ref.get() else { return };
         let el: &web_sys::HtmlElement = &el;
 
-        // Build nodes and edges arrays
-        let node_data = serde_json::to_string(&nodes.get()).unwrap_or_default();
-        let edge_data = serde_json::to_string(&edges.get()).unwrap_or_default();
+        let cur_nodes = nodes.get();
+        let cur_edges = edges.get();
 
-        let node_js = js_sys::JSON::parse(&node_data).unwrap_or(JsValue::NULL);
-        let edge_js = js_sys::JSON::parse(&edge_data).unwrap_or(JsValue::NULL);
-
-        // Build data object: { nodes: [...], edges: [...] }
-        let data = js_sys::Object::new();
-        let _ = js_sys::Reflect::set(&data, &"nodes".into(), &node_js);
-        let _ = js_sys::Reflect::set(&data, &"edges".into(), &edge_js);
-
-        // Options
-        let options_str = r#"{
-            "physics": { "stabilization": { "iterations": 100 } },
-            "nodes": {
-                "shape": "dot",
-                "size": 16,
-                "font": { "size": 14 },
-                "borderWidth": 2
-            },
-            "edges": {
-                "arrows": "to",
-                "font": { "size": 12, "align": "middle" },
-                "smooth": { "type": "curvedCW", "roundness": 0.2 }
-            },
-            "interaction": { "hover": true, "tooltipDelay": 200 }
-        }"#;
-        let options = js_sys::JSON::parse(options_str).unwrap_or(JsValue::NULL);
-
-        // Destroy previous instance
-        if let Some(old) = network.borrow_mut().take() {
-            old.destroy();
+        if cur_nodes.is_empty() {
+            // Destroy graph if empty
+            let _ = js_sys::eval("window.__engram_graph && window.__engram_graph.destroy()");
+            return;
         }
 
-        let net = VisNetwork::new(el, &data.into(), &options);
+        // Transform edges: 3d-force-graph uses "source"/"target" not "from"/"to"
+        let links: Vec<serde_json::Value> = cur_edges.iter().map(|e| {
+            serde_json::json!({
+                "source": e.get("from").and_then(|v| v.as_str()).unwrap_or(""),
+                "target": e.get("to").and_then(|v| v.as_str()).unwrap_or(""),
+                "label": e.get("label").and_then(|v| v.as_str()).unwrap_or(""),
+            })
+        }).collect();
 
-        // Node click handler
-        if let Some(cb) = on_select_node {
-            let closure = Closure::wrap(Box::new(move |params: JsValue| {
-                if let Ok(nodes_val) = js_sys::Reflect::get(&params, &"nodes".into()) {
-                    if let Some(arr) = nodes_val.dyn_ref::<js_sys::Array>() {
-                        if let Some(first) = arr.get(0).as_string() {
-                            cb.run(first);
-                        }
-                    }
-                }
-            }) as Box<dyn FnMut(JsValue)>);
-            net.on("click", &closure);
-            closure.forget();
+        let nodes_json = serde_json::to_string(&cur_nodes).unwrap_or_default();
+        let links_json = serde_json::to_string(&links).unwrap_or_default();
+
+        // Create click callback
+        let click_cb: Option<Closure<dyn FnMut(String)>> = on_select_node.map(|cb| {
+            Closure::wrap(Box::new(move |node_id: String| {
+                cb.run(node_id);
+            }) as Box<dyn FnMut(String)>)
+        });
+
+        // Create right-click (expand) callback
+        let dbl_cb: Option<Closure<dyn FnMut(String)>> = on_double_click.map(|cb| {
+            Closure::wrap(Box::new(move |node_id: String| {
+                cb.run(node_id);
+            }) as Box<dyn FnMut(String)>)
+        });
+
+        // Call the JS bridge
+        let bridge = js_sys::Reflect::get(
+            &wasm_bindgen::JsValue::from(web_sys::window().unwrap()),
+            &"__engram_graph".into(),
+        ).unwrap_or(JsValue::NULL);
+
+        if !bridge.is_null() && !bridge.is_undefined() {
+            let create_fn = js_sys::Reflect::get(&bridge, &"create".into())
+                .unwrap_or(JsValue::NULL);
+            if let Some(func) = create_fn.dyn_ref::<js_sys::Function>() {
+                let click_js = click_cb.as_ref()
+                    .map(|c| c.as_ref().clone())
+                    .unwrap_or(JsValue::NULL);
+                let dbl_js = dbl_cb.as_ref()
+                    .map(|c| c.as_ref().clone())
+                    .unwrap_or(JsValue::NULL);
+
+                let _ = func.call5(
+                    &bridge,
+                    &el.into(),
+                    &nodes_json.into(),
+                    &links_json.into(),
+                    &click_js,
+                    &dbl_js,
+                );
+            }
         }
 
-        *network.borrow_mut() = Some(net);
+        // Prevent closures from being dropped
+        if let Some(c) = click_cb { c.forget(); }
+        if let Some(c) = dbl_cb { c.forget(); }
     });
 
-    // In WASM, page lifetime is managed by the browser; no on_cleanup needed.
-
     view! {
-        <div node_ref=container_ref class="graph-container" style="width: 100%; height: 600px;"></div>
+        <div node_ref=container_ref class="graph-container-canvas" style="width: 100%; height: 100%; min-height: 500px;"></div>
     }
 }

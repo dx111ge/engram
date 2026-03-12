@@ -294,6 +294,21 @@ pub fn tool_definitions() -> Value {
                         "required": ["label"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "engram_analyze_relations",
+                    "description": "Extract entities and relations from text without storing (dry-run preview)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string", "description": "Text to analyze for entities and relations" },
+                            "skip": { "type": "array", "items": { "type": "string" }, "description": "Pipeline stages to skip" }
+                        },
+                        "required": ["text"]
+                    }
+                }
             }
         ]
     })

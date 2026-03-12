@@ -6,9 +6,89 @@
   <title>engram - Knowledge Graph</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <link data-trunk rel="css" href="css/style.css">
-  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  <script src="https://unpkg.com/3d-force-graph@1"></script>
 </head>
 <body>
   <!-- Leptos mounts here -->
+  <script>
+    // Bridge for WASM: 3d-force-graph has a fluent API that's hard to call from wasm_bindgen,
+    // so we expose simple functions that WASM can call via js_sys.
+    window.__engram_graph = {
+      instance: null,
+
+      create: function(container, nodesJson, linksJson, onClickCb, onDblClickCb) {
+        if (this.instance) {
+          this.instance._destructor && this.instance._destructor();
+          container.innerHTML = '';
+        }
+
+        var nodes = JSON.parse(nodesJson);
+        var links = JSON.parse(linksJson);
+
+        var graph = ForceGraph3D()(container)
+          .backgroundColor('rgba(0,0,0,0)')
+          .width(container.clientWidth)
+          .height(container.clientHeight)
+          .graphData({ nodes: nodes, links: links })
+          .nodeLabel(function(n) { return n.label + (n.title ? ' — ' + n.title : ''); })
+          .nodeColor(function(n) { return n.color || '#4a9eff'; })
+          .nodeVal(function(n) { return n.size || 4; })
+          .nodeOpacity(0.9)
+          .linkLabel(function(l) { return l.label || ''; })
+          .linkColor(function() { return 'rgba(74, 158, 255, 0.4)'; })
+          .linkWidth(1.5)
+          .linkDirectionalArrowLength(4)
+          .linkDirectionalArrowRelPos(1)
+          .linkCurvature(0.1)
+          .onNodeClick(function(node) {
+            if (onClickCb && node.id) onClickCb(node.id);
+            // Focus on clicked node
+            var distance = 120;
+            var distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z);
+            graph.cameraPosition(
+              { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
+              node, 1000
+            );
+          })
+          .onNodeDragEnd(function(node) {
+            node.fx = node.x;
+            node.fy = node.y;
+            node.fz = node.z;
+          });
+
+        if (onDblClickCb) {
+          graph.onNodeRightClick(function(node) {
+            if (node.id) onDblClickCb(node.id);
+          });
+        }
+
+        // Responsive resize
+        var ro = new ResizeObserver(function() {
+          graph.width(container.clientWidth);
+          graph.height(container.clientHeight);
+        });
+        ro.observe(container);
+
+        this.instance = graph;
+        this.instance._resizeObserver = ro;
+        this.instance._destructor = function() { ro.disconnect(); };
+      },
+
+      update: function(nodesJson, linksJson) {
+        if (!this.instance) return;
+        var nodes = JSON.parse(nodesJson);
+        var links = JSON.parse(linksJson);
+        this.instance.graphData({ nodes: nodes, links: links });
+      },
+
+      destroy: function() {
+        if (this.instance) {
+          this.instance._destructor && this.instance._destructor();
+          this.instance._destructor = null;
+          this.instance = null;
+        }
+      }
+    };
+  </script>
 </body>
 </html>

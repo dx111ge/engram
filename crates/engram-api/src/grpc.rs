@@ -514,6 +514,7 @@ mod stream_service {
 
             Ok(Response::new(proto::BulkIngestResponse {
                 ingested,
+                relations_created: 0, // bulk ingest doesn't run relation extraction yet
                 errors,
                 duration_ms: start.elapsed().as_millis() as u64,
             }))

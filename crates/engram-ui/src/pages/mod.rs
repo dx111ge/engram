@@ -10,3 +10,7 @@ pub mod actions;
 pub mod gaps;
 pub mod mesh;
 pub mod not_found;
+pub mod system;
+pub mod security;
+pub mod node;
+pub mod insights;

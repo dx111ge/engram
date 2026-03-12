@@ -276,6 +276,41 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "engram_analyze_relations",
+                "description": "Extract relations from text without storing (dry-run). Returns entities + relations with confidence scores.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "Text to analyze for entities and relations" },
+                        "skip": { "type": "array", "items": { "type": "string" }, "description": "Stages to skip" }
+                    },
+                    "required": ["text"]
+                }
+            },
+            {
+                "name": "engram_kge_train",
+                "description": "Trigger KGE (RotatE) training on the current graph. Builds relation prediction embeddings.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "epochs": { "type": "integer", "description": "Training epochs (default: 100)" }
+                    }
+                }
+            },
+            {
+                "name": "engram_kge_predict",
+                "description": "Predict relations between two entities using KGE embeddings.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string", "description": "Head entity" },
+                        "to": { "type": "string", "description": "Tail entity" },
+                        "min_confidence": { "type": "number", "description": "Minimum confidence (default: 0.1)" }
+                    },
+                    "required": ["from", "to"]
+                }
+            },
+            {
                 "name": "engram_create_rule",
                 "description": "Create an action engine rule that triggers on graph events. Restricted tool — requires opt-in.",
                 "inputSchema": {
@@ -784,6 +819,131 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
                     .filter(|e| e.relationship == "watches").map(|e| e.to.clone()).collect();
                 Ok(serde_json::json!({ "assessment": label, "watches": watches }))
             }
+        }
+
+        #[cfg(feature = "ingest")]
+        "engram_analyze_relations" => {
+            let text = args["text"].as_str().ok_or("missing text")?;
+
+            let mut stages = engram_ingest::types::StageConfig::default();
+            if let Some(skip) = args.get("skip").and_then(|v| v.as_array()) {
+                for s in skip {
+                    if let Some(name) = s.as_str() {
+                        stages.apply_skip(name);
+                    }
+                }
+            }
+
+            let config = engram_ingest::PipelineConfig {
+                stages,
+                ..Default::default()
+            };
+
+            let graph_clone = state.graph.clone();
+            let text_owned = text.to_string();
+            let result = std::thread::spawn(move || {
+                let pipeline = crate::handlers::build_pipeline_mcp(graph_clone, config, None);
+                let items = vec![engram_ingest::types::RawItem {
+                    content: engram_ingest::types::Content::Text(text_owned),
+                    source_url: None,
+                    source_name: "mcp-analyze".into(),
+                    fetched_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                    metadata: Default::default(),
+                }];
+                pipeline.analyze(items)
+            })
+            .join()
+            .map_err(|_| "analyze thread panicked".to_string())?
+            .map_err(|e| e.to_string())?;
+
+            let entities: Vec<Value> = result.entities.iter().map(|e| {
+                serde_json::json!({
+                    "text": e.text,
+                    "type": e.entity_type,
+                    "confidence": e.confidence,
+                    "method": format!("{:?}", e.method),
+                    "resolved_to": e.resolved_to,
+                })
+            }).collect();
+
+            let relations: Vec<Value> = result.relations.iter().map(|r| {
+                serde_json::json!({
+                    "from": r.from,
+                    "to": r.to,
+                    "rel_type": r.rel_type,
+                    "confidence": r.confidence,
+                    "method": format!("{:?}", r.method),
+                })
+            }).collect();
+
+            Ok(serde_json::json!({
+                "entities": entities,
+                "relations": relations,
+                "language": result.language,
+                "duration_ms": result.duration_ms,
+            }))
+        }
+
+        #[cfg(feature = "ingest")]
+        "engram_kge_train" => {
+            let epochs = args.get("epochs").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
+            let graph_clone = state.graph.clone();
+
+            let brain_path = {
+                let g = state.graph.read().map_err(|_| "graph lock poisoned".to_string())?;
+                g.path().to_path_buf()
+            };
+
+            let stats = std::thread::spawn(move || {
+                let mut model = engram_ingest::KgeModel::load(&brain_path, engram_ingest::KgeConfig::default())
+                    .unwrap_or_else(|_| engram_ingest::KgeModel::new(&brain_path, engram_ingest::KgeConfig::default()));
+                let g = graph_clone.read().map_err(|_| "graph lock poisoned".to_string())?;
+                let stats = model.train_full(&g, epochs).map_err(|e| e.to_string())?;
+                drop(g);
+                model.save().map_err(|e| e.to_string())?;
+                Ok::<_, String>(stats)
+            })
+            .join()
+            .map_err(|_| "kge training thread panicked".to_string())?
+            .map_err(|e| e)?;
+
+            Ok(serde_json::json!({
+                "epochs_completed": stats.epochs_completed,
+                "final_loss": stats.final_loss,
+                "entity_count": stats.entity_count,
+                "relation_type_count": stats.relation_type_count,
+            }))
+        }
+
+        #[cfg(feature = "ingest")]
+        "engram_kge_predict" => {
+            let from = args["from"].as_str().ok_or("missing from")?;
+            let to = args["to"].as_str().ok_or("missing to")?;
+            let min_conf = args.get("min_confidence").and_then(|v| v.as_f64()).unwrap_or(0.1) as f32;
+
+            let brain_path = {
+                let g = state.graph.read().map_err(|_| "graph lock poisoned".to_string())?;
+                g.path().to_path_buf()
+            };
+
+            let model = engram_ingest::KgeModel::load(&brain_path, engram_ingest::KgeConfig::default())
+                .map_err(|e| e.to_string())?;
+
+            let predictions = model.predict(from, to, min_conf);
+
+            let results: Vec<Value> = predictions.iter().map(|(rel, conf)| {
+                serde_json::json!({ "rel_type": rel, "confidence": conf })
+            }).collect();
+
+            Ok(serde_json::json!({
+                "from": from,
+                "to": to,
+                "predictions": results,
+                "trained": model.is_trained(),
+            }))
         }
 
         _ => Err(format!("unknown tool: {name}")),

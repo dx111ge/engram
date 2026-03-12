@@ -33,6 +33,23 @@ pub struct ComputeInfo {
     pub embedder_endpoint: Option<String>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct KbEndpointConfig {
+    pub name: String,
+    pub url: String,
+    #[serde(default = "default_auth_none")]
+    pub auth_type: String,
+    pub auth_secret_key: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub entity_link_template: Option<String>,
+    pub relation_query_template: Option<String>,
+    pub max_lookups_per_call: Option<u32>,
+}
+
+fn default_auth_none() -> String { "none".to_string() }
+fn default_true() -> bool { true }
+
 /// Runtime configuration for LLM, embedder, and pipeline settings.
 /// Persisted to a `.brain.config` JSON sidecar file.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -61,6 +78,8 @@ pub struct EngineConfig {
     pub mesh_topology: Option<String>,
     /// Vector quantization enabled (int8). Defaults to true.
     pub quantization_enabled: Option<bool>,
+    /// Knowledge base endpoints (SPARQL, etc.).
+    pub kb_endpoints: Option<Vec<KbEndpointConfig>>,
 }
 
 impl EngineConfig {
@@ -128,6 +147,9 @@ impl EngineConfig {
         }
         if other.quantization_enabled.is_some() {
             self.quantization_enabled = other.quantization_enabled;
+        }
+        if other.kb_endpoints.is_some() {
+            self.kb_endpoints = other.kb_endpoints.clone();
         }
     }
 }

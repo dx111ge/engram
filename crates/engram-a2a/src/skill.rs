@@ -34,27 +34,94 @@ pub fn route_task(
 }
 
 /// Store knowledge — handles both text and structured input.
+///
+/// When the `ingest` feature is enabled, text input goes through the full
+/// ingest pipeline (NER, entity resolution, relation extraction, dedup).
+/// Structured input (direct entity data) bypasses the pipeline.
 fn handle_store(task_id: &str, message: &TaskMessage, graph: &Arc<RwLock<Graph>>) -> TaskResponse {
-    let mut g = match graph.write() {
-        Ok(g) => g,
-        Err(_) => return TaskResponse::failed(task_id, "graph write lock poisoned"),
-    };
-    let prov = Provenance::user("a2a");
     let text = message.text();
 
-    // Check for structured data input
+    // Structured data input — direct graph write, no pipeline needed
     if let Some(data) = message.data() {
+        let mut g = match graph.write() {
+            Ok(g) => g,
+            Err(_) => return TaskResponse::failed(task_id, "graph write lock poisoned"),
+        };
+        let prov = Provenance::user("a2a");
         return handle_store_structured(task_id, data, &mut g, &prov);
     }
 
-    // Natural language store via the tell handler
-    let result = engram_api::natural::handle_tell(&mut g, &text, Some("a2a"));
-    TaskResponse::completed(task_id, vec![
-        Artifact::json(serde_json::json!({
-            "action": "store",
-            "result": serde_json::to_value(&result).unwrap_or_default(),
-        })),
-    ])
+    // Text input — use ingest pipeline when available
+    #[cfg(feature = "ingest")]
+    {
+        return handle_store_via_pipeline(task_id, &text, graph);
+    }
+
+    // Fallback when ingest feature is not enabled
+    #[cfg(not(feature = "ingest"))]
+    {
+        let mut g = match graph.write() {
+            Ok(g) => g,
+            Err(_) => return TaskResponse::failed(task_id, "graph write lock poisoned"),
+        };
+        let result = engram_api::natural::handle_tell(&mut g, &text, Some("a2a"));
+        TaskResponse::completed(task_id, vec![
+            Artifact::json(serde_json::json!({
+                "action": "store",
+                "result": serde_json::to_value(&result).unwrap_or_default(),
+            })),
+        ])
+    }
+}
+
+/// Run text through the full ingest pipeline (NER + relation extraction + resolution).
+#[cfg(feature = "ingest")]
+fn handle_store_via_pipeline(task_id: &str, text: &str, graph: &Arc<RwLock<Graph>>) -> TaskResponse {
+    use engram_ingest::{PipelineConfig, types::{Content, RawItem, StageConfig}};
+    use std::collections::HashMap;
+
+    if text.trim().is_empty() {
+        return TaskResponse::failed(task_id, "empty text");
+    }
+
+    let config = PipelineConfig {
+        name: "a2a-ingest".into(),
+        stages: StageConfig::default(),
+        ..Default::default()
+    };
+
+    let pipeline = engram_api::handlers::build_pipeline_mcp(graph.clone(), config, None);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64;
+
+    let items = vec![RawItem {
+        content: Content::Text(text.to_string()),
+        source_url: None,
+        source_name: "a2a".into(),
+        fetched_at: now,
+        metadata: HashMap::new(),
+    }];
+
+    match pipeline.execute(items) {
+        Ok(result) => {
+            TaskResponse::completed(task_id, vec![
+                Artifact::json(serde_json::json!({
+                    "action": "store",
+                    "pipeline": "ingest",
+                    "facts_stored": result.facts_stored,
+                    "relations_created": result.relations_created,
+                    "facts_resolved": result.facts_resolved,
+                    "facts_deduped": result.facts_deduped,
+                    "duration_ms": result.duration_ms,
+                    "errors": result.errors,
+                })),
+            ])
+        }
+        Err(e) => TaskResponse::failed(task_id, &format!("ingest pipeline error: {e}")),
+    }
 }
 
 fn handle_store_structured(

@@ -1668,11 +1668,23 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
 
 // ── POST /ingest — ingest pipeline ──
 
+/// Build a pipeline with all available NER + relation extraction backends wired up.
+/// Public for MCP tool access.
+#[cfg(feature = "ingest")]
+pub fn build_pipeline_mcp(
+    graph: std::sync::Arc<std::sync::RwLock<engram_core::graph::Graph>>,
+    config: engram_ingest::PipelineConfig,
+    kb_endpoints: Option<Vec<crate::state::KbEndpointConfig>>,
+) -> engram_ingest::Pipeline {
+    build_pipeline(graph, config, kb_endpoints)
+}
+
 /// Build a pipeline with all available NER backends wired up.
 #[cfg(feature = "ingest")]
 fn build_pipeline(
     graph: std::sync::Arc<std::sync::RwLock<engram_core::graph::Graph>>,
     config: engram_ingest::PipelineConfig,
+    kb_endpoints: Option<Vec<crate::state::KbEndpointConfig>>,
 ) -> engram_ingest::Pipeline {
     use engram_ingest::{NerChain, ChainStrategy};
 
@@ -1732,6 +1744,63 @@ fn build_pipeline(
     // Add language detector
     pipeline.set_language_detector(Box::new(engram_ingest::DefaultLanguageDetector::default()));
 
+    // ── Relation extraction chain (MergeAll: KB + gazetteer + KGE + optional GLiREL) ──
+    let mut rel_chain = engram_ingest::RelationChain::new(0.15);
+
+    // 0. Knowledge Base (SPARQL) — bootstraps empty graphs
+    if let Some(ref endpoints) = kb_endpoints {
+        let enabled: Vec<engram_ingest::KbEndpoint> = endpoints
+            .iter()
+            .filter(|e| e.enabled)
+            .map(|e| engram_ingest::KbEndpoint {
+                name: e.name.clone(),
+                url: e.url.clone(),
+                auth_type: e.auth_type.clone(),
+                auth_header: e.auth_secret_key.clone(),
+                entity_link_template: e.entity_link_template.clone(),
+                relation_query_template: e.relation_query_template.clone(),
+                max_lookups: e.max_lookups_per_call.unwrap_or(50),
+            })
+            .collect();
+
+        if !enabled.is_empty() {
+            tracing::info!(count = enabled.len(), "KB relation extractor enabled");
+            rel_chain.add_backend(Box::new(
+                engram_ingest::KbRelationExtractor::new(enabled, graph.clone()),
+            ));
+        }
+    }
+
+    // 1. Relation gazetteer (known graph edges)
+    {
+        let brain_path = {
+            let g = graph.read().unwrap();
+            g.path().to_path_buf()
+        };
+        let mut rel_gaz = engram_ingest::RelationGazetteer::new(&brain_path);
+        {
+            let g = graph.read().unwrap();
+            rel_gaz.build_from_graph(&g);
+        }
+        let rel_gaz = std::sync::Arc::new(tokio::sync::RwLock::new(rel_gaz));
+        rel_chain.add_backend(Box::new(engram_ingest::RelationGazetteerExtractor::new(rel_gaz)));
+    }
+
+    // 2. KGE (RotatE) link prediction
+    {
+        let brain_path = {
+            let g = graph.read().unwrap();
+            g.path().to_path_buf()
+        };
+        let kge = engram_ingest::KgeModel::load(&brain_path, engram_ingest::KgeConfig::default())
+            .unwrap_or_else(|_| engram_ingest::KgeModel::new(&brain_path, engram_ingest::KgeConfig::default()));
+        let kge = std::sync::Arc::new(std::sync::RwLock::new(kge));
+        rel_chain.add_backend(Box::new(engram_ingest::KgeRelationExtractor::new(kge)));
+    }
+
+    tracing::info!("Relation chain: MergeAll with {} backends", rel_chain.backend_count());
+    pipeline.add_relation_extractor(Box::new(rel_chain));
+
     pipeline
 }
 
@@ -1764,7 +1833,8 @@ pub async fn ingest(
         ..Default::default()
     };
 
-    let pipeline = build_pipeline(state.graph.clone(), config);
+    let kb_endpoints = state.config.read().unwrap().kb_endpoints.clone();
+    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints);
 
     // Convert IngestItems to RawItems
     let items: Vec<engram_ingest::types::RawItem> = req.items
@@ -1818,6 +1888,15 @@ pub async fn ingest(
         errors: result.errors,
         duration_ms: result.duration_ms,
         stages_skipped: skipped_names,
+        warnings: result.warnings,
+        kb_stats: result.kb_stats.map(|s| KbStatsResponse {
+            endpoint: s.endpoint,
+            entities_linked: s.entities_linked,
+            entities_not_found: s.entities_not_found,
+            relations_found: s.relations_found,
+            errors: s.errors,
+            lookup_ms: s.lookup_ms,
+        }),
     }))
 }
 
@@ -1836,7 +1915,8 @@ pub async fn ingest_analyze(
     use engram_ingest::PipelineConfig;
 
     let config = PipelineConfig::default();
-    let pipeline = build_pipeline(state.graph.clone(), config);
+    let kb_endpoints = state.config.read().unwrap().kb_endpoints.clone();
+    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints);
 
     let items = vec![engram_ingest::types::RawItem {
         content: engram_ingest::types::Content::Text(req.text),
@@ -1869,10 +1949,24 @@ pub async fn ingest_analyze(
         })
         .collect();
 
+    let relations = result
+        .relations
+        .into_iter()
+        .map(|r| AnalyzeRelationResponse {
+            from: r.from,
+            to: r.to,
+            rel_type: r.rel_type,
+            confidence: r.confidence,
+            method: format!("{:?}", r.method),
+        })
+        .collect();
+
     Ok(Json(AnalyzeResponse {
         entities,
+        relations,
         language: result.language,
         duration_ms: result.duration_ms,
+        warnings: result.warnings,
     }))
 }
 
@@ -1912,7 +2006,8 @@ pub async fn ingest_file(
         ..Default::default()
     };
 
-    let pipeline = build_pipeline(state.graph.clone(), config);
+    let kb_endpoints = state.config.read().unwrap().kb_endpoints.clone();
+    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints);
 
     // Try to parse body as UTF-8 text
     let text = String::from_utf8(body.to_vec())
@@ -1954,6 +2049,15 @@ pub async fn ingest_file(
         errors: result.errors,
         duration_ms: result.duration_ms,
         stages_skipped: skipped_names,
+        warnings: result.warnings,
+        kb_stats: result.kb_stats.map(|s| KbStatsResponse {
+            endpoint: s.endpoint,
+            entities_linked: s.entities_linked,
+            entities_not_found: s.entities_not_found,
+            relations_found: s.relations_found,
+            errors: s.errors,
+            lookup_ms: s.lookup_ms,
+        }),
     }))
 }
 
@@ -3805,5 +3909,378 @@ pub async fn check_secret(
         Ok(Json(serde_json::json!({ "key": key, "exists": s.has(&key) })))
     } else {
         Ok(Json(serde_json::json!({ "key": key, "exists": false })))
+    }
+}
+
+// ── POST /config/rel-download — Download GLiREL model from HuggingFace ──
+
+pub async fn download_rel_model(
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    use tokio::io::AsyncWriteExt;
+
+    let model_id = body["model_id"].as_str()
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "model_id required"))?;
+    let model_url = body["model_url"].as_str()
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "model_url required"))?;
+    let tokenizer_url = body["tokenizer_url"].as_str()
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "tokenizer_url required"))?;
+
+    for url in [model_url, tokenizer_url] {
+        if !url.starts_with("https://huggingface.co/") {
+            return Err(api_err(StatusCode::BAD_REQUEST, "only HuggingFace URLs are allowed"));
+        }
+    }
+
+    if model_id.contains("..") || model_id.contains('/') || model_id.contains('\\') {
+        return Err(api_err(StatusCode::BAD_REQUEST, "invalid model_id"));
+    }
+
+    let home = dirs_next_home()
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
+    let model_dir = home.join(".engram").join("models").join("rel").join(model_id);
+    tokio::fs::create_dir_all(&model_dir).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create dir failed: {e}")))?;
+
+    let model_path = model_dir.join("model.onnx");
+    let tokenizer_path = model_dir.join("tokenizer.json");
+
+    let client = reqwest::Client::new();
+
+    tracing::info!("REL: downloading tokenizer from {}", tokenizer_url);
+    let resp = client.get(tokenizer_url).send().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("tokenizer download failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(api_err(StatusCode::BAD_GATEWAY, format!("tokenizer download returned {}", resp.status())));
+    }
+    let tokenizer_bytes = resp.bytes().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("tokenizer read failed: {e}")))?;
+    tokio::fs::write(&tokenizer_path, &tokenizer_bytes).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write tokenizer failed: {e}")))?;
+
+    tracing::info!("REL: downloading model from {}", model_url);
+    let resp = client.get(model_url).send().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("model download failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(api_err(StatusCode::BAD_GATEWAY, format!("model download returned {}", resp.status())));
+    }
+    let content_length = resp.content_length().unwrap_or(0);
+
+    let mut file = tokio::fs::File::create(&model_path).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create model file failed: {e}")))?;
+
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    use futures::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("download stream error: {e}")))?;
+        file.write_all(&chunk).await
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write model failed: {e}")))?;
+        downloaded += chunk.len() as u64;
+    }
+    file.flush().await.map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("flush failed: {e}")))?;
+
+    tracing::info!("REL: downloaded {} MB model to {}", downloaded / 1_048_576, model_dir.display());
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "model_id": model_id,
+        "model_dir": model_dir.to_string_lossy(),
+        "model_size_mb": downloaded as f64 / 1_048_576.0,
+        "content_length_mb": content_length as f64 / 1_048_576.0,
+    })))
+}
+
+/// GET /config/rel-model?id={model_id} — Check if a GLiREL model is installed.
+pub async fn check_rel_model(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<serde_json::Value> {
+    let model_id = params.get("id")
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "id query parameter required"))?;
+
+    let home = dirs_next_home()
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
+    let model_dir = home.join(".engram").join("models").join("rel").join(model_id);
+
+    let has_model = model_dir.join("model.onnx").exists();
+    let has_tokenizer = model_dir.join("tokenizer.json").exists();
+    let ready = has_model && has_tokenizer;
+
+    let model_size = if has_model {
+        std::fs::metadata(model_dir.join("model.onnx"))
+            .map(|m| m.len() as f64 / 1_048_576.0)
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    Ok(Json(serde_json::json!({
+        "model_id": model_id,
+        "ready": ready,
+        "has_model": has_model,
+        "has_tokenizer": has_tokenizer,
+        "model_size_mb": model_size,
+        "model_dir": model_dir.to_string_lossy(),
+    })))
+}
+
+/// POST /kge/train — Trigger KGE (RotatE) training on current graph.
+#[cfg(feature = "ingest")]
+pub async fn kge_train(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let epochs = body.get("epochs").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
+
+    let graph = state.graph.clone();
+    let brain_path = {
+        let g = graph.read().map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "graph lock poisoned"))?;
+        g.path().to_path_buf()
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let mut model = engram_ingest::KgeModel::load(&brain_path, engram_ingest::KgeConfig::default())
+            .unwrap_or_else(|_| engram_ingest::KgeModel::new(&brain_path, engram_ingest::KgeConfig::default()));
+
+        let g = graph.read().map_err(|_| "graph lock poisoned".to_string())?;
+        let stats = model.train_full(&g, epochs).map_err(|e| e.to_string())?;
+        drop(g);
+
+        model.save().map_err(|e| e.to_string())?;
+
+        Ok::<_, String>(stats)
+    })
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "epochs_completed": result.epochs_completed,
+        "final_loss": result.final_loss,
+        "entity_count": result.entity_count,
+        "relation_type_count": result.relation_type_count,
+    })))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn kge_train() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled".into() }))
+}
+
+// ── POST /admin/reset ──
+
+pub async fn admin_reset(
+    State(state): State<AppState>,
+) -> ApiResult<ResetResponse> {
+    let brain_path = {
+        let g = state.graph.read().map_err(|_| read_lock_err())?;
+        g.path().to_path_buf()
+    };
+
+    {
+        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+        g.reset().map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        g.checkpoint().map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    let sidecars_cleaned = cleanup_sidecars(&brain_path);
+
+    Ok(Json(ResetResponse {
+        success: true,
+        sidecars_cleaned,
+    }))
+}
+
+fn cleanup_sidecars(brain_path: &std::path::Path) -> Vec<String> {
+    let mut cleaned = Vec::new();
+    let delete_extensions = [
+        "props", "types", "vectors", "cooccur", "wal", "rules",
+        "schedules", "peers", "audit", "assessments", "relgaz", "kge",
+        "ledger",
+    ];
+    for ext in &delete_extensions {
+        let sidecar = brain_path.with_extension(ext);
+        if sidecar.exists() {
+            if std::fs::remove_file(&sidecar).is_ok() {
+                cleaned.push(ext.to_string());
+            }
+        }
+    }
+    cleaned
+}
+
+// ── GET /config/status ──
+
+pub async fn config_status(
+    State(state): State<AppState>,
+) -> ApiResult<ConfigStatusResponse> {
+    let cfg = state.config.read().map_err(|_| read_lock_err())?;
+    let mut configured = Vec::new();
+    let mut missing = Vec::new();
+    let mut warnings = Vec::new();
+
+    // Check embedder
+    if cfg.embed_endpoint.is_some() {
+        configured.push("embed_endpoint".to_string());
+    } else {
+        missing.push("embed_endpoint".to_string());
+    }
+
+    // Check LLM
+    if cfg.llm_endpoint.is_some() {
+        configured.push("llm_endpoint".to_string());
+    } else {
+        missing.push("llm_endpoint".to_string());
+    }
+
+    // Check NER
+    if cfg.ner_provider.is_some() {
+        configured.push("ner_provider".to_string());
+    } else {
+        warnings.push("ner_provider not set -- NER will use fallback chain only".to_string());
+    }
+
+    // Check KB endpoints
+    if let Some(ref kbs) = cfg.kb_endpoints {
+        if !kbs.is_empty() {
+            configured.push(format!("kb_endpoints ({})", kbs.len()));
+        }
+    }
+
+    let (node_count, edge_count) = {
+        let g = state.graph.read().map_err(|_| read_lock_err())?;
+        g.stats()
+    };
+
+    let ready = cfg.embed_endpoint.is_some();
+
+    Ok(Json(ConfigStatusResponse {
+        configured,
+        missing,
+        warnings,
+        ready,
+        node_count,
+        edge_count,
+        is_empty_graph: node_count == 0 && edge_count == 0,
+    }))
+}
+
+// ── GET /config/kb ──
+
+pub async fn list_kb_endpoints(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let cfg = state.config.read().map_err(|_| read_lock_err())?;
+    let endpoints = cfg.kb_endpoints.clone().unwrap_or_default();
+    Ok(Json(serde_json::json!({ "endpoints": endpoints })))
+}
+
+// ── POST /config/kb ──
+
+pub async fn add_kb_endpoint(
+    State(state): State<AppState>,
+    Json(body): Json<KbEndpointRequest>,
+) -> ApiResult<serde_json::Value> {
+    use crate::state::KbEndpointConfig;
+
+    let kb = KbEndpointConfig {
+        name: body.name.clone(),
+        url: body.url,
+        auth_type: body.auth_type.unwrap_or_else(|| "none".to_string()),
+        auth_secret_key: body.auth_secret_key,
+        enabled: true,
+        entity_link_template: body.entity_link_template,
+        relation_query_template: body.relation_query_template,
+        max_lookups_per_call: body.max_lookups_per_call,
+    };
+
+    {
+        let mut cfg = state.config.write().map_err(|_| write_lock_err())?;
+        let endpoints = cfg.kb_endpoints.get_or_insert_with(Vec::new);
+        // Remove existing with same name
+        endpoints.retain(|e| e.name != kb.name);
+        endpoints.push(kb);
+    }
+
+    state.save_config().map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "added", "name": body.name })))
+}
+
+// ── DELETE /config/kb/{name} ──
+
+pub async fn delete_kb_endpoint(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let mut found = false;
+    {
+        let mut cfg = state.config.write().map_err(|_| write_lock_err())?;
+        if let Some(ref mut endpoints) = cfg.kb_endpoints {
+            let before = endpoints.len();
+            endpoints.retain(|e| e.name != name);
+            found = endpoints.len() < before;
+        }
+    }
+
+    if !found {
+        return Err(api_err(StatusCode::NOT_FOUND, format!("kb endpoint '{}' not found", name)));
+    }
+
+    state.save_config().map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "status": "deleted", "name": name })))
+}
+
+// ── POST /config/kb/{name}/test ──
+
+pub async fn test_kb_endpoint(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<KbTestResponse> {
+    let url = {
+        let cfg = state.config.read().map_err(|_| read_lock_err())?;
+        let endpoints = cfg.kb_endpoints.as_ref().ok_or_else(|| {
+            api_err(StatusCode::NOT_FOUND, "no kb endpoints configured")
+        })?;
+        let ep = endpoints.iter().find(|e| e.name == name).ok_or_else(|| {
+            api_err(StatusCode::NOT_FOUND, format!("kb endpoint '{}' not found", name))
+        })?;
+        ep.url.clone()
+    };
+
+    let start = std::time::Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match client.get(&url).send().await {
+        Ok(resp) => {
+            let latency = start.elapsed().as_millis() as u64;
+            if resp.status().is_success() || resp.status().as_u16() == 400 {
+                // SPARQL endpoints may return 400 for empty query but are reachable
+                Ok(Json(KbTestResponse {
+                    success: true,
+                    latency_ms: Some(latency),
+                    error: None,
+                }))
+            } else {
+                Ok(Json(KbTestResponse {
+                    success: false,
+                    latency_ms: Some(latency),
+                    error: Some(format!("HTTP {}", resp.status())),
+                }))
+            }
+        }
+        Err(e) => {
+            Ok(Json(KbTestResponse {
+                success: false,
+                latency_ms: None,
+                error: Some(e.to_string()),
+            }))
+        }
     }
 }

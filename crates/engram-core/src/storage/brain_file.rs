@@ -290,6 +290,23 @@ impl BrainFile {
         Ok(())
     }
 
+    /// Reset the brain file: zero out node/edge counts and IDs in the header.
+    /// The file capacity and layout are preserved; slots become reusable.
+    pub fn reset(&mut self) -> Result<()> {
+        unsafe {
+            let h = self.mmap.header_mut();
+            h.node_count = 0;
+            h.edge_count = 0;
+            h.next_node_id = 1;
+            h.next_edge_id = 1;
+            h.wal_last_seq = 0;
+            h.checksum = h.compute_checksum();
+        }
+        self.mmap.flush()?;
+        self.wal.truncate()?;
+        Ok(())
+    }
+
     /// Get current stats.
     pub fn stats(&self) -> (u64, u64) {
         let header = self.mmap.read_header();

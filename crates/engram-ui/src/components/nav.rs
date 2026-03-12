@@ -1,26 +1,68 @@
 use leptos::prelude::*;
 use leptos_router::components::A;
 
+use crate::api::ApiClient;
+use crate::api::types::HealthResponse;
+use crate::auth;
+use crate::components::settings::SettingsModal;
+
 #[component]
 pub fn Nav() -> impl IntoView {
-    let (mobile_open, set_mobile_open) = signal(false);
+    let api = use_context::<ApiClient>().expect("ApiClient context");
+    let auth_state = auth::use_auth();
 
-    let toggle_nav = move |_| {
-        set_mobile_open.update(|v| *v = !*v);
-    };
+    let (mobile_open, set_mobile_open) = signal(false);
+    let (settings_open, set_settings_open) = signal(false);
+    let (online, set_online) = signal(false);
+
+    let toggle_nav = move |_| set_mobile_open.update(|v| *v = !*v);
+    let close_nav = move |_| set_mobile_open.set(false);
 
     let nav_class = move || {
-        if mobile_open.get() {
-            "nav-links open"
-        } else {
-            "nav-links"
+        if mobile_open.get() { "nav-links open" } else { "nav-links" }
+    };
+
+    // Health polling (30s interval)
+    let api_health = api.clone();
+    let poll = move || {
+        let api = api_health.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match api.get::<HealthResponse>("/health").await {
+                Ok(_) => set_online.set(true),
+                Err(_) => set_online.set(false),
+            }
+        });
+    };
+    // Initial check
+    poll();
+    // Set interval
+    let poll_clone = poll.clone();
+    gloo_timers::callback::Interval::new(30_000, move || poll_clone()).forget();
+
+    let health_class = move || {
+        if online.get() { "health-dot online" } else { "health-dot offline" }
+    };
+
+    let health_title = move || {
+        if online.get() { "Connected" } else { "Disconnected" }
+    };
+
+    let username = move || {
+        auth_state.get().map(|a| a.username).unwrap_or_default()
+    };
+    let role = move || {
+        auth_state.get().map(|a| a.role).unwrap_or_default()
+    };
+
+    let do_logout = move |_| {
+        auth::clear_storage_pub();
+        if let Some(w) = web_sys::window() {
+            let _ = w.location().reload();
         }
     };
 
-    // Close mobile nav on link click
-    let close_nav = move |_| {
-        set_mobile_open.set(false);
-    };
+    let open_settings = move |_| set_settings_open.set(true);
+    let close_settings = Callback::new(move |_: ()| set_settings_open.set(false));
 
     view! {
         <nav id="main-nav">
@@ -34,25 +76,26 @@ pub fn Nav() -> impl IntoView {
                 <i class="fa-solid fa-bars"></i>
             </button>
             <ul class=nav_class>
-                <li><A href="/" on:click=close_nav><i class="fa-solid fa-gauge"></i>" Dashboard"</A></li>
-                <li><A href="/graph" on:click=close_nav><i class="fa-solid fa-diagram-project"></i>" Graph"</A></li>
-                <li><A href="/search" on:click=close_nav><i class="fa-solid fa-magnifying-glass"></i>" Search"</A></li>
-                <li><A href="/nl" on:click=close_nav><i class="fa-solid fa-comments"></i>" Natural Language"</A></li>
-                <li><A href="/import" on:click=close_nav><i class="fa-solid fa-file-import"></i>" Import"</A></li>
-                <li><A href="/learning" on:click=close_nav><i class="fa-solid fa-graduation-cap"></i>" Learning"</A></li>
-                <li class="nav-separator"></li>
-                <li><A href="/ingest" on:click=close_nav><i class="fa-solid fa-gears"></i>" Ingest"</A></li>
-                <li><A href="/sources" on:click=close_nav><i class="fa-solid fa-plug"></i>" Sources"</A></li>
-                <li><A href="/actions" on:click=close_nav><i class="fa-solid fa-bolt"></i>" Actions"</A></li>
-                <li><A href="/gaps" on:click=close_nav><i class="fa-solid fa-map"></i>" Gaps"</A></li>
-                <li><A href="/mesh" on:click=close_nav><i class="fa-solid fa-network-wired"></i>" Mesh"</A></li>
+                <li><A href="/" on:click=close_nav><i class="fa-solid fa-house"></i>" Home"</A></li>
+                <li><A href="/graph" on:click=close_nav><i class="fa-solid fa-compass"></i>" Explore"</A></li>
+                <li><A href="/insights" on:click=close_nav><i class="fa-solid fa-chart-line"></i>" Insights"</A></li>
+                <li><A href="/security" on:click=close_nav><i class="fa-solid fa-shield-halved"></i>" Security"</A></li>
+                <li><A href="/system" on:click=close_nav><i class="fa-solid fa-sliders"></i>" System"</A></li>
             </ul>
             <div class="nav-status">
-                <span id="health-indicator" class="health-dot offline" title="Checking..."></span>
-                <button class="btn-icon" id="settings-btn" title="API Settings">
+                <div class="nav-user-badge">
+                    <span class="nav-username">{username}</span>
+                    <span class="badge badge-active" style="font-size: 0.65rem;">{role}</span>
+                </div>
+                <span class=health_class title=health_title></span>
+                <button class="btn-icon" on:click=open_settings title="API Settings">
                     <i class="fa-solid fa-gear"></i>
+                </button>
+                <button class="btn-icon" on:click=do_logout title="Logout">
+                    <i class="fa-solid fa-right-from-bracket"></i>
                 </button>
             </div>
         </nav>
+        <SettingsModal open=settings_open on_close=close_settings />
     }
 }

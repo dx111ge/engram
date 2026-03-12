@@ -4,10 +4,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::error::IngestError;
+use crate::rel_traits::{RelationExtractionInput, RelationExtractor};
 use crate::traits::{Extractor, LanguageDetector, Parser, Resolver, Transformer};
 use crate::types::{
-    AnalyzeResult, Content, DetectedLanguage, ExtractionMethod, PipelineConfig, PipelineResult,
-    ProcessedFact, Provenance, RawItem, TransformResult,
+    AnalyzeResult, Content, DetectedLanguage, ExtractedRelation, ExtractionMethod, PipelineConfig,
+    PipelineResult, ProcessedFact, Provenance, RawItem, TransformResult,
 };
 
 /// A parsed text segment with its source metadata preserved.
@@ -33,6 +34,7 @@ pub struct Pipeline {
     extractors: Vec<Box<dyn Extractor>>,
     resolvers: Vec<Box<dyn Resolver>>,
     transformers: Vec<Box<dyn Transformer>>,
+    relation_extractors: Vec<Box<dyn RelationExtractor>>,
 }
 
 impl Pipeline {
@@ -49,6 +51,7 @@ impl Pipeline {
             extractors: Vec::new(),
             resolvers: Vec::new(),
             transformers: Vec::new(),
+            relation_extractors: Vec::new(),
         }
     }
 
@@ -76,6 +79,11 @@ impl Pipeline {
     /// Add a transformer to the post-processing chain.
     pub fn add_transformer(&mut self, transformer: Box<dyn Transformer>) {
         self.transformers.push(transformer);
+    }
+
+    /// Add a relation extractor to the pipeline.
+    pub fn add_relation_extractor(&mut self, extractor: Box<dyn RelationExtractor>) {
+        self.relation_extractors.push(extractor);
     }
 
     /// Get the pipeline configuration.
@@ -158,13 +166,23 @@ impl Pipeline {
                     }
                 }
 
-                // Stage 5: Convert extracted entities to ProcessedFacts
+                // Stage 5: Relation extraction (after NER + resolve, before fact building)
+                let relations = self.run_relation_extraction(&seg.text, &extracted);
+
+                // Stage 6: Convert extracted entities to ProcessedFacts
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
 
-                for entity in extracted {
+                for (eidx, entity) in extracted.iter().enumerate() {
+                    // Attach relations where this entity is the head
+                    let entity_relations: Vec<ExtractedRelation> = relations
+                        .iter()
+                        .filter(|r| r.from == entity.text)
+                        .cloned()
+                        .collect();
+
                     facts.push(ProcessedFact {
                         entity: entity.text.clone(),
                         entity_type: Some(entity.entity_type.clone()),
@@ -180,10 +198,12 @@ impl Pipeline {
                         },
                         extraction_method: entity.method,
                         language: entity.language.clone(),
-                        relations: Vec::new(),
+                        relations: entity_relations,
                         conflicts: Vec::new(),
                         resolution: entity.resolved_to.map(crate::types::ResolutionResult::Matched),
                     });
+
+                    let _ = eidx; // suppress unused warning
                 }
             }
         } else {
@@ -305,33 +325,44 @@ impl Pipeline {
                         }
                     }
 
+                    // Relation extraction
+                    let relations = self.run_relation_extraction(&seg.text, &extracted);
+
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs() as i64;
 
                     extracted
-                        .into_iter()
-                        .map(|entity| ProcessedFact {
-                            entity: entity.text.clone(),
-                            entity_type: Some(entity.entity_type.clone()),
-                            properties: seg.metadata.clone(),
-                            confidence: entity.confidence,
-                            provenance: Provenance {
-                                source: seg.source_name.clone(),
-                                source_url: seg.source_url.clone(),
-                                author: None,
+                        .iter()
+                        .map(|entity| {
+                            let entity_relations: Vec<ExtractedRelation> = relations
+                                .iter()
+                                .filter(|r| r.from == entity.text)
+                                .cloned()
+                                .collect();
+
+                            ProcessedFact {
+                                entity: entity.text.clone(),
+                                entity_type: Some(entity.entity_type.clone()),
+                                properties: seg.metadata.clone(),
+                                confidence: entity.confidence,
+                                provenance: Provenance {
+                                    source: seg.source_name.clone(),
+                                    source_url: seg.source_url.clone(),
+                                    author: None,
+                                    extraction_method: entity.method,
+                                    fetched_at: seg.fetched_at,
+                                    ingested_at: now,
+                                },
                                 extraction_method: entity.method,
-                                fetched_at: seg.fetched_at,
-                                ingested_at: now,
-                            },
-                            extraction_method: entity.method,
-                            language: entity.language.clone(),
-                            relations: Vec::new(),
-                            conflicts: Vec::new(),
-                            resolution: entity
-                                .resolved_to
-                                .map(crate::types::ResolutionResult::Matched),
+                                language: entity.language.clone(),
+                                relations: entity_relations,
+                                conflicts: Vec::new(),
+                                resolution: entity
+                                    .resolved_to
+                                    .map(crate::types::ResolutionResult::Matched),
+                            }
                         })
                         .collect::<Vec<_>>()
                 })
@@ -406,8 +437,10 @@ impl Pipeline {
         if items.is_empty() {
             return Ok(AnalyzeResult {
                 entities: Vec::new(),
+                relations: Vec::new(),
                 language: "en".into(),
                 duration_ms: 0,
+                warnings: Vec::new(),
             });
         }
 
@@ -418,8 +451,10 @@ impl Pipeline {
         if segments.is_empty() {
             return Ok(AnalyzeResult {
                 entities: Vec::new(),
+                relations: Vec::new(),
                 language: "en".into(),
                 duration_ms: start.elapsed().as_millis() as u64,
+                warnings: Vec::new(),
             });
         }
 
@@ -466,10 +501,20 @@ impl Pipeline {
             }
         }
 
+        // Run relation extraction on all extracted entities
+        let text = lang_segments
+            .iter()
+            .map(|(seg, _)| seg.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let relations = self.run_relation_extraction(&text, &entities);
+
         Ok(AnalyzeResult {
             entities,
+            relations,
             language: detected_lang,
             duration_ms: start.elapsed().as_millis() as u64,
+            warnings: Vec::new(),
         })
     }
 
@@ -603,6 +648,58 @@ impl Pipeline {
             }
         }
         Vec::new()
+    }
+
+    /// Run relation extraction on extracted entities.
+    ///
+    /// Only runs if the relation_extract stage is enabled and there are >=2 entities.
+    /// Converts `CandidateRelation` (index-based) to `ExtractedRelation` (label-based).
+    fn run_relation_extraction(
+        &self,
+        text: &str,
+        entities: &[crate::types::ExtractedEntity],
+    ) -> Vec<ExtractedRelation> {
+        if !self.config.stages.relation_extract
+            || self.relation_extractors.is_empty()
+            || entities.len() < 2
+        {
+            return Vec::new();
+        }
+
+        let input = RelationExtractionInput {
+            text: text.to_string(),
+            entities: entities.to_vec(),
+            language: entities
+                .first()
+                .map(|e| e.language.clone())
+                .unwrap_or_else(|| "en".into()),
+        };
+
+        let mut all_relations = Vec::new();
+
+        for extractor in &self.relation_extractors {
+            let candidates = extractor.extract_relations(&input);
+            for candidate in candidates {
+                if candidate.head_idx < entities.len() && candidate.tail_idx < entities.len() {
+                    all_relations.push(ExtractedRelation {
+                        from: entities[candidate.head_idx].text.clone(),
+                        to: entities[candidate.tail_idx].text.clone(),
+                        rel_type: candidate.rel_type,
+                        confidence: candidate.confidence,
+                        method: candidate.method,
+                    });
+                }
+            }
+        }
+
+        if !all_relations.is_empty() {
+            tracing::debug!(
+                relations = all_relations.len(),
+                "relation extraction produced candidates"
+            );
+        }
+
+        all_relations
     }
 
     /// Apply transformers to facts. Drops facts where a transformer returns Drop.

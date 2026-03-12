@@ -41,15 +41,20 @@ pub fn validate_license(key: &str) -> LicenseStatus {
         return LicenseStatus::NoLicense;
     }
 
-    // Decode the key
-    let parts: Vec<&str> = key.split(':').collect();
-    if parts.len() < 3 {
-        return LicenseStatus::InvalidKey;
-    }
-
-    let _email = parts[0];
-    let expiry = parts[1];
-    let signature = parts[2];
+    // Decode the key -- parse from right so colons in email are handled
+    let mut parts = key.rsplitn(3, ':');
+    let signature = match parts.next() {
+        Some(s) => s,
+        None => return LicenseStatus::InvalidKey,
+    };
+    let expiry = match parts.next() {
+        Some(e) => e,
+        None => return LicenseStatus::InvalidKey,
+    };
+    let _email = match parts.next() {
+        Some(e) => e,
+        None => return LicenseStatus::InvalidKey,
+    };
 
     // Check expiry (format: YYYYMMDD)
     if expiry.len() != 8 {
@@ -84,8 +89,9 @@ pub fn is_country_blocked(country_code: &str) -> bool {
 /// Locale formats: "ru-RU", "be-BY", "ko-KP", etc.
 pub fn is_locale_blocked(locale: &str) -> bool {
     let upper = locale.to_uppercase();
+    let lower = locale.to_lowercase();
     for code in BLOCKED_COUNTRIES {
-        if upper.ends_with(code) || upper.starts_with(&code.to_lowercase()) {
+        if upper.ends_with(code) || lower.starts_with(&code.to_lowercase()) {
             return true;
         }
     }
@@ -139,6 +145,7 @@ mod tests {
     fn blocked_locales() {
         assert!(is_locale_blocked("ru-RU"));
         assert!(is_locale_blocked("be-BY"));
+        assert!(is_locale_blocked("ru-US")); // Blocked by language prefix
         assert!(!is_locale_blocked("en-US"));
         assert!(!is_locale_blocked("de-DE"));
         assert!(!is_locale_blocked("uk-UA"));

@@ -21,6 +21,7 @@ fn main() {
         Some("query") => cmd_query(&args),
         Some("search") => cmd_search(&args),
         Some("delete") => cmd_delete(&args),
+        Some("reset") => cmd_reset(&args),
         Some("serve") => cmd_serve(&args),
         Some("mcp") => cmd_mcp(&args),
         Some("reindex") => cmd_reindex(&args),
@@ -193,6 +194,38 @@ fn cmd_delete(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("Node '{label}' not found");
     }
+    Ok(())
+}
+
+fn cmd_reset(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let path = args.get(2).map(|s| s.as_str()).unwrap_or("default.brain");
+    println!("WARNING: This will delete ALL nodes, edges, and learned data.");
+    println!("Configuration, users, and secrets will be preserved.");
+    print!("Type 'yes' to confirm: ");
+    use std::io::Write;
+    std::io::stdout().flush().unwrap();
+    let mut confirm = String::new();
+    std::io::stdin().read_line(&mut confirm).unwrap();
+    if confirm.trim() != "yes" {
+        println!("Aborted.");
+        return Ok(());
+    }
+    let mut graph = Graph::open(std::path::Path::new(path))?;
+    graph.reset()?;
+    graph.checkpoint()?;
+    // Cleanup sidecars
+    let brain_path = std::path::Path::new(path);
+    let delete_exts = ["props", "types", "vectors", "cooccur", "wal", "rules",
+                        "schedules", "peers", "audit", "assessments", "relgaz", "kge", "ledger"];
+    for ext in &delete_exts {
+        let sidecar = brain_path.with_extension(ext);
+        if sidecar.exists() {
+            if std::fs::remove_file(&sidecar).is_ok() {
+                println!("  cleaned: .{}", ext);
+            }
+        }
+    }
+    println!("Graph reset complete.");
     Ok(())
 }
 
@@ -450,13 +483,14 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         });
 
         // Detect frontend directory next to the executable
+        // Leptos WASM build outputs to frontend/dist/ via trunk
         let frontend_dir = std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|d| d.join("frontend")))
+            .and_then(|p| p.parent().map(|d| d.join("frontend").join("dist")))
             .filter(|p| p.join("index.html").exists())
             .or_else(|| {
                 // Fallback: check relative to working directory
-                let p = std::path::PathBuf::from("frontend");
+                let p = std::path::PathBuf::from("frontend").join("dist");
                 if p.join("index.html").exists() { Some(p) } else { None }
             });
         if let Some(ref dir) = frontend_dir {
@@ -514,6 +548,7 @@ fn print_usage() {
     println!("  engram query <label> [depth] [path]           Query a node and its edges");
     println!("  engram search <query> [path]                  Search (BM25, filters, boolean)");
     println!("  engram delete <label> [path]                  Soft-delete a node");
+    println!("  engram reset [path]                           Reset graph (delete all data, keep config)");
     println!("  engram serve [path] [addr] [grpc_addr]         Start HTTP+gRPC server (default: 0.0.0.0:3030, gRPC: 50051)");
     println!("  engram mcp [path]                             Start MCP server (JSON-RPC over stdio)");
     println!("  engram reindex [path]                         Re-embed all nodes (after model change)");

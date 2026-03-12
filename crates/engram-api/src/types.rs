@@ -353,6 +353,58 @@ pub struct AnalyzeRequest {
     pub text: String,
 }
 
+// ── Config / Admin response types ──
+
+#[derive(Serialize)]
+pub struct ConfigStatusResponse {
+    pub configured: Vec<String>,
+    pub missing: Vec<String>,
+    pub warnings: Vec<String>,
+    pub ready: bool,
+    pub node_count: u64,
+    pub edge_count: u64,
+    pub is_empty_graph: bool,
+}
+
+#[derive(Serialize)]
+pub struct KbStatsResponse {
+    pub endpoint: String,
+    pub entities_linked: u32,
+    pub entities_not_found: u32,
+    pub relations_found: u32,
+    pub errors: u32,
+    pub lookup_ms: u64,
+}
+
+#[derive(Serialize)]
+pub struct ResetResponse {
+    pub success: bool,
+    pub sidecars_cleaned: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct KbEndpointRequest {
+    pub name: String,
+    pub url: String,
+    #[serde(default)]
+    pub auth_type: Option<String>,
+    #[serde(default)]
+    pub auth_secret_key: Option<String>,
+    #[serde(default)]
+    pub entity_link_template: Option<String>,
+    #[serde(default)]
+    pub relation_query_template: Option<String>,
+    #[serde(default)]
+    pub max_lookups_per_call: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct KbTestResponse {
+    pub success: bool,
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
 /// A single extracted entity in an analyze response.
 #[derive(Serialize)]
 pub struct AnalyzeEntityResponse {
@@ -364,12 +416,25 @@ pub struct AnalyzeEntityResponse {
     pub resolved_to: Option<u64>,
 }
 
+/// A single extracted relation in an analyze response.
+#[derive(Serialize)]
+pub struct AnalyzeRelationResponse {
+    pub from: String,
+    pub to: String,
+    pub rel_type: String,
+    pub confidence: f32,
+    pub method: String,
+}
+
 /// Response for `POST /ingest/analyze`.
 #[derive(Serialize)]
 pub struct AnalyzeResponse {
     pub entities: Vec<AnalyzeEntityResponse>,
+    pub relations: Vec<AnalyzeRelationResponse>,
     pub language: String,
     pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Response for ingest endpoints.
@@ -383,4 +448,8 @@ pub struct IngestResponse {
     pub errors: Vec<String>,
     pub duration_ms: u64,
     pub stages_skipped: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kb_stats: Option<KbStatsResponse>,
 }

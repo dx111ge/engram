@@ -9,8 +9,9 @@ license.workspace = true
 default = []
 lang-detect = ["dep:whatlang"]  # Language detection via whatlang
 anno = []                         # GLiNER NER via external engram-ner binary
-spacy = ["dep:reqwest"]         # Feature-gated SpaCy HTTP sidecar integration
-llm-ner = ["dep:reqwest"]       # Feature-gated LLM fallback NER
+glirel = []                       # GLiREL relation extraction via external engram-rel binary
+spacy = []                       # Feature-gated SpaCy HTTP sidecar integration
+llm-ner = []                    # Feature-gated LLM fallback NER
 file-source = ["dep:notify"]    # File watching source with notify crate
 
 [dependencies]
@@ -25,7 +26,7 @@ regex = "1"
 strsim = "0.11"
 toml = "0.8"
 whatlang = { version = "0.18", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 notify = { version = "7", optional = true }
 
 [dev-dependencies]

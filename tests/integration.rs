@@ -386,7 +386,7 @@ fn contradiction_detection() {
     // Later, someone tries to set a different host
     let (ok, conflicts) = g.set_property_checked("production-db", "host", "db-secondary.internal").unwrap();
     assert!(ok, "write should succeed (contradictions don't block)");
-    assert!(conflicts.has_conflicts, "should detect property conflict");
+    assert!(conflicts.has_conflicts(), "should detect property conflict");
 
     // The conflict is flagged
     for c in &conflicts.contradictions {

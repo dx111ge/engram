@@ -120,6 +120,18 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/onnx-download", post(handlers::download_onnx_model))
         .route("/config/ner-download", post(handlers::download_ner_model))
         .route("/config/ner-model", get(handlers::check_ner_model))
+        .route("/config/rel-download", post(handlers::download_rel_model))
+        .route("/config/rel-model", get(handlers::check_rel_model))
+        // Admin
+        .route("/admin/reset", post(handlers::admin_reset))
+        // Config status & KB management
+        .route("/config/status", get(handlers::config_status))
+        .route("/config/kb", get(handlers::list_kb_endpoints))
+        .route("/config/kb", post(handlers::add_kb_endpoint))
+        .route("/config/kb/{name}", delete(handlers::delete_kb_endpoint))
+        .route("/config/kb/{name}/test", post(handlers::test_kb_endpoint))
+        // KGE training
+        .route("/kge/train", post(handlers::kge_train))
         .merge(
             Router::new()
                 .route("/config/onnx-model", post(handlers::upload_onnx_model))

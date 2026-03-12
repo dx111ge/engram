@@ -17,6 +17,7 @@ exclude = [
     "crates/engram-intel",  # WASM crate -- built separately via wasm-pack
     "crates/engram-ui",     # WASM crate -- built separately via trunk
     "tools/engram-ner",     # Separate workspace -- uses ort rc.9 via gline-rs
+    "tools/engram-rel",     # Separate workspace -- standalone ONNX relation extraction
 ]
 
 [package]
@@ -75,7 +76,7 @@ engram-core = { path = "crates/engram-core" }
 engram-api = { path = "crates/engram-api" }
 engram-compute = { path = "crates/engram-compute" }
 engram-mesh = { path = "crates/engram-mesh" }
-engram-a2a = { path = "crates/engram-a2a" }
+engram-a2a = { path = "crates/engram-a2a", features = ["ingest"] }
 engram-assess = { path = "crates/engram-assess" }
 serde_json = { workspace = true }
 

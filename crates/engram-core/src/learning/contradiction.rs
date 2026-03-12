@@ -40,23 +40,22 @@ pub enum ConflictKind {
 pub struct ConflictCheckResult {
     /// All detected contradictions.
     pub contradictions: Vec<Contradiction>,
-    /// Whether any contradictions were found.
-    pub has_conflicts: bool,
 }
 
 impl ConflictCheckResult {
     pub fn none() -> Self {
         ConflictCheckResult {
             contradictions: Vec::new(),
-            has_conflicts: false,
         }
     }
 
+    pub fn has_conflicts(&self) -> bool {
+        !self.contradictions.is_empty()
+    }
+
     pub fn with(contradictions: Vec<Contradiction>) -> Self {
-        let has_conflicts = !contradictions.is_empty();
         ConflictCheckResult {
             contradictions,
-            has_conflicts,
         }
     }
 }
@@ -74,7 +73,7 @@ mod tests {
     #[test]
     fn conflict_check_result_empty() {
         let r = ConflictCheckResult::none();
-        assert!(!r.has_conflicts);
+        assert!(!r.has_conflicts());
         assert!(r.contradictions.is_empty());
     }
 
@@ -87,7 +86,7 @@ mod tests {
             kind: ConflictKind::PropertyConflict,
         };
         let r = ConflictCheckResult::with(vec![c]);
-        assert!(r.has_conflicts);
+        assert!(r.has_conflicts());
         assert_eq!(r.contradictions.len(), 1);
     }
 

@@ -53,6 +53,8 @@ pub enum ExtractionMethod {
     LlmFallback,
     /// Manually provided (structured input, no NER needed).
     Manual,
+    /// Knowledge base lookup (SPARQL endpoint).
+    KnowledgeBase,
 }
 
 /// An entity extracted from text by NER or other means.
@@ -174,6 +176,7 @@ pub struct StageConfig {
     pub dedup: bool,
     pub conflict_check: bool,
     pub confidence_calc: bool,
+    pub relation_extract: bool,
 }
 
 impl Default for StageConfig {
@@ -186,6 +189,7 @@ impl Default for StageConfig {
             dedup: true,
             conflict_check: true,
             confidence_calc: true,
+            relation_extract: true,
         }
     }
 }
@@ -210,11 +214,11 @@ impl StageConfig {
     pub fn apply_skip(&mut self, skip: &str) -> Vec<String> {
         let mut unknown = Vec::new();
         for token in skip.split(',') {
-            let token = token.trim();
-            if token.is_empty() {
+            let trimmed = token.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            match token {
+            match trimmed.to_lowercase().as_str() {
                 "parse" => self.parse = false,
                 "lang" | "language" | "language_detect" => self.language_detect = false,
                 "ner" | "extract" => self.ner = false,
@@ -222,7 +226,8 @@ impl StageConfig {
                 "dedup" | "deduplicate" => self.dedup = false,
                 "conflict" | "conflict_check" => self.conflict_check = false,
                 "confidence" | "confidence_calc" => self.confidence_calc = false,
-                other => unknown.push(other.to_string()),
+                "relation" | "rel" | "relation_extract" => self.relation_extract = false,
+                _ => unknown.push(trimmed.to_string()),
             }
         }
         unknown
@@ -238,6 +243,7 @@ impl StageConfig {
         if self.dedup { stages.push("dedup"); }
         if self.conflict_check { stages.push("conflict"); }
         if self.confidence_calc { stages.push("confidence"); }
+        if self.relation_extract { stages.push("relation"); }
         stages
     }
 
@@ -251,6 +257,7 @@ impl StageConfig {
         if !self.dedup { stages.push("dedup"); }
         if !self.conflict_check { stages.push("conflict"); }
         if !self.confidence_calc { stages.push("confidence"); }
+        if !self.relation_extract { stages.push("relation"); }
         stages
     }
 }
@@ -305,10 +312,27 @@ pub enum TransformResult {
 pub struct AnalyzeResult {
     /// Entities extracted by NER.
     pub entities: Vec<ExtractedEntity>,
+    /// Relations extracted between entities.
+    pub relations: Vec<ExtractedRelation>,
     /// Detected language code.
     pub language: String,
     /// Processing duration in milliseconds.
     pub duration_ms: u64,
+    /// Warnings generated during analysis.
+    pub warnings: Vec<String>,
+}
+
+// ── Knowledge base stats ──
+
+/// Statistics from a knowledge base lookup during pipeline execution.
+#[derive(Debug, Clone, Default)]
+pub struct KbStats {
+    pub endpoint: String,
+    pub entities_linked: u32,
+    pub entities_not_found: u32,
+    pub relations_found: u32,
+    pub errors: u32,
+    pub lookup_ms: u64,
 }
 
 // ── Pipeline result ──
@@ -330,4 +354,8 @@ pub struct PipelineResult {
     pub errors: Vec<String>,
     /// Processing duration in milliseconds.
     pub duration_ms: u64,
+    /// Warnings generated during pipeline execution.
+    pub warnings: Vec<String>,
+    /// Knowledge base lookup statistics (if KB stage was used).
+    pub kb_stats: Option<KbStats>,
 }

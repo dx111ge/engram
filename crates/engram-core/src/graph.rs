@@ -2176,6 +2176,31 @@ impl Graph {
         self.full_label(slot).ok()
     }
 
+    /// Reset the graph: recreate the .brain file and clear all in-memory indexes.
+    /// Preserves: embedder, compute_planner, event_bus, confidence_thresholds.
+    pub fn reset(&mut self) -> Result<()> {
+        let path = self.brain.path().to_path_buf();
+        // Reset the brain file header (zero counts, truncate WAL)
+        self.brain.reset()?;
+        // Clear all in-memory indexes
+        self.label_index = HashIndex::new();
+        self.adj_out = HashMap::new();
+        self.adj_in = HashMap::new();
+        self.type_registry = TypeRegistry::new(&path);
+        self.props = PropertyStore::new(&path);
+        self.fulltext = FullTextIndex::new();
+        self.temporal = TemporalIndex::new();
+        self.type_bitmap = BitmapIndex::new();
+        self.tier_bitmap = BitmapIndex::new();
+        self.sensitivity_bitmap = BitmapIndex::new();
+        self.node_type_names = Vec::new();
+        self.node_type_lookup = HashMap::new();
+        self.hnsw = HnswIndex::new(&path);
+        self.cooccurrence = CooccurrenceTracker::new(&path);
+        self.source_types = HashMap::new();
+        Ok(())
+    }
+
     /// Flush and checkpoint everything: mmap, WAL, types, properties, vectors, co-occurrence.
     pub fn checkpoint(&mut self) -> Result<()> {
         self.brain.checkpoint()?;
@@ -3204,13 +3229,13 @@ mod tests {
 
         // Setting a different value should flag a contradiction
         let conflicts = g.check_property_contradiction("server-01", "ip", "10.0.0.2").unwrap();
-        assert!(conflicts.has_conflicts);
+        assert!(conflicts.has_conflicts());
         assert_eq!(conflicts.contradictions.len(), 1);
         assert!(conflicts.contradictions[0].reason.contains("10.0.0.1"));
 
         // Same value should NOT flag
         let no_conflict = g.check_property_contradiction("server-01", "ip", "10.0.0.1").unwrap();
-        assert!(!no_conflict.has_conflicts);
+        assert!(!no_conflict.has_conflicts());
     }
 
     #[test]
@@ -3226,7 +3251,7 @@ mod tests {
         // Change value: should flag contradiction but still write
         let (ok, conflicts) = g.set_property_checked("server-01", "ip", "10.0.0.2").unwrap();
         assert!(ok);
-        assert!(conflicts.has_conflicts);
+        assert!(conflicts.has_conflicts());
 
         // Value should be updated despite contradiction
         assert_eq!(
@@ -3637,5 +3662,33 @@ then flag(node, "low confidence")
         let results = g.search_text("unique-searchable-entity", 5).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].label, long_label);
+    }
+
+    #[test]
+    fn reset_clears_graph() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        // Store 10 nodes
+        for i in 0..10 {
+            g.store(&format!("node-{i}"), &prov).unwrap();
+        }
+        // Store 5 edges
+        for i in 0..5 {
+            g.relate(&format!("node-{i}"), &format!("node-{}", i + 5), "links_to", &prov).unwrap();
+        }
+
+        let (nodes, edges) = g.stats();
+        assert_eq!(nodes, 10);
+        assert_eq!(edges, 5);
+
+        // Reset
+        g.reset().unwrap();
+
+        let (nodes, edges) = g.stats();
+        assert_eq!(nodes, 0);
+        assert_eq!(edges, 0);
     }
 }

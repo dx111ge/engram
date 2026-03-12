@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 use crate::api::ApiClient;
+use crate::api::types::KgeTrainResponse;
 
 #[component]
 pub fn LearningPage() -> impl IntoView {
@@ -8,6 +9,9 @@ pub fn LearningPage() -> impl IntoView {
 
     let (entity, set_entity) = signal(String::new());
     let (result_msg, set_result_msg) = signal(String::new());
+    let (kge_epochs, set_kge_epochs) = signal("100".to_string());
+    let (kge_result, set_kge_result) = signal(Option::<KgeTrainResponse>::None);
+    let (kge_loading, set_kge_loading) = signal(false);
 
     let api1 = api.clone();
     let reinforce = Action::new_local(move |_: &()| {
@@ -47,6 +51,28 @@ pub fn LearningPage() -> impl IntoView {
         }
     });
 
+    let api4 = api.clone();
+    let train_kge = Action::new_local(move |_: &()| {
+        let api = api4.clone();
+        let epochs_str = kge_epochs.get_untracked();
+        async move {
+            set_kge_loading.set(true);
+            let epochs: u64 = epochs_str.parse().unwrap_or(100);
+            let body = serde_json::json!({"epochs": epochs});
+            match api.post::<_, KgeTrainResponse>("/kge/train", &body).await {
+                Ok(r) => {
+                    set_result_msg.set(format!(
+                        "KGE trained: {} epochs, loss {:.4}, {} entities, {} relation types",
+                        r.epochs_completed, r.final_loss, r.entity_count, r.relation_type_count
+                    ));
+                    set_kge_result.set(Some(r));
+                }
+                Err(e) => set_result_msg.set(format!("KGE error: {e}")),
+            }
+            set_kge_loading.set(false);
+        }
+    });
+
     view! {
         <div class="page-header">
             <h2><i class="fa-solid fa-graduation-cap"></i>" Learning"</h2>
@@ -78,6 +104,58 @@ pub fn LearningPage() -> impl IntoView {
                 </button>
                 <button class="btn btn-secondary" on:click=move |_| { decay.dispatch(()); }>
                     <i class="fa-solid fa-clock-rotate-left"></i>" Apply Decay"
+                </button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3><i class="fa-solid fa-brain"></i>" Relation Learning (KGE)"</h3>
+            <p class="card-description">
+                "Train RotatE knowledge graph embeddings to predict relations between entities. "
+                "The model learns structural patterns from existing edges."
+            </p>
+
+            {move || kge_result.get().map(|r| view! {
+                <div class="kge-stats">
+                    <div class="stat-row">
+                        <span class="stat-label"><i class="fa-solid fa-database"></i>" Entities"</span>
+                        <span class="stat-value">{r.entity_count}</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label"><i class="fa-solid fa-link"></i>" Relation types"</span>
+                        <span class="stat-value">{r.relation_type_count}</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label"><i class="fa-solid fa-chart-line"></i>" Final loss"</span>
+                        <span class="stat-value">{format!("{:.4}", r.final_loss)}</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label"><i class="fa-solid fa-repeat"></i>" Epochs"</span>
+                        <span class="stat-value">{r.epochs_completed}</span>
+                    </div>
+                </div>
+            })}
+
+            <div class="form-row">
+                <label>"Epochs"</label>
+                <input
+                    type="number"
+                    min="10"
+                    max="1000"
+                    prop:value=kge_epochs
+                    on:input=move |ev| set_kge_epochs.set(event_target_value(&ev))
+                    style="width: 100px"
+                />
+                <button
+                    class="btn btn-primary"
+                    on:click=move |_| { train_kge.dispatch(()); }
+                    disabled=move || kge_loading.get()
+                >
+                    {move || if kge_loading.get() {
+                        "Training..."
+                    } else {
+                        "Train KGE"
+                    }}
                 </button>
             </div>
         </div>

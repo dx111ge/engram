@@ -228,7 +228,44 @@ message IngestItem {
 
 message BulkIngestResponse {
   uint64 ingested = 1;
-  uint64 errors = 2;
+  uint64 relations_created = 2;
+  uint64 errors = 3;
+  uint64 duration_ms = 4;
+}
+
+// ── Relation extraction service (v1.1.0) ──
+
+service EngramRelationService {
+  rpc KgeTrain(KgeTrainRequest) returns (KgeTrainResponse);
+  rpc AnalyzeRelations(AnalyzeRelationsRequest) returns (AnalyzeRelationsResponse);
+}
+
+message KgeTrainRequest {
+  uint32 epochs = 1;
+}
+
+message KgeTrainResponse {
+  uint64 epochs_completed = 1;
+  float final_loss = 2;
+  uint32 entity_count = 3;
+  uint32 relation_type_count = 4;
+}
+
+message AnalyzeRelationsRequest {
+  string text = 1;
+}
+
+message ExtractedRelationMsg {
+  string from = 1;
+  string to = 2;
+  string rel_type = 3;
+  float confidence = 4;
+  string method = 5;
+}
+
+message AnalyzeRelationsResponse {
+  repeated ExtractedRelationMsg relations = 1;
+  string language = 2;
   uint64 duration_ms = 3;
 }
 
