@@ -148,6 +148,8 @@ pub struct NodeResponse {
     pub node_id: u64,
     pub label: String,
     pub confidence: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_type: Option<String>,
     pub properties: std::collections::HashMap<String, String>,
     pub edges_from: Vec<EdgeResponse>,
     pub edges_to: Vec<EdgeResponse>,
@@ -172,6 +174,8 @@ pub struct NodeHit {
     pub node_id: u64,
     pub label: String,
     pub confidence: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_type: Option<String>,
     pub score: Option<f64>,
     pub depth: Option<u32>,
 }

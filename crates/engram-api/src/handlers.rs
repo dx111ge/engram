@@ -354,10 +354,13 @@ pub async fn query(
     let mut nodes = Vec::new();
     for &nid in &result.nodes {
         if let Ok(Some(node)) = g.get_node_by_id(nid) {
+            let label = g.label_for_id(nid).unwrap_or_else(|_| node.label().to_string());
+            let node_type = g.get_node_type(&label);
             nodes.push(NodeHit {
                 node_id: nid,
-                label: g.label_for_id(nid).unwrap_or_else(|_| node.label().to_string()),
+                label,
                 confidence: node.confidence,
+                node_type,
                 score: None,
                 depth: result.depths.get(&nid).copied(),
             });
@@ -397,12 +400,16 @@ pub async fn similar(
     let total = results.len();
     let hits: Vec<NodeHit> = results
         .into_iter()
-        .map(|r| NodeHit {
-            node_id: r.node_id,
-            label: r.label,
-            confidence: r.confidence,
-            score: Some(r.score),
-            depth: None,
+        .map(|r| {
+            let node_type = g.get_node_type(&r.label);
+            NodeHit {
+                node_id: r.node_id,
+                label: r.label,
+                confidence: r.confidence,
+                node_type,
+                score: Some(r.score),
+                depth: None,
+            }
         })
         .collect();
 
@@ -428,12 +435,16 @@ pub async fn search(
     let total = results.len();
     let hits: Vec<NodeHit> = results
         .into_iter()
-        .map(|r| NodeHit {
-            node_id: r.node_id,
-            label: r.label,
-            confidence: r.confidence,
-            score: Some(r.score),
-            depth: None,
+        .map(|r| {
+            let node_type = g.get_node_type(&r.label);
+            NodeHit {
+                node_id: r.node_id,
+                label: r.label,
+                confidence: r.confidence,
+                node_type,
+                score: Some(r.score),
+                depth: None,
+            }
         })
         .collect();
 
@@ -488,10 +499,13 @@ pub async fn get_node(
         })
         .collect();
 
+    let node_type = g.get_node_type(&label);
+
     Ok(Json(NodeResponse {
         node_id,
         label,
         confidence,
+        node_type,
         properties,
         edges_from,
         edges_to,

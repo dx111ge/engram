@@ -169,8 +169,11 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .with_state(state);
 
     // Serve frontend static files as fallback (if directory exists)
+    // SPA: unknown routes fall back to index.html so client-side routing works
     if let Some(dir) = frontend_dir {
-        let serve_dir = ServeDir::new(dir);
+        let index_path = std::path::PathBuf::from(dir).join("index.html");
+        let serve_dir = ServeDir::new(dir)
+            .fallback(tower_http::services::ServeFile::new(index_path));
         app = app.fallback_service(serve_dir);
     }
 

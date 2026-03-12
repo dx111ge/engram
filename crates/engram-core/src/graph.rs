@@ -175,6 +175,7 @@ impl Graph {
         let hnsw = HnswIndex::load(path);
         let cooccurrence = CooccurrenceTracker::load(path)
             .unwrap_or_else(|_| CooccurrenceTracker::new(path));
+        let (node_type_names, node_type_lookup) = Self::load_node_type_names(path);
         let mut graph = Graph {
             brain,
             label_index: HashIndex::new(),
@@ -187,8 +188,8 @@ impl Graph {
             type_bitmap: BitmapIndex::new(),
             tier_bitmap: BitmapIndex::new(),
             sensitivity_bitmap: BitmapIndex::new(),
-            node_type_names: Vec::new(),
-            node_type_lookup: HashMap::new(),
+            node_type_names,
+            node_type_lookup,
             hnsw,
             embedder: None,
             cooccurrence,
@@ -2212,7 +2213,36 @@ impl Graph {
         self.cooccurrence.flush().map_err(|e| StorageError::InvalidFile {
             reason: format!("co-occurrence flush failed: {e}"),
         })?;
+        self.flush_node_type_names()?;
         Ok(())
+    }
+
+    /// Persist node type name mapping to `.brain.nodetypes` sidecar.
+    fn flush_node_type_names(&self) -> Result<()> {
+        if self.node_type_names.is_empty() {
+            return Ok(());
+        }
+        let path = self.brain.path().with_extension("brain.nodetypes");
+        let content = self.node_type_names.join("\n");
+        std::fs::write(&path, content.as_bytes()).map_err(|e| StorageError::InvalidFile {
+            reason: format!("node type names flush failed: {e}"),
+        })?;
+        Ok(())
+    }
+
+    /// Load node type name mapping from `.brain.nodetypes` sidecar.
+    fn load_node_type_names(path: &Path) -> (Vec<String>, HashMap<String, u32>) {
+        let sidecar = path.with_extension("brain.nodetypes");
+        match std::fs::read_to_string(&sidecar) {
+            Ok(content) if !content.is_empty() => {
+                let names: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+                let lookup: HashMap<String, u32> = names.iter().enumerate()
+                    .map(|(i, n)| (n.clone(), i as u32))
+                    .collect();
+                (names, lookup)
+            }
+            _ => (Vec::new(), HashMap::new()),
+        }
     }
 
     // --- Private helpers ---

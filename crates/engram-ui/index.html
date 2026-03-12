@@ -6,13 +6,23 @@
   <title>engram - Knowledge Graph</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <link data-trunk rel="css" href="css/style.css">
-  <script src="https://unpkg.com/3d-force-graph@1"></script>
+  <script src="//cdn.jsdelivr.net/npm/3d-force-graph"></script>
 </head>
 <body>
   <!-- Leptos mounts here -->
-  <script>
-    // Bridge for WASM: 3d-force-graph has a fluent API that's hard to call from wasm_bindgen,
-    // so we expose simple functions that WASM can call via js_sys.
+  <script type="module">
+    import SpriteText from "https://esm.sh/three-spritetext";
+    import { Group } from "https://esm.sh/three";
+
+    // Confidence-based node color (green → amber → red)
+    function confColor(c) {
+      if (c >= 0.8) return '#66bb6a';
+      if (c >= 0.6) return '#4fc3f7';
+      if (c >= 0.4) return '#ffa726';
+      if (c >= 0.2) return '#ef5350';
+      return '#78909c';
+    }
+
     window.__engram_graph = {
       instance: null,
 
@@ -26,23 +36,77 @@
         var links = JSON.parse(linksJson);
 
         var graph = ForceGraph3D()(container)
-          .backgroundColor('rgba(0,0,0,0)')
+          .backgroundColor('#0a0e17')
           .width(container.clientWidth)
           .height(container.clientHeight)
           .graphData({ nodes: nodes, links: links })
-          .nodeLabel(function(n) { return n.label + (n.title ? ' — ' + n.title : ''); })
-          .nodeColor(function(n) { return n.color || '#4a9eff'; })
-          .nodeVal(function(n) { return n.size || 4; })
-          .nodeOpacity(0.9)
-          .linkLabel(function(l) { return l.label || ''; })
-          .linkColor(function() { return 'rgba(74, 158, 255, 0.4)'; })
-          .linkWidth(1.5)
+          .nodeLabel(function(n) { return n.title || n.label; })
+          .nodeColor(function(n) { return confColor(n.confidence || 0.5); })
+          .nodeVal(function(n) { return n.size || 5; })
+          .nodeOpacity(0.85)
+          .nodeResolution(16)
+          .nodeThreeObjectExtend(true)
+          .nodeThreeObject(function(node) {
+            var color = confColor(node.confidence || 0.5);
+            var group = new Group();
+
+            // Node label (white, bold, above sphere)
+            var label = new SpriteText(node.label);
+            label.material.depthWrite = false;
+            label.color = '#ffffff';
+            label.textHeight = 5;
+            label.fontWeight = 'bold';
+            label.strokeWidth = 0.5;
+            label.strokeColor = '#111111';
+            label.position.y = 14;
+            group.add(label);
+
+            // Type tag (smaller, well below sphere)
+            var typeName = node.node_type || 'Entity';
+            var nodeRadius = (node.size || 5) * 0.8;
+            var tag = new SpriteText(typeName.toUpperCase());
+            tag.material.depthWrite = false;
+            tag.color = '#ffffff';
+            tag.textHeight = 3;
+            tag.fontWeight = '600';
+            tag.strokeWidth = 0.6;
+            tag.strokeColor = '#000000';
+            tag.position.y = -(nodeRadius + 3);
+            group.add(tag);
+
+            return group;
+          })
+          .linkColor(function(link) { return 'rgba(100, 160, 255, 0.35)'; })
+          .linkWidth(1.2)
           .linkDirectionalArrowLength(4)
           .linkDirectionalArrowRelPos(1)
-          .linkCurvature(0.1)
+          .linkDirectionalArrowColor(function() { return 'rgba(100, 160, 255, 0.6)'; })
+          .linkCurvature(0.2)
+          .linkDirectionalParticles(3)
+          .linkDirectionalParticleWidth(1.8)
+          .linkDirectionalParticleSpeed(0.006)
+          .linkDirectionalParticleColor(function() { return 'rgba(100, 200, 255, 0.8)'; })
+          .linkThreeObjectExtend(true)
+          .linkThreeObject(function(link) {
+            if (!link.label) return null;
+            var sprite = new SpriteText(link.label);
+            sprite.material.depthWrite = false;
+            sprite.color = '#b0bec5';
+            sprite.textHeight = 2.5;
+            sprite.fontWeight = '600';
+            return sprite;
+          })
+          .linkPositionUpdate(function(sprite, coords) {
+            if (!sprite || !coords) return;
+            var middle = Object.assign({},
+              ...['x','y','z'].map(function(c) {
+                var obj = {}; obj[c] = coords.start[c] + (coords.end[c] - coords.start[c]) / 2; return obj;
+              })
+            );
+            Object.assign(sprite.position, middle);
+          })
           .onNodeClick(function(node) {
             if (onClickCb && node.id) onClickCb(node.id);
-            // Focus on clicked node
             var distance = 120;
             var distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z);
             graph.cameraPosition(
@@ -62,6 +126,9 @@
           });
         }
 
+        // Spread nodes wider
+        graph.d3Force('charge').strength(-180);
+
         // Responsive resize
         var ro = new ResizeObserver(function() {
           graph.width(container.clientWidth);
@@ -79,6 +146,11 @@
         var nodes = JSON.parse(nodesJson);
         var links = JSON.parse(linksJson);
         this.instance.graphData({ nodes: nodes, links: links });
+      },
+
+      recenter: function() {
+        if (!this.instance) return;
+        this.instance.zoomToFit(400);
       },
 
       destroy: function() {

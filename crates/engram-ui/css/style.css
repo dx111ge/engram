@@ -1179,11 +1179,6 @@ td {
   display: flex;
   flex-direction: column;
   box-shadow: -4px 0 20px var(--shadow);
-  animation: chatSlideIn 0.2s ease;
-}
-@keyframes chatSlideIn {
-  from { transform: translateX(100%); }
-  to { transform: translateX(0); }
 }
 .chat-header {
   display: flex;

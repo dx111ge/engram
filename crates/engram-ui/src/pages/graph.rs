@@ -5,7 +5,6 @@ use crate::api::ApiClient;
 use crate::api::types::{QueryRequest, QueryResponse, SearchRequest, SearchResponse, NodeResponse};
 use crate::components::graph_canvas::GraphCanvas;
 use crate::components::crud_modal::CrudModal;
-use crate::utils::confidence_color_hex;
 
 #[component]
 pub fn GraphPage() -> impl IntoView {
@@ -56,13 +55,14 @@ pub fn GraphPage() -> impl IntoView {
                 Ok(result) => {
                     let vis_nodes: Vec<serde_json::Value> = result.nodes.iter().map(|n| {
                         let conf = n.confidence.unwrap_or(0.5);
-                        let color = confidence_color_hex(conf);
+                        let ntype = n.node_type.as_deref().unwrap_or("Entity");
                         serde_json::json!({
                             "id": n.label,
                             "label": n.label,
-                            "title": format!("{} ({:.0}%)", n.node_type.as_deref().unwrap_or(""), conf * 100.0),
-                            "color": color,
-                            "size": 12.0 + (conf as f64 * 16.0),
+                            "title": format!("{} ({:.0}%)", ntype, conf * 100.0),
+                            "node_type": ntype,
+                            "confidence": conf,
+                            "size": 4.0 + (conf as f64 * 6.0),
                         })
                     }).collect();
 
@@ -117,13 +117,14 @@ pub fn GraphPage() -> impl IntoView {
                 set_nodes.update(|existing| {
                     for n in &result.nodes {
                         let conf = n.confidence.unwrap_or(0.5);
-                        let color = confidence_color_hex(conf);
+                        let ntype = n.node_type.as_deref().unwrap_or("Entity");
                         let new_node = serde_json::json!({
                             "id": n.label,
                             "label": n.label,
-                            "title": format!("{} ({:.0}%)", n.node_type.as_deref().unwrap_or(""), conf * 100.0),
-                            "color": color,
-                            "size": 12.0 + (conf as f64 * 16.0),
+                            "title": format!("{} ({:.0}%)", ntype, conf * 100.0),
+                            "node_type": ntype,
+                            "confidence": conf,
+                            "size": 4.0 + (conf as f64 * 6.0),
                         });
                         if !existing.iter().any(|e| e.get("id") == new_node.get("id")) {
                             existing.push(new_node);
@@ -182,7 +183,17 @@ pub fn GraphPage() -> impl IntoView {
         </div>
 
         <div class="graph-container">
-            <div class="graph-canvas">
+            <div class="graph-canvas" style="position: relative;">
+                <button
+                    class="btn btn-secondary"
+                    style="position: absolute; top: 12px; right: 12px; z-index: 10; opacity: 0.85;"
+                    title="Recenter graph"
+                    on:click=move |_| {
+                        let _ = js_sys::eval("window.__engram_graph.recenter()");
+                    }
+                >
+                    <i class="fa-solid fa-crosshairs"></i>
+                </button>
                 {move || if nodes.get().is_empty() {
                     view! {
                         <div class="empty-state">
