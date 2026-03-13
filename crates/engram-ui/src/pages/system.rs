@@ -1833,6 +1833,15 @@ pub fn SystemPage() -> impl IntoView {
                                 </div>
                             </div>
                         </details>
+
+                        // Manual install note
+                        <div class="info-box" style="margin-top: 0.75rem; font-size: 0.8rem; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 4px; padding: 0.5rem;">
+                            <i class="fa-solid fa-folder-open" style="margin-right: 0.25rem;"></i>
+                            <strong>"Manual install: "</strong>
+                            "Place "<code>"model.onnx"</code>" + "<code>"tokenizer.json"</code>" in "
+                            <code>"~/.engram/models/rel/&lt;model-name&gt;/"</code>
+                            ". Works with any NLI model (ONNX format, 3-class: entailment/neutral/contradiction)."
+                        </div>
                     </div>
 
                     // ── Coreference Resolution ──

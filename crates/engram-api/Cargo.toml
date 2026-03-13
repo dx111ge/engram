@@ -10,7 +10,7 @@ default = []
 llm = []
 mesh = ["engram-mesh"]
 ingest = ["engram-ingest"]
-anno = ["engram-ingest/anno"]
+anno = ["engram-ingest/anno", "dep:hf-hub"]
 nli-rel = ["engram-ingest/nli-rel"]
 glirel = ["engram-ingest/glirel"]
 actions = ["engram-action"]
@@ -38,6 +38,7 @@ axum = { version = "0.8", features = ["ws", "multipart"] }
 futures = "0.3"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
+hf-hub = { version = "0.4", optional = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 urlencoding = "2"
 tonic = { version = "0.13", optional = true }

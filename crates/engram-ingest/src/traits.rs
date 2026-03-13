@@ -100,6 +100,32 @@ pub trait Extractor: Send + Sync {
     fn supported_languages(&self) -> Vec<String>;
 }
 
+/// Wrapper: delegates `Extractor` to an `Arc<dyn Extractor>` for caching.
+///
+/// Allows a single loaded NER backend (e.g. GLiNER) to be shared across
+/// multiple pipeline builds without reloading the model each time.
+pub struct ArcExtractor(pub std::sync::Arc<dyn Extractor>);
+
+impl Extractor for ArcExtractor {
+    fn extract(&self, text: &str, lang: &DetectedLanguage) -> Vec<ExtractedEntity> {
+        self.0.extract(text, lang)
+    }
+    fn name(&self) -> &str { self.0.name() }
+    fn method(&self) -> ExtractionMethod { self.0.method() }
+    fn supported_languages(&self) -> Vec<String> { self.0.supported_languages() }
+}
+
+/// Wrapper: delegates `RelationExtractor` to an `Arc<dyn RelationExtractor>` for caching.
+pub struct ArcRelationExtractor(pub std::sync::Arc<dyn crate::rel_traits::RelationExtractor>);
+
+impl crate::rel_traits::RelationExtractor for ArcRelationExtractor {
+    fn extract_relations(&self, input: &crate::rel_traits::RelationExtractionInput) -> Vec<crate::rel_traits::CandidateRelation> {
+        self.0.extract_relations(input)
+    }
+    fn name(&self) -> &str { self.0.name() }
+    fn stats(&self) -> Option<crate::types::KbStats> { self.0.stats() }
+}
+
 /// Resolver: matches extracted entities against existing graph nodes.
 ///
 /// Runs under a **read lock** — no graph mutations during resolution.

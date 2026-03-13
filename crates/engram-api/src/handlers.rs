@@ -1752,11 +1752,17 @@ pub fn build_pipeline_mcp(
     ner_model: Option<String>,
     rel_model: Option<String>,
 ) -> engram_ingest::Pipeline {
-    build_pipeline(graph, config, kb_endpoints, ner_model, rel_model, None, None)
+    // MCP / A2A callers don't have access to AppState caches — pass empty caches.
+    let no_ner_cache = std::sync::Arc::new(std::sync::RwLock::new(None));
+    let no_rel_cache = std::sync::Arc::new(std::sync::RwLock::new(None));
+    build_pipeline(graph, config, kb_endpoints, ner_model, rel_model, None, None,
+        no_ner_cache, no_rel_cache)
 }
 
 /// Build a pipeline with all available NER + relation extraction backends wired up.
 /// `ner_model` / `rel_model` come from EngineConfig — the user's chosen models.
+/// `ner_cache` / `rel_cache` are shared caches — if populated, the backend is reused
+/// instead of reloading the model from disk/HF. If empty, a new backend is created and cached.
 #[cfg(feature = "ingest")]
 fn build_pipeline(
     graph: std::sync::Arc<std::sync::RwLock<engram_core::graph::Graph>>,
@@ -1766,6 +1772,8 @@ fn build_pipeline(
     rel_model: Option<String>,
     relation_templates: Option<std::collections::HashMap<String, String>>,
     _coreference_enabled: Option<bool>,
+    ner_cache: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn engram_ingest::Extractor>>>>,
+    rel_cache: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn engram_ingest::RelationExtractor>>>>,
 ) -> engram_ingest::Pipeline {
     use engram_ingest::{NerChain, ChainStrategy};
 
@@ -1795,36 +1803,48 @@ fn build_pipeline(
     }
 
     // 3. GLiNER/anno backend (zero-shot NER for new entities)
-    //    Uses the model from system config (set via wizard or /config API).
-    //    Falls back to first installed model if config is empty.
+    //    Uses cached backend if available, otherwise loads and caches.
     #[cfg(feature = "anno")]
     {
         use engram_ingest::anno_backend::{AnnoBackend, find_ner_model, list_installed_models};
 
-        // Determine which model to load: config > first installed > none
-        let model_name = ner_model
-            .as_deref()
-            .map(String::from)
-            .or_else(|| list_installed_models().into_iter().next());
+        // Check cache first
+        let cached = ner_cache.read().ok().and_then(|c| c.clone());
 
-        if let Some(ref name) = model_name {
-            if let Some(mut cfg) = find_ner_model(name) {
-                cfg.entity_types = vec![
-                    "person".into(), "organization".into(), "location".into(),
-                    "date".into(), "event".into(), "product".into(),
-                ];
-                cfg.min_confidence = 0.3;
-                match AnnoBackend::new(cfg) {
-                    Ok(backend) => {
-                        tracing::info!(model = %name, "GLiNER NER backend loaded from config");
-                        chain.add_backend(Box::new(backend));
+        if let Some(cached_backend) = cached {
+            tracing::debug!("using cached NER backend");
+            chain.add_backend(Box::new(engram_ingest::ArcExtractor(cached_backend)));
+        } else {
+            // Determine which model to load: config > first installed > none
+            let model_name = ner_model
+                .as_deref()
+                .map(String::from)
+                .or_else(|| list_installed_models().into_iter().next());
+
+            if let Some(ref name) = model_name {
+                if let Some(mut cfg) = find_ner_model(name) {
+                    cfg.entity_types = vec![
+                        "person".into(), "organization".into(), "location".into(),
+                        "date".into(), "event".into(), "product".into(),
+                    ];
+                    cfg.min_confidence = 0.3;
+                    match AnnoBackend::new(cfg) {
+                        Ok(backend) => {
+                            tracing::info!(model = %name, "GLiNER NER backend loaded from config");
+                            let arc_backend: std::sync::Arc<dyn engram_ingest::Extractor> = std::sync::Arc::new(backend);
+                            // Cache for next time
+                            if let Ok(mut cache) = ner_cache.write() {
+                                *cache = Some(arc_backend.clone());
+                            }
+                            chain.add_backend(Box::new(engram_ingest::ArcExtractor(arc_backend)));
+                        }
+                        Err(e) => {
+                            tracing::warn!(model = %name, "GLiNER NER backend failed: {e}");
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(model = %name, "GLiNER NER backend failed: {e}");
-                    }
+                } else {
+                    tracing::warn!(model = %name, "GLiNER model not found on disk");
                 }
-            } else {
-                tracing::warn!(model = %name, "GLiNER model not found on disk");
             }
         }
     }
@@ -1940,42 +1960,54 @@ fn build_pipeline(
     }
 
     // 4. NLI-based relation extraction (zero-shot, multilingual, ~80MB model)
-    //    Uses rel_model from config, falls back to first installed NLI model.
-    //    Custom relation templates can be set via EngineConfig.relation_templates.
+    //    Uses cached backend if available, otherwise loads and caches.
     #[cfg(feature = "nli-rel")]
     {
         use engram_ingest::rel_nli::{NliRelBackend, find_nli_model, list_installed_nli_models};
 
-        let model_name = rel_model
-            .as_deref()
-            .map(String::from)
-            .or_else(|| list_installed_nli_models().into_iter().next());
+        // Check cache first
+        let cached = rel_cache.read().ok().and_then(|c| c.clone());
 
-        if let Some(ref name) = model_name {
-            if let Some(mut cfg) = find_nli_model(name) {
-                // Apply custom relation templates from config if provided
-                if let Some(ref templates) = relation_templates {
-                    if !templates.is_empty() {
-                        cfg.relation_templates = templates.clone();
-                    }
-                }
-                cfg.min_confidence = 0.5;
+        if let Some(cached_backend) = cached {
+            tracing::debug!("using cached REL backend");
+            rel_chain.add_backend(Box::new(engram_ingest::ArcRelationExtractor(cached_backend)));
+        } else {
+            let model_name = rel_model
+                .as_deref()
+                .map(String::from)
+                .or_else(|| list_installed_nli_models().into_iter().next());
 
-                match NliRelBackend::new(cfg) {
-                    Ok(backend) => {
-                        tracing::info!(
-                            model = %name,
-                            templates = backend.template_count(),
-                            "NLI relation extraction backend loaded"
-                        );
-                        rel_chain.add_backend(Box::new(backend));
+            if let Some(ref name) = model_name {
+                if let Some(mut cfg) = find_nli_model(name) {
+                    // Apply custom relation templates from config if provided
+                    if let Some(ref templates) = relation_templates {
+                        if !templates.is_empty() {
+                            cfg.relation_templates = templates.clone();
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(model = %name, "NLI-rel backend failed: {e}");
+                    cfg.min_confidence = 0.5;
+
+                    match NliRelBackend::new(cfg) {
+                        Ok(backend) => {
+                            tracing::info!(
+                                model = %name,
+                                templates = backend.template_count(),
+                                "NLI relation extraction backend loaded"
+                            );
+                            let arc_backend: std::sync::Arc<dyn engram_ingest::RelationExtractor> = std::sync::Arc::new(backend);
+                            // Cache for next time
+                            if let Ok(mut cache) = rel_cache.write() {
+                                *cache = Some(arc_backend.clone());
+                            }
+                            rel_chain.add_backend(Box::new(engram_ingest::ArcRelationExtractor(arc_backend)));
+                        }
+                        Err(e) => {
+                            tracing::warn!(model = %name, "NLI-rel backend failed: {e}");
+                        }
                     }
+                } else {
+                    tracing::debug!(model = %name, "NLI-rel model not found");
                 }
-            } else {
-                tracing::debug!(model = %name, "NLI-rel model not found");
             }
         }
     }
@@ -2021,7 +2053,8 @@ pub async fn ingest(
          c.relation_templates.clone(), c.coreference_enabled)
     };
     let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints, ner_model, rel_model,
-        relation_templates, coreference_enabled);
+        relation_templates, coreference_enabled,
+        state.cached_ner.clone(), state.cached_rel.clone());
 
     // Convert IngestItems to RawItems
     let items: Vec<engram_ingest::types::RawItem> = req.items
@@ -2108,7 +2141,8 @@ pub async fn ingest_analyze(
          c.relation_templates.clone(), c.coreference_enabled)
     };
     let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints, ner_model, rel_model,
-        relation_templates, coreference_enabled);
+        relation_templates, coreference_enabled,
+        state.cached_ner.clone(), state.cached_rel.clone());
 
     let items = vec![engram_ingest::types::RawItem {
         content: engram_ingest::types::Content::Text(req.text),
@@ -2204,7 +2238,8 @@ pub async fn ingest_file(
          c.relation_templates.clone(), c.coreference_enabled)
     };
     let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints, ner_model, rel_model,
-        relation_templates, coreference_enabled);
+        relation_templates, coreference_enabled,
+        state.cached_ner.clone(), state.cached_rel.clone());
 
     // Try to parse body as UTF-8 text
     let text = String::from_utf8(body.to_vec())
@@ -3113,6 +3148,25 @@ pub async fn set_config(
         cfg.merge(&patch);
     }
 
+    // Invalidate cached NER/REL backends if relevant config fields changed
+    #[cfg(feature = "ingest")]
+    {
+        let ner_changed = patch.ner_model.is_some() || patch.ner_provider.is_some();
+        let rel_changed = patch.rel_model.is_some() || patch.relation_templates.is_some();
+        if ner_changed {
+            if let Ok(mut c) = state.cached_ner.write() {
+                *c = None;
+                tracing::info!("NER backend cache invalidated (config changed)");
+            }
+        }
+        if rel_changed {
+            if let Ok(mut c) = state.cached_rel.write() {
+                *c = None;
+                tracing::info!("REL backend cache invalidated (config changed)");
+            }
+        }
+    }
+
     // Hot-reload embedder if settings changed
     if let Some(embedder) = new_embedder {
         let model = embedder.model_id().to_string();
@@ -3237,7 +3291,7 @@ pub async fn upload_onnx_model(
 
 /// GET /config/onnx-model — Check if ONNX model files exist.
 pub async fn check_onnx_model(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
 ) -> ApiResult<serde_json::Value> {
     // Check ~/.engram/models/embed/ for any installed model
     let embed_dir = engram_home().map(|h| h.join("models").join("embed"));
@@ -3307,6 +3361,40 @@ pub async fn download_onnx_model(
 
     let model_path = model_dir.join("model.onnx");
     let tokenizer_path = model_dir.join("tokenizer.json");
+
+    // Skip download if files already exist and model is >1MB (not a stub)
+    let force = body["force"].as_bool().unwrap_or(false);
+    if !force && model_path.exists() && tokenizer_path.exists() {
+        let size = tokio::fs::metadata(&model_path).await.map(|m| m.len()).unwrap_or(0);
+        if size > 1_000_000 {
+            tracing::info!("ONNX embed model already installed ({} MB), skipping download", size / 1_048_576);
+            // Still hot-load if not yet active
+            let mut activated = false;
+            #[cfg(feature = "onnx")]
+            {
+                match engram_core::OnnxEmbedder::load(&model_path, &tokenizer_path) {
+                    Ok(embedder) => {
+                        let dim = embedder.dim();
+                        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+                        g.set_embedder(Box::new(embedder));
+                        drop(g);
+                        state.set_embedder_info(model_name.clone(), dim, "local".into());
+                        activated = true;
+                    }
+                    Err(e) => {
+                        tracing::debug!("ONNX hot-load on skip: {e}");
+                    }
+                }
+            }
+            return Ok(Json(serde_json::json!({
+                "status": "ok",
+                "skipped": true,
+                "message": "model already installed",
+                "model_size_mb": size / 1_048_576,
+                "activated": activated,
+            })));
+        }
+    }
 
     let client = reqwest::Client::new();
 
@@ -3445,9 +3533,96 @@ pub async fn ollama_pull(
     })))
 }
 
-// ── POST /config/ner-download — Download GLiNER NER model from HuggingFace ──
+// ── POST /config/ner-download — Download NER model via hf-hub (safetensors/candle) ──
 
+/// Download a GLiNER NER model by pre-populating the hf-hub cache.
+/// The `anno` crate's `GLiNER2Candle::from_pretrained()` will find
+/// the cached files on next pipeline build — no re-download needed.
+///
+/// For air-gapped systems, use `/config/model-upload` instead.
+#[cfg(feature = "anno")]
 pub async fn download_ner_model(
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let model_id = body["model_id"].as_str()
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "model_id required (e.g. \"urchade/gliner_multi-v2.1\")"))?
+        .to_string();
+    let force = body["force"].as_bool().unwrap_or(false);
+
+    // Run hf-hub download in spawn_blocking (it does synchronous HTTP)
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .build()
+            .map_err(|e| format!("hf-hub init failed: {e}"))?;
+
+        let repo = api.model(model_id.clone());
+
+        // Check if already cached (try to resolve main weight file)
+        if !force {
+            if let Ok(path) = repo.get("model.safetensors")
+                .or_else(|_| repo.get("gliner_model.safetensors"))
+            {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                if size > 1_000_000 {
+                    return Ok(serde_json::json!({
+                        "status": "ok",
+                        "skipped": true,
+                        "message": "model already cached in hf-hub",
+                        "model_id": model_id,
+                        "model_size_mb": size / 1_048_576,
+                        "cache_path": path.to_string_lossy(),
+                    }));
+                }
+            }
+        }
+
+        tracing::info!(model = %model_id, "downloading NER model via hf-hub");
+
+        // Download auxiliary files (best-effort)
+        for f in ["config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"] {
+            let _ = repo.get(f);
+        }
+
+        // Download main model weight (required)
+        let weight_path = repo.get("model.safetensors")
+            .or_else(|_| repo.get("gliner_model.safetensors"))
+            .map_err(|e| format!("failed to download model weights for '{}': {e}", model_id))?;
+
+        let size = std::fs::metadata(&weight_path).map(|m| m.len()).unwrap_or(0);
+        tracing::info!(
+            model = %model_id,
+            size_mb = size / 1_048_576,
+            path = %weight_path.display(),
+            "NER model downloaded via hf-hub"
+        );
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "model_id": model_id,
+            "model_size_mb": size / 1_048_576,
+            "cache_path": weight_path.to_string_lossy(),
+        }))
+    })
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| api_err(StatusCode::BAD_GATEWAY, e))?;
+
+    Ok(Json(result))
+}
+
+/// Fallback when anno feature is not enabled — returns an error.
+#[cfg(not(feature = "anno"))]
+pub async fn download_ner_model(
+    Json(_body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    Err(api_err(StatusCode::NOT_IMPLEMENTED,
+        "anno feature not enabled — rebuild with --features anno for GLiNER NER support"))
+}
+
+// ── POST /config/ner-download-onnx — Download legacy ONNX NER model ──
+
+/// Legacy endpoint: download ONNX-format NER model files from HuggingFace URLs.
+pub async fn download_ner_model_onnx(
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<serde_json::Value> {
     use tokio::io::AsyncWriteExt;
@@ -3472,14 +3647,30 @@ pub async fn download_ner_model(
     }
 
     // Target: ~/.engram/models/ner/{model_id}/
-    let home = dirs_next_home()
+    let home = engram_home()
         .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
-    let model_dir = home.join(".engram").join("models").join("ner").join(model_id);
+    let model_dir = home.join("models").join("ner").join(model_id);
     tokio::fs::create_dir_all(&model_dir).await
         .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create dir failed: {e}")))?;
 
     let model_path = model_dir.join("model.onnx");
     let tokenizer_path = model_dir.join("tokenizer.json");
+
+    // Skip download if files already exist and model is >1MB (not a stub)
+    let force = body["force"].as_bool().unwrap_or(false);
+    if !force && model_path.exists() && tokenizer_path.exists() {
+        let size = tokio::fs::metadata(&model_path).await.map(|m| m.len()).unwrap_or(0);
+        if size > 1_000_000 {
+            tracing::info!("NER ONNX model already installed ({} MB), skipping download", size / 1_048_576);
+            return Ok(Json(serde_json::json!({
+                "status": "ok",
+                "skipped": true,
+                "message": "model already installed",
+                "model_id": model_id,
+                "model_size_mb": size / 1_048_576,
+            })));
+        }
+    }
 
     let client = reqwest::Client::new();
 
@@ -3536,9 +3727,9 @@ pub async fn check_ner_model(
     let model_id = params.get("id")
         .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "id query parameter required"))?;
 
-    let home = dirs_next_home()
+    let home = engram_home()
         .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
-    let model_dir = home.join(".engram").join("models").join("ner").join(model_id);
+    let model_dir = home.join("models").join("ner").join(model_id);
 
     let has_model = model_dir.join("model.onnx").exists();
     let has_tokenizer = model_dir.join("tokenizer.json").exists();
@@ -3562,18 +3753,23 @@ pub async fn check_ner_model(
     })))
 }
 
-/// Cross-platform home directory lookup.
-fn dirs_next_home() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
+/// Resolve the engram home directory (~/.engram/).
+/// Delegates to the canonical implementation in engram-ingest.
+#[cfg(feature = "ingest")]
+fn engram_home() -> Option<std::path::PathBuf> {
+    engram_ingest::engram_home()
 }
 
-/// Resolve the engram home directory (~/.engram/).
+/// Resolve the engram home directory (~/.engram/) — fallback when ingest feature is off.
+#[cfg(not(feature = "ingest"))]
 fn engram_home() -> Option<std::path::PathBuf> {
     std::env::var_os("ENGRAM_HOME")
         .map(std::path::PathBuf::from)
-        .or_else(|| dirs_next_home().map(|h| h.join(".engram")))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| std::path::PathBuf::from(h).join(".engram"))
+        })
 }
 
 // ── POST /reindex — Re-embed all nodes ──────────────────────────────
@@ -4217,14 +4413,30 @@ pub async fn download_rel_model(
         return Err(api_err(StatusCode::BAD_REQUEST, "invalid model_id"));
     }
 
-    let home = dirs_next_home()
+    let home = engram_home()
         .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
-    let model_dir = home.join(".engram").join("models").join("rel").join(model_id);
+    let model_dir = home.join("models").join("rel").join(model_id);
     tokio::fs::create_dir_all(&model_dir).await
         .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create dir failed: {e}")))?;
 
     let model_path = model_dir.join("model.onnx");
     let tokenizer_path = model_dir.join("tokenizer.json");
+
+    // Skip download if files already exist and model is >1MB (not a stub)
+    let force = body["force"].as_bool().unwrap_or(false);
+    if !force && model_path.exists() && tokenizer_path.exists() {
+        let size = tokio::fs::metadata(&model_path).await.map(|m| m.len()).unwrap_or(0);
+        if size > 1_000_000 {
+            tracing::info!("REL model already installed ({} MB), skipping download", size / 1_048_576);
+            return Ok(Json(serde_json::json!({
+                "status": "ok",
+                "skipped": true,
+                "message": "model already installed",
+                "model_id": model_id,
+                "model_size_mb": size / 1_048_576,
+            })));
+        }
+    }
 
     let client = reqwest::Client::new();
 
@@ -4279,9 +4491,9 @@ pub async fn check_rel_model(
     let model_id = params.get("id")
         .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "id query parameter required"))?;
 
-    let home = dirs_next_home()
+    let home = engram_home()
         .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
-    let model_dir = home.join(".engram").join("models").join("rel").join(model_id);
+    let model_dir = home.join("models").join("rel").join(model_id);
 
     let has_model = model_dir.join("model.onnx").exists();
     let has_tokenizer = model_dir.join("tokenizer.json").exists();
@@ -4302,6 +4514,101 @@ pub async fn check_rel_model(
         "has_tokenizer": has_tokenizer,
         "model_size_mb": model_size,
         "model_dir": model_dir.to_string_lossy(),
+    })))
+}
+
+// ── POST /config/model-upload — Upload model files for air-gapped systems ──
+
+/// Upload model files via multipart/form-data for air-gapped systems.
+///
+/// Fields:
+/// - `model_type`: "embed" | "ner" | "rel"
+/// - `model_id`: directory name (e.g. "multilingual-MiniLMv2-L6-mnli-xnli")
+/// - File fields: saved to `~/.engram/models/{type}/{id}/{filename}`
+pub async fn upload_model(
+    mut multipart: axum::extract::Multipart,
+) -> ApiResult<serde_json::Value> {
+    use tokio::io::AsyncWriteExt;
+
+    let home = engram_home()
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
+
+    let mut model_type: Option<String> = None;
+    let mut model_id: Option<String> = None;
+    let mut files_written: Vec<String> = Vec::new();
+    let mut total_bytes: u64 = 0;
+    let mut model_dir: Option<std::path::PathBuf> = None;
+
+    while let Some(field) = multipart.next_field().await
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, format!("multipart read error: {e}")))?
+    {
+        let field_name = field.name().unwrap_or("").to_string();
+
+        match field_name.as_str() {
+            "model_type" => {
+                let val = field.text().await
+                    .map_err(|e| api_err(StatusCode::BAD_REQUEST, format!("read model_type: {e}")))?;
+                if !matches!(val.as_str(), "embed" | "ner" | "rel") {
+                    return Err(api_err(StatusCode::BAD_REQUEST, "model_type must be 'embed', 'ner', or 'rel'"));
+                }
+                model_type = Some(val);
+            }
+            "model_id" => {
+                let val = field.text().await
+                    .map_err(|e| api_err(StatusCode::BAD_REQUEST, format!("read model_id: {e}")))?;
+                if val.contains("..") || val.contains('/') || val.contains('\\') {
+                    return Err(api_err(StatusCode::BAD_REQUEST, "invalid model_id (no path traversal)"));
+                }
+                model_id = Some(val);
+            }
+            _ => {
+                // File field — save to model directory
+                let mt = model_type.as_ref()
+                    .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "model_type must be sent before file fields"))?;
+                let mid = model_id.as_ref()
+                    .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "model_id must be sent before file fields"))?;
+
+                let dir = home.join("models").join(mt).join(mid);
+                if model_dir.is_none() {
+                    tokio::fs::create_dir_all(&dir).await
+                        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create dir: {e}")))?;
+                    model_dir = Some(dir.clone());
+                }
+
+                let filename = field.file_name().unwrap_or(&field_name).to_string();
+                if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+                    return Err(api_err(StatusCode::BAD_REQUEST, format!("invalid filename: {filename}")));
+                }
+
+                let file_path = dir.join(&filename);
+                let data = field.bytes().await
+                    .map_err(|e| api_err(StatusCode::BAD_REQUEST, format!("read file {filename}: {e}")))?;
+
+                let mut f = tokio::fs::File::create(&file_path).await
+                    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create {filename}: {e}")))?;
+                f.write_all(&data).await
+                    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write {filename}: {e}")))?;
+                f.flush().await
+                    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("flush {filename}: {e}")))?;
+
+                total_bytes += data.len() as u64;
+                files_written.push(filename);
+                tracing::info!(file = %file_path.display(), bytes = data.len(), "model file uploaded");
+            }
+        }
+    }
+
+    if files_written.is_empty() {
+        return Err(api_err(StatusCode::BAD_REQUEST, "no files uploaded"));
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "model_type": model_type,
+        "model_id": model_id,
+        "files": files_written,
+        "total_bytes": total_bytes,
+        "model_dir": model_dir.map(|d| d.to_string_lossy().to_string()),
     })))
 }
 

@@ -196,21 +196,14 @@ impl Extractor for AnnoBackend {
     }
 }
 
-/// Get the user's home directory.
-fn dirs_next() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-}
-
 /// Check if a NER model is available (HuggingFace model ID or local path).
 ///
 /// For candle backend, models are downloaded from HuggingFace on first use.
 /// This function checks if a model directory exists locally (legacy ONNX models)
 /// or returns a config with the model ID for HuggingFace download.
 pub fn find_ner_model(model_name: &str) -> Option<AnnoConfig> {
-    let home = dirs_next()?;
-    let model_dir = home.join(".engram").join("models").join("ner").join(model_name);
+    let home = crate::engram_home()?;
+    let model_dir = home.join("models").join("ner").join(model_name);
 
     // Check for local model (legacy ONNX or downloaded safetensors)
     let has_onnx = model_dir.join("model.onnx").exists();
@@ -238,12 +231,12 @@ pub fn find_ner_model(model_name: &str) -> Option<AnnoConfig> {
 
 /// List installed NER models (local models only).
 pub fn list_installed_models() -> Vec<String> {
-    let home = match dirs_next() {
+    let home = match crate::engram_home() {
         Some(h) => h,
         None => return Vec::new(),
     };
 
-    let models_dir = home.join(".engram").join("models").join("ner");
+    let models_dir = home.join("models").join("ner");
     if !models_dir.exists() {
         return Vec::new();
     }

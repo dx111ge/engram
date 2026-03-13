@@ -237,6 +237,12 @@ pub struct AppState {
     /// Path to `.brain.schedules` sidecar file.
     #[cfg(feature = "ingest")]
     pub schedules_path: Option<PathBuf>,
+    /// Cached NER backend (loaded once, invalidated on config change).
+    #[cfg(feature = "ingest")]
+    pub cached_ner: Arc<RwLock<Option<Arc<dyn engram_ingest::Extractor>>>>,
+    /// Cached REL backend (loaded once, invalidated on config change).
+    #[cfg(feature = "ingest")]
+    pub cached_rel: Arc<RwLock<Option<Arc<dyn engram_ingest::RelationExtractor>>>>,
 }
 
 impl AppState {
@@ -282,6 +288,10 @@ impl AppState {
             scheduler: Arc::new(RwLock::new(engram_ingest::AdaptiveScheduler::default())),
             #[cfg(feature = "ingest")]
             schedules_path: None,
+            #[cfg(feature = "ingest")]
+            cached_ner: Arc::new(RwLock::new(None)),
+            #[cfg(feature = "ingest")]
+            cached_rel: Arc::new(RwLock::new(None)),
         }
     }
 

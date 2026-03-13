@@ -546,7 +546,7 @@ pub struct KgeTrainResponse {
     pub relation_type_count: u32,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AnalyzeEntityItem {
     pub text: String,
     pub entity_type: String,
@@ -556,7 +556,7 @@ pub struct AnalyzeEntityItem {
     pub resolved_to: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AnalyzeRelationItem {
     pub from: String,
     pub to: String,
@@ -565,7 +565,7 @@ pub struct AnalyzeRelationItem {
     pub method: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AnalyzeResponse {
     pub entities: Vec<AnalyzeEntityItem>,
     #[serde(default)]

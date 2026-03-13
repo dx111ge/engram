@@ -53,6 +53,21 @@ pub mod spacy;
 pub mod traits;
 pub mod types;
 
+/// Resolve the engram home directory (`~/.engram/`).
+///
+/// Checks `ENGRAM_HOME` env var first, then falls back to `$HOME/.engram`
+/// (or `%USERPROFILE%\.engram` on Windows). Single source of truth — all
+/// crates should use this instead of rolling their own home-dir lookup.
+pub fn engram_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("ENGRAM_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| std::path::PathBuf::from(h).join(".engram"))
+        })
+}
+
 // Re-exports for convenience.
 pub use confidence::{ConfidenceCalculator, ConfidenceConfig};
 pub use conflict::{ConflictConfig, ConflictDetector};
@@ -76,6 +91,7 @@ pub use rules::RuleBasedNer;
 pub use scheduler::{AdaptiveScheduler, SchedulerConfig, SourceSchedule};
 pub use source::{SourceRegistry, SourceInfo, SourceUsage, UsageSnapshot};
 pub use traits::{
+    ArcExtractor, ArcRelationExtractor,
     CostModel, Extractor, LanguageDetector, Parser, Resolver, Source, SourceCapabilities,
     SourceParams, Transformer,
 };

@@ -272,12 +272,7 @@ fn find_rel_binary() -> Option<std::path::PathBuf> {
     }
 
     // 2. Check ~/.engram/bin/
-    let engram_home = std::env::var_os("ENGRAM_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            home_dir().map(|h| h.join(".engram"))
-        });
-    if let Some(home) = engram_home {
+    if let Some(home) = crate::engram_home() {
         let path = home.join("bin").join(name);
         if path.exists() {
             return Some(path);
@@ -309,18 +304,11 @@ fn find_rel_binary() -> Option<std::path::PathBuf> {
 
 // ── Model discovery ──
 
-/// Get the user's home directory.
-fn home_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-}
-
 /// Find an NLI relation model by name in the standard model directory.
 /// Expects `~/.engram/models/rel/<name>/model.onnx` + `tokenizer.json`.
 pub fn find_nli_model(model_name: &str) -> Option<NliRelConfig> {
-    let home = home_dir()?;
-    let model_dir = home.join(".engram").join("models").join("rel").join(model_name);
+    let home = crate::engram_home()?;
+    let model_dir = home.join("models").join("rel").join(model_name);
 
     let model_path = model_dir.join("model.onnx");
     let tokenizer_path = model_dir.join("tokenizer.json");
@@ -337,12 +325,12 @@ pub fn find_nli_model(model_name: &str) -> Option<NliRelConfig> {
 
 /// List installed NLI relation models.
 pub fn list_installed_nli_models() -> Vec<String> {
-    let home = match home_dir() {
+    let home = match crate::engram_home() {
         Some(h) => h,
         None => return Vec::new(),
     };
 
-    let models_dir = home.join(".engram").join("models").join("rel");
+    let models_dir = home.join("models").join("rel");
     if !models_dir.exists() {
         return Vec::new();
     }

@@ -1021,6 +1021,7 @@ dependencies = [
  "engram-mesh",
  "engram-reason",
  "futures",
+ "hf-hub",
  "prost",
  "reqwest",
  "serde",

@@ -120,6 +120,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/onnx-model", get(handlers::check_onnx_model))
         .route("/config/onnx-download", post(handlers::download_onnx_model))
         .route("/config/ner-download", post(handlers::download_ner_model))
+        .route("/config/ner-download-onnx", post(handlers::download_ner_model_onnx))
         .route("/config/ollama-pull", post(handlers::ollama_pull))
         .route("/config/ner-model", get(handlers::check_ner_model))
         .route("/config/rel-download", post(handlers::download_rel_model))
@@ -138,7 +139,8 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .merge(
             Router::new()
                 .route("/config/onnx-model", post(handlers::upload_onnx_model))
-                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)) // 1 GB for ONNX uploads
+                .route("/config/model-upload", post(handlers::upload_model))
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)) // 1 GB for model uploads
         )
         // Reindex
         .route("/reindex", post(handlers::reindex))

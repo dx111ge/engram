@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 use crate::api::ApiClient;
+use crate::api::types::{AnalyzeRequest, AnalyzeResponse, IngestRequest, IngestItem, IngestResponse};
 
 // ── Step constants ──
 
@@ -383,14 +384,19 @@ pub fn OnboardingWizard(
                         "coreference_enabled": true,
                     });
                     if ner == "gliner" && !ner_m.is_empty() {
-                        // anno candle backend uses HuggingFace model ID directly
-                        // (model is downloaded automatically on first use via hf-hub)
                         config["ner_model"] = serde_json::json!(&ner_m);
 
-                        // NLI-based relation extraction model
-                        // Download ONNX model for zero-shot multilingual RE
+                        // Explicitly download NER model via hf-hub (pre-cache safetensors)
+                        let ner_dl = api.post_text("/config/ner-download", &serde_json::json!({
+                            "model_id": &ner_m,
+                        })).await;
+                        if let Err(e) = &ner_dl {
+                            set_save_error.set(Some(format!("NER model download note: {e}. Model will be downloaded on first use.")));
+                        }
+
+                        // NLI-based relation extraction model (ONNX, separate download)
                         let rel_model_id = "multilingual-MiniLMv2-L6-mnli-xnli".to_string();
-                        let rel_repo = "symanto/multilingual-MiniLMv2-L6-mnli-xnli";
+                        let rel_repo = "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli";
                         config["rel_model"] = serde_json::json!(&rel_model_id);
                         let rel_dl = api.post_text("/config/rel-download", &serde_json::json!({
                             "model_id": rel_model_id,
@@ -491,9 +497,17 @@ pub fn OnboardingWizard(
             if text.trim().is_empty() { return; }
             set_analyzing.set(true);
             set_seed_result.set(None);
-            match api.post_text("/ingest/analyze", &serde_json::json!({ "text": text })).await {
+            let body = AnalyzeRequest { text };
+            match api.post::<_, AnalyzeResponse>("/ingest/analyze", &body).await {
                 Ok(resp) => {
-                    set_seed_result.set(Some(resp));
+                    let summary = format!(
+                        "{} entities, {} relations ({}ms)\n{}",
+                        resp.entities.len(),
+                        resp.relations.len(),
+                        resp.duration_ms,
+                        serde_json::to_string_pretty(&resp).unwrap_or_default(),
+                    );
+                    set_seed_result.set(Some(summary));
                 }
                 Err(e) => {
                     set_seed_result.set(Some(format!("Analysis failed: {e}")));
@@ -511,9 +525,17 @@ pub fn OnboardingWizard(
         async move {
             if text.trim().is_empty() { return; }
             set_analyzing.set(true);
-            match api.post_text("/ingest", &serde_json::json!({ "text": text })).await {
+            let body = IngestRequest {
+                items: vec![IngestItem { content: text, source_url: None }],
+                source: Some("onboarding".into()),
+                skip: None,
+            };
+            match api.post::<_, IngestResponse>("/ingest", &body).await {
                 Ok(resp) => {
-                    set_seed_result.set(Some(format!("Seeded! {resp}")));
+                    set_seed_result.set(Some(format!(
+                        "Seeded! {} facts, {} relations ({}ms)",
+                        resp.facts_stored, resp.relations_created, resp.duration_ms,
+                    )));
                 }
                 Err(e) => {
                     set_seed_result.set(Some(format!("Ingest failed: {e}")));

@@ -1,0 +1,15 @@
+# Fix MSVC CRT linkage conflict between ort_sys (/MD) and esaxx-rs (/MT).
+#
+# ort_sys (ONNX Runtime) compiles C++ with /MD (dynamic CRT).
+# esaxx-rs (from tokenizers, via anno) compiles C++ with /MT (static CRT).
+# When both link into the same binary, MSVC linker errors with LNK2038
+# "RuntimeLibrary mismatch: MD_DynamicRelease vs MT_StaticRelease".
+#
+# Solution: force ALL C/C++ build scripts (via the `cc` crate) to use /MD
+# by setting the target-specific CXXFLAGS env var. The `cc` crate checks
+# CXXFLAGS_<target_underscored> and passes them to cl.exe.
+# Also set /EHsc (C++ exception handling) which esaxx-rs needs.
+
+[env]
+CXXFLAGS_x86_64_pc_windows_msvc = "/MD /EHsc"
+CFLAGS_x86_64_pc_windows_msvc = "/MD"
