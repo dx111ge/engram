@@ -1687,18 +1687,23 @@ input[type="range"] {
 
 /* Provider/option cards */
 .wizard-cards {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .wizard-card {
   border: 2px solid var(--border);
   border-radius: var(--radius);
-  padding: 14px;
+  padding: 10px;
   cursor: pointer;
   transition: border-color var(--transition), background var(--transition);
   background: var(--bg-card);
+}
+
+.wizard-card h4 {
+  font-size: 0.85rem;
+  margin-bottom: 4px;
 }
 
 .wizard-card:hover {
@@ -1706,7 +1711,8 @@ input[type="range"] {
   background: var(--bg-hover);
 }
 
-.wizard-card.selected {
+.wizard-card.selected,
+.wizard-card-selected {
   border-color: var(--accent-bright);
   background: rgba(74, 158, 255, 0.08);
 }
@@ -1724,9 +1730,9 @@ input[type="range"] {
 
 .wizard-card-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px 16px;
-  font-size: 0.78rem;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  font-size: 0.72rem;
 }
 
 .wizard-card-grid span {

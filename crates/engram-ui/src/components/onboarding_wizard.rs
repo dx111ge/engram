@@ -120,7 +120,7 @@ struct NerPreset {
     download: &'static str,
     license: &'static str,
     learning: &'static str,
-    models: &'static [(&'static str, &'static str, &'static str, &'static str)], // (id, name, desc, hf_repo)
+    models: &'static [(&'static str, &'static str, &'static str, &'static str, &'static str)], // (id, name, desc, hf_repo, lang)
 }
 
 const NER_PRESETS: &[NerPreset] = &[
@@ -137,9 +137,11 @@ const NER_PRESETS: &[NerPreset] = &[
         download: "~100MB model", license: "Apache-2.0",
         learning: "Discovers new entities \u{2192} feeds gazetteer for instant future recognition. Relation gazetteer learns every edge. KGE trains on graph structure.",
         models: &[
-            ("gliner_small-v2.1", "GLiNER Small v2.1", "~50MB, fast, good quality", "onnx-community/gliner_small-v2.1"),
-            ("gliner_medium-v2.1", "GLiNER Medium v2.1", "~110MB, better accuracy", "onnx-community/gliner_medium-v2.1"),
-            ("gliner_large-v2.1", "GLiNER Large v2.1", "~340MB, best accuracy", "onnx-community/gliner_large-v2.1"),
+            ("gliner_small-v2.1", "GLiNER Small v2.1", "~50MB, fast, good quality", "onnx-community/gliner_small-v2.1", "EN"),
+            ("gliner_medium-v2.1", "GLiNER Medium v2.1", "~110MB, better accuracy", "onnx-community/gliner_medium-v2.1", "EN"),
+            ("gliner_large-v2.1", "GLiNER Large v2.1", "~340MB, best accuracy", "onnx-community/gliner_large-v2.1", "EN"),
+            ("gliner_multi-v2.1", "GLiNER Multi v2.1", "~220MB, 12 languages", "onnx-community/gliner_multi-v2.1", "Multilingual"),
+            ("gliner_multi_pii-v1", "GLiNER Multi PII v1", "~220MB, PII detection", "onnx-community/gliner_multi_pii-v1", "Multilingual"),
         ],
     },
     NerPreset {
@@ -379,8 +381,8 @@ pub fn OnboardingWizard(
                         // Look up HuggingFace repo for selected model (preset or custom)
                         let ner_preset = NER_PRESETS.iter().find(|p| p.id == "gliner");
                         let hf_repo = ner_preset
-                            .and_then(|p| p.models.iter().find(|(id, _, _, _)| *id == ner_m.as_str()))
-                            .map(|(_, _, _, repo)| repo.to_string())
+                            .and_then(|p| p.models.iter().find(|(id, _, _, _, _)| *id == ner_m.as_str()))
+                            .map(|(_, _, _, repo, _)| repo.to_string())
                             .unwrap_or_else(|| {
                                 // Custom HuggingFace model ID
                                 if ner_m.contains('/') { ner_m.clone() } else { format!("onnx-community/{}", ner_m) }
@@ -850,21 +852,27 @@ pub fn OnboardingWizard(
                                     let preset = NER_PRESETS.iter().find(|p| p.id == choice.as_str());
                                     preset.and_then(|p| {
                                         if p.models.is_empty() { return None; }
-                                        let models: Vec<(&str, &str, &str, &str)> = p.models.to_vec();
+                                        let models: Vec<(&str, &str, &str, &str, &str)> = p.models.to_vec();
                                         Some(view! {
                                             <div class="form-group mt-1">
                                                 <label><i class="fa-solid fa-cube"></i>" NER Model"</label>
                                                 <p class="wizard-hint">"Select a recommended model or enter any HuggingFace model ID below."</p>
                                                 <div class="wizard-model-chips">
-                                                    {models.into_iter().map(|(id, name, desc, _repo)| {
+                                                    {models.into_iter().map(|(id, name, desc, _repo, lang)| {
                                                         let mid = id.to_string();
                                                         let mid2 = mid.clone();
+                                                        let badge_class = if lang.contains("100+") || lang.contains("ulti") {
+                                                            "wizard-lang-badge wizard-lang-multi"
+                                                        } else {
+                                                            "wizard-lang-badge wizard-lang-en"
+                                                        };
                                                         view! {
                                                             <button
                                                                 class=move || if ner_model.get() == mid { "wizard-model-chip active" } else { "wizard-model-chip" }
                                                                 on:click=move |_| set_ner_model.set(mid2.clone())
                                                             >
                                                                 <strong>{name}</strong>
+                                                                <span class=badge_class><i class="fa-solid fa-language"></i>" "{lang}</span>
                                                                 <small>{desc}</small>
                                                             </button>
                                                         }
@@ -880,7 +888,7 @@ pub fn OnboardingWizard(
                                                                 // Only show in text field if it's a custom (non-preset) value
                                                                 let is_preset = NER_PRESETS.iter()
                                                                     .flat_map(|p| p.models.iter())
-                                                                    .any(|(id, _, _, _)| *id == m.as_str());
+                                                                    .any(|(id, _, _, _, _)| *id == m.as_str());
                                                                 if is_preset { String::new() } else { m }
                                                             }
                                                             on:input=move |ev| {
