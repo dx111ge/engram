@@ -1,5 +1,8 @@
 /// GLiREL relation extraction via external `engram-rel` subprocess.
 ///
+/// **DEPRECATED**: Use `rel_nli` (NLI-based RE) instead. GLiREL is English-only,
+/// 1.7GB FP32, and CC BY-NC-SA licensed. NLI RE is multilingual, ~100MB, MIT.
+///
 /// Mirrors the `anno_backend.rs` pattern: communicates with an external binary
 /// via JSON Lines over stdin/stdout. The model weights are user-downloaded
 /// (CC BY-NC-SA 4.0), never bundled.
@@ -12,6 +15,7 @@ use crate::rel_traits::{CandidateRelation, RelationExtractionInput, RelationExtr
 use crate::types::ExtractionMethod;
 
 /// Configuration for the GLiREL backend.
+#[deprecated(since = "1.2.0", note = "Use NLI-based RE (`rel_nli::NliRelConfig`) instead. GLiREL is English-only, 1.7GB, CC BY-NC-SA.")]
 #[derive(Debug, Clone)]
 pub struct GlirelConfig {
     /// Path to the model directory (containing model.onnx and tokenizer.json).
@@ -22,6 +26,7 @@ pub struct GlirelConfig {
     pub min_confidence: f32,
 }
 
+#[allow(deprecated)]
 impl Default for GlirelConfig {
     fn default() -> Self {
         Self {
@@ -42,12 +47,14 @@ impl Default for GlirelConfig {
 }
 
 /// GLiREL backend via external `engram-rel` process.
+#[deprecated(since = "1.2.0", note = "Use NLI-based RE (`rel_nli::NliRelBackend`) instead. GLiREL is English-only, 1.7GB, CC BY-NC-SA.")]
 #[cfg(feature = "glirel")]
 pub struct GlirelBackend {
     config: GlirelConfig,
     rel_binary: std::path::PathBuf,
 }
 
+#[allow(deprecated)]
 #[cfg(feature = "glirel")]
 impl GlirelBackend {
     pub fn new(config: GlirelConfig) -> Result<Self, crate::IngestError> {
@@ -75,7 +82,7 @@ impl GlirelBackend {
         &self,
         input: &RelationExtractionInput,
     ) -> Result<Vec<CandidateRelation>, crate::IngestError> {
-        use std::io::{BufRead, Write};
+        use std::io::Write;
         use std::process::{Command, Stdio};
 
         // Build entity spans for the request
@@ -109,7 +116,7 @@ impl GlirelBackend {
 
         {
             let stdin = child.stdin.as_mut().unwrap();
-            serde_json::to_writer(stdin, &request)
+            serde_json::to_writer(&mut *stdin, &request)
                 .map_err(|e| crate::IngestError::Ner(format!("write to engram-rel: {e}")))?;
             writeln!(stdin).map_err(|e| crate::IngestError::Ner(format!("write to engram-rel: {e}")))?;
         }
@@ -174,6 +181,7 @@ impl GlirelBackend {
     }
 }
 
+#[allow(deprecated)]
 #[cfg(feature = "glirel")]
 impl RelationExtractor for GlirelBackend {
     fn extract_relations(&self, input: &RelationExtractionInput) -> Vec<CandidateRelation> {
@@ -192,6 +200,7 @@ impl RelationExtractor for GlirelBackend {
 }
 
 /// Find the `engram-rel` binary next to the current executable.
+#[deprecated(since = "1.2.0", note = "Use `rel_nli::find_rel_binary()` instead.")]
 #[cfg(feature = "glirel")]
 fn find_rel_binary() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -231,6 +240,8 @@ fn home_dir() -> Option<std::path::PathBuf> {
 }
 
 /// Find a GLiREL model by ID in the standard model directory.
+#[deprecated(since = "1.2.0", note = "Use `rel_nli::find_nli_model()` instead.")]
+#[allow(deprecated)]
 pub fn find_rel_model(model_id: &str) -> Option<GlirelConfig> {
     let home = home_dir()?;
     let model_dir = home.join(".engram").join("models").join("rel").join(model_id);
@@ -242,4 +253,32 @@ pub fn find_rel_model(model_id: &str) -> Option<GlirelConfig> {
     } else {
         None
     }
+}
+
+/// List installed GLiREL relation models.
+#[deprecated(since = "1.2.0", note = "Use `rel_nli::list_installed_nli_models()` instead.")]
+pub fn list_installed_rel_models() -> Vec<String> {
+    let home = match home_dir() {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+
+    let models_dir = home.join(".engram").join("models").join("rel");
+    if !models_dir.exists() {
+        return Vec::new();
+    }
+
+    std::fs::read_dir(&models_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if entry.path().join("model.onnx").exists() {
+                entry.file_name().into_string().ok()
+            } else {
+                None
+            }
+        })
+        .collect()
 }

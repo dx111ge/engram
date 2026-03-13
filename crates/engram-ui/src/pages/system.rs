@@ -561,6 +561,8 @@ pub fn SystemPage() -> impl IntoView {
     let (ner_download_status, set_ner_download_status) = signal(String::new());
     let (rel_model_status, set_rel_model_status) = signal(String::new());
     let (rel_download_status, set_rel_download_status) = signal(String::new());
+    let (coref_enabled, set_coref_enabled) = signal(true);
+    let (relation_templates_json, set_relation_templates_json) = signal(String::new());
 
     // Quantization signal declared early so config Effect can set it
     let (quant_enabled, set_quant_enabled) = signal(true);
@@ -580,6 +582,14 @@ pub fn SystemPage() -> impl IntoView {
             if let Some(v) = cfg.data.get("quantization_enabled").and_then(|v: &serde_json::Value| v.as_bool()) {
                 set_quant_enabled.set(v);
             }
+            if let Some(v) = cfg.data.get("coreference_enabled").and_then(|v: &serde_json::Value| v.as_bool()) {
+                set_coref_enabled.set(v);
+            }
+            if let Some(v) = cfg.data.get("relation_templates") {
+                if let Ok(json) = serde_json::to_string_pretty(v) {
+                    set_relation_templates_json.set(json);
+                }
+            }
         }
     });
 
@@ -589,15 +599,24 @@ pub fn SystemPage() -> impl IntoView {
         let provider = ner_provider.get_untracked();
         let endpoint = ner_endpoint.get_untracked();
         let model = ner_model.get_untracked();
+        let coref = coref_enabled.get_untracked();
+        let templates_json = relation_templates_json.get_untracked();
         async move {
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "ner_provider": provider,
                 "ner_endpoint": endpoint,
                 "ner_model": model,
+                "coreference_enabled": coref,
             });
+            // Parse relation templates JSON if provided
+            if !templates_json.trim().is_empty() {
+                if let Ok(templates) = serde_json::from_str::<serde_json::Value>(&templates_json) {
+                    body["relation_templates"] = templates;
+                }
+            }
             match api.post_text("/config", &body).await {
-                Ok(_) => set_status_msg.set("NER provider saved.".to_string()),
-                Err(e) => set_status_msg.set(format!("Error saving NER config: {e}")),
+                Ok(_) => set_status_msg.set("NER/RE config saved.".to_string()),
+                Err(e) => set_status_msg.set(format!("Error saving config: {e}")),
             }
         }
     });
@@ -1647,35 +1666,35 @@ pub fn SystemPage() -> impl IntoView {
                     </div>
                 })
             }}
-            // ── GLiREL Relation Extraction Model ──
+            // ── NLI Relation Extraction Model ──
             {
                 let api_rel = api.clone();
                 move || {
                 let is_anno = ner_provider.get() == "anno";
                 let api_rel_dl = api_rel.clone();
-                let api_rel_check = api_rel.clone();
                 let api_rel_custom = api_rel.clone();
                 is_anno.then(|| view! {
                     <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
-                        <h4 style="margin-top: 0;"><i class="fa-solid fa-link"></i>" GLiREL Relation Model"</h4>
+                        <h4 style="margin-top: 0;"><i class="fa-solid fa-link"></i>" Relation Extraction (NLI)"</h4>
                         <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
-                            "Relation extraction model paired with GLiNER. Discovers relationships between entities."
+                            "Zero-shot relation extraction via Natural Language Inference. Multilingual, ~100MB model."
                         </p>
 
-                        // Quick install buttons for GLiREL models
+                        // Quick install NLI model
                         <div style="margin: 0.5rem 0;">
                             <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.5rem;"><strong>"Quick Install"</strong></p>
-                            {["small", "medium", "large"].into_iter().map(|size| {
-                                let label = format!("GLiREL {} v2.1", match size { "small" => "Small", "medium" => "Medium", _ => "Large" });
-                                let model_id = format!("glirel_{}-v2.1", size);
-                                let repo = format!("onnx-community/glirel_{}-v2.1", size);
+                            {[
+                                ("multilingual-MiniLMv2-L6-mnli-xnli", "MiniLMv2 (100+ langs, ~100MB, fast)", "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli"),
+                                ("mDeBERTa-v3-base-xnli", "mDeBERTa v3 (100+ langs, ~280MB, accurate)", "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"),
+                            ].into_iter().map(|(model_id, label, repo)| {
                                 let api = api_rel_dl.clone();
-                                let mid = model_id.clone();
-                                let rp = repo.clone();
+                                let mid = model_id.to_string();
+                                let rp = repo.to_string();
+                                let lbl = label.to_string();
                                 view! {
                                     <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
                                         <div style="flex: 1; min-width: 0;">
-                                            <code style="font-size: 0.85rem;">{label}</code>
+                                            <code style="font-size: 0.85rem;">{lbl}</code>
                                         </div>
                                         <button class="btn btn-sm btn-primary" style="white-space: nowrap; padding: 0.2rem 0.5rem; font-size: 0.75rem;" on:click={
                                             let api = api.clone();
@@ -1698,9 +1717,9 @@ pub fn SystemPage() -> impl IntoView {
                                                             let msg = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
                                                                 let size = v.get("model_size_mb").and_then(|v| v.as_f64());
                                                                 if let Some(mb) = size {
-                                                                    format!("Model installed ({:.1} MB). Ready to use.", mb)
+                                                                    format!("NLI model installed ({:.1} MB). Ready to use.", mb)
                                                                 } else {
-                                                                    "Model installed. Ready to use.".to_string()
+                                                                    "NLI model installed. Ready to use.".to_string()
                                                                 }
                                                             } else {
                                                                 "Installed.".to_string()
@@ -1752,14 +1771,14 @@ pub fn SystemPage() -> impl IntoView {
                             })
                         }}
 
-                        // Custom HuggingFace REL model
+                        // Custom HuggingFace NLI model
                         <details style="margin-top: 0.5rem;">
-                            <summary class="text-secondary" style="cursor: pointer; font-size: 0.85rem;"><i class="fa-brands fa-github" style="margin-right: 0.25rem;"></i>"Custom HuggingFace GLiREL Model"</summary>
+                            <summary class="text-secondary" style="cursor: pointer; font-size: 0.85rem;"><i class="fa-brands fa-github" style="margin-right: 0.25rem;"></i>"Custom HuggingFace NLI Model"</summary>
                             <div style="margin-top: 0.5rem;">
                                 <div class="form-row">
                                     <label>"HuggingFace Model ID"</label>
                                     <input type="text" class="form-control" id="rel-custom-hf-id"
-                                        placeholder="e.g. onnx-community/glirel_multi-v1"
+                                        placeholder="e.g. MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli"
                                     />
                                 </div>
                                 <div class="button-group" style="margin-top: 0.5rem;">
@@ -1778,7 +1797,7 @@ pub fn SystemPage() -> impl IntoView {
                                                     return;
                                                 }
                                                 let hf_id = hf_id.trim();
-                                                let repo = if hf_id.contains('/') { hf_id.to_string() } else { format!("onnx-community/{}", hf_id) };
+                                                let repo = if hf_id.contains('/') { hf_id.to_string() } else { format!("MoritzLaurer/{}", hf_id) };
                                                 let model_id = repo.split('/').last().unwrap_or(&repo).to_string();
                                                 set_rel_download_status.set(format!("Downloading {}...", repo));
                                                 let body = serde_json::json!({
@@ -1792,9 +1811,9 @@ pub fn SystemPage() -> impl IntoView {
                                                         let msg = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
                                                             let size = v.get("model_size_mb").and_then(|v| v.as_f64());
                                                             if let Some(mb) = size {
-                                                                format!("Model installed ({:.1} MB). Ready to use.", mb)
+                                                                format!("NLI model installed ({:.1} MB). Ready to use.", mb)
                                                             } else {
-                                                                "Model installed. Ready to use.".to_string()
+                                                                "NLI model installed. Ready to use.".to_string()
                                                             }
                                                         } else {
                                                             "Installed.".to_string()
@@ -1815,12 +1834,92 @@ pub fn SystemPage() -> impl IntoView {
                             </div>
                         </details>
                     </div>
+
+                    // ── Coreference Resolution ──
+                    <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
+                        <h4 style="margin-top: 0;"><i class="fa-solid fa-users"></i>" Coreference Resolution"</h4>
+                        <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+                            "Resolves pronouns and noun phrases to canonical entity names before relation extraction. E.g. \"He\" -> \"John Smith\", \"the company\" -> \"Apple\"."
+                        </p>
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <input
+                                type="checkbox"
+                                prop:checked=coref_enabled
+                                on:change=move |ev| {
+                                    set_coref_enabled.set(event_target_checked(&ev));
+                                }
+                            />
+                            <label style="margin: 0;">"Enable coreference resolution"</label>
+                        </div>
+                        <div class="info-box" style="margin-top: 0.5rem; font-size: 0.8rem;">
+                            <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>
+                            " Rule-based (no model download needed). Improves relation extraction quality by linking pronouns to their referent entities."
+                        </div>
+                    </div>
+
+                    // ── Relation Templates ──
+                    <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
+                        <h4 style="margin-top: 0;"><i class="fa-solid fa-list-check"></i>" Relation Templates"</h4>
+                        <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+                            "NLI hypothesis templates for relation classification. Each maps a relation type to a natural language pattern with {head} and {tail} placeholders."
+                        </p>
+
+                        <details>
+                            <summary style="cursor: pointer; font-size: 0.85rem;"><i class="fa-solid fa-pen-to-square" style="margin-right: 0.25rem;"></i>"Edit Templates (JSON)"</summary>
+                            <div style="margin-top: 0.5rem;">
+                                <textarea
+                                    class="form-control"
+                                    style="width: 100%; min-height: 200px; font-family: monospace; font-size: 0.8rem; background: rgba(0,0,0,0.2); color: inherit; border: 1px solid rgba(255,255,255,0.1);"
+                                    prop:value=relation_templates_json
+                                    on:input=move |ev| {
+                                        set_relation_templates_json.set(event_target_value(&ev));
+                                    }
+                                    placeholder=r#"{"works_at": "{head} works at {tail}", "born_in": "{head} was born in {tail}", ...}"#
+                                ></textarea>
+                                <div class="info-box" style="margin-top: 0.5rem; font-size: 0.75rem;">
+                                    <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>
+                                    " 21 default templates ship with engram (TACRED/FewRel/Wikidata). Leave empty to use defaults. Format: {\"relation_type\": \"{head} verb {tail}\"}."
+                                </div>
+                                <div style="margin-top: 0.5rem;">
+                                    <button class="btn btn-sm btn-secondary" on:click=move |_| {
+                                        // Reset to default templates
+                                        let defaults = serde_json::json!({
+                                            "works_at": "{head} works at {tail}",
+                                            "born_in": "{head} was born in {tail}",
+                                            "lives_in": "{head} lives in {tail}",
+                                            "educated_at": "{head} was educated at {tail}",
+                                            "spouse": "{head} is married to {tail}",
+                                            "parent_of": "{head} is the parent of {tail}",
+                                            "child_of": "{head} is the child of {tail}",
+                                            "citizen_of": "{head} is a citizen of {tail}",
+                                            "member_of": "{head} is a member of {tail}",
+                                            "holds_position": "{head} holds the position of {tail}",
+                                            "founded_by": "{head} was founded by {tail}",
+                                            "headquartered_in": "{head}'s headquarters are in {tail}",
+                                            "subsidiary_of": "{head} is a subsidiary of {tail}",
+                                            "acquired_by": "{head} was acquired by {tail}",
+                                            "located_in": "{head} is located in {tail}",
+                                            "instance_of": "{head} is a {tail}",
+                                            "part_of": "{head} is part of {tail}",
+                                            "capital_of": "{head} is the capital of {tail}",
+                                            "cause_of": "{head} causes {tail}",
+                                            "author_of": "{head} was written by {tail}",
+                                            "produces": "{head} produces {tail}"
+                                        });
+                                        set_relation_templates_json.set(serde_json::to_string_pretty(&defaults).unwrap_or_default());
+                                    }>
+                                        <i class="fa-solid fa-rotate-left" style="margin-right: 0.25rem;"></i>"Reset to Defaults"
+                                    </button>
+                                </div>
+                            </div>
+                        </details>
+                    </div>
                 })
             }}
 
             <div class="button-group" style="margin-top: 0.5rem;">
                 <button class="btn btn-success" on:click=move |_| { save_ner.dispatch(()); }>
-                    <i class="fa-solid fa-floppy-disk"></i>" Save NER Config"
+                    <i class="fa-solid fa-floppy-disk"></i>" Save NER/RE Config"
                 </button>
             </div>
         </CollapsibleSection>

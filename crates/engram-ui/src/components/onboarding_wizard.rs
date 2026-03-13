@@ -133,15 +133,14 @@ const NER_PRESETS: &[NerPreset] = &[
     },
     NerPreset {
         id: "gliner", name: "GLiNER (Recommended)",
-        quality: "High \u{2014} any entity type", speed: "~50ms/sentence",
-        download: "~100MB model", license: "Apache-2.0",
-        learning: "Discovers new entities \u{2192} feeds gazetteer for instant future recognition. Relation gazetteer learns every edge. KGE trains on graph structure.",
+        quality: "High \u{2014} any entity type, zero-shot", speed: "~50ms/sentence",
+        download: "~220\u{2013}400MB model (candle backend)", license: "Apache-2.0",
+        learning: "Discovers new entities \u{2192} feeds gazetteer for instant future recognition. Coreference resolves pronouns. NLI relation extraction discovers relationships.",
         models: &[
-            ("gliner_small-v2.1", "GLiNER Small v2.1", "~50MB, fast, good quality", "onnx-community/gliner_small-v2.1", "EN"),
-            ("gliner_medium-v2.1", "GLiNER Medium v2.1", "~110MB, better accuracy", "onnx-community/gliner_medium-v2.1", "EN"),
-            ("gliner_large-v2.1", "GLiNER Large v2.1", "~340MB, best accuracy", "onnx-community/gliner_large-v2.1", "EN"),
-            ("gliner_multi-v2.1", "GLiNER Multi v2.1", "~220MB, 12 languages", "onnx-community/gliner_multi-v2.1", "Multilingual"),
-            ("gliner_multi_pii-v1", "GLiNER Multi PII v1", "~220MB, names/phones/emails/addresses", "onnx-community/gliner_multi_pii-v1", "Multilingual"),
+            ("urchade/gliner_multi-v2.1", "GLiNER Multi v2.1", "~220MB, 100+ languages (recommended)", "urchade/gliner_multi-v2.1", "Multilingual"),
+            ("urchade/gliner_large-v2.5", "GLiNER Large v2.5", "~400MB, best English accuracy", "urchade/gliner_large-v2.5", "EN"),
+            ("urchade/gliner_multi_pii-v1", "GLiNER Multi PII v1", "~220MB, names/phones/emails/addresses", "urchade/gliner_multi_pii-v1", "Multilingual"),
+            ("urchade/gliner_small-v2.1", "GLiNER Small v2.1", "~100MB, fast, good quality", "urchade/gliner_small-v2.1", "EN"),
         ],
     },
     NerPreset {
@@ -227,7 +226,7 @@ pub fn OnboardingWizard(
     let (embed_model, set_embed_model) = signal(String::new());
     let (embed_endpoint, set_embed_endpoint) = signal(String::new());
     let (ner_choice, set_ner_choice) = signal("gliner".to_string());
-    let (ner_model, set_ner_model) = signal("gliner_small-v2.1".to_string());
+    let (ner_model, set_ner_model) = signal("urchade/gliner_multi-v2.1".to_string());
     let (llm_choice, set_llm_choice) = signal(String::new());
     let (llm_key, set_llm_key) = signal(String::new());
     let (llm_model, set_llm_model) = signal(String::new());
@@ -379,41 +378,27 @@ pub fn OnboardingWizard(
                 }
                 STEP_NER => {
                     let provider = if ner == "gliner" { "anno" } else { &ner };
-                    let mut config = serde_json::json!({ "ner_provider": provider });
+                    let mut config = serde_json::json!({
+                        "ner_provider": provider,
+                        "coreference_enabled": true,
+                    });
                     if ner == "gliner" && !ner_m.is_empty() {
+                        // anno candle backend uses HuggingFace model ID directly
+                        // (model is downloaded automatically on first use via hf-hub)
                         config["ner_model"] = serde_json::json!(&ner_m);
-                        // Look up HuggingFace repo for selected model (preset or custom)
-                        let ner_preset = NER_PRESETS.iter().find(|p| p.id == "gliner");
-                        let hf_repo = ner_preset
-                            .and_then(|p| p.models.iter().find(|(id, _, _, _, _)| *id == ner_m.as_str()))
-                            .map(|(_, _, _, repo, _)| repo.to_string())
-                            .unwrap_or_else(|| {
-                                // Custom HuggingFace model ID
-                                if ner_m.contains('/') { ner_m.clone() } else { format!("onnx-community/{}", ner_m) }
-                            });
 
-                        // Download selected GLiNER NER model
-                        let dl = api.post_text("/config/ner-download", &serde_json::json!({
-                            "model_id": ner_m,
-                            "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", hf_repo),
-                            "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", hf_repo),
-                        })).await;
-                        if let Err(e) = &dl {
-                            set_save_error.set(Some(format!("GLiNER download failed: {e}. You can download later in System settings.")));
-                        }
-
-                        // Also download GLiREL relation extraction model (paired with GLiNER)
-                        // Use matching size: small->small, medium->medium, large->large
-                        let rel_size = if ner_m.contains("large") { "large" } else if ner_m.contains("medium") { "medium" } else { "small" };
-                        let rel_model_id = format!("glirel_{}-v2.1", rel_size);
-                        let rel_repo = format!("onnx-community/glirel_{}-v2.1", rel_size);
+                        // NLI-based relation extraction model
+                        // Download ONNX model for zero-shot multilingual RE
+                        let rel_model_id = "multilingual-MiniLMv2-L6-mnli-xnli".to_string();
+                        let rel_repo = "symanto/multilingual-MiniLMv2-L6-mnli-xnli";
+                        config["rel_model"] = serde_json::json!(&rel_model_id);
                         let rel_dl = api.post_text("/config/rel-download", &serde_json::json!({
                             "model_id": rel_model_id,
                             "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", rel_repo),
                             "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", rel_repo),
                         })).await;
                         if let Err(e) = &rel_dl {
-                            let _ = e; // GLiREL download is non-fatal
+                            set_save_error.set(Some(format!("NLI RE download note: {e}. Relation extraction model can be installed later in System settings.")));
                         }
                     }
                     api.post_text("/config", &config).await
@@ -827,8 +812,9 @@ pub fn OnboardingWizard(
                                     <p>"engram learns from every entity found:"</p>
                                     <ul>
                                         <li>"NER discovers new entities \u{2192} stored in graph \u{2192} gazetteer indexes them for instant future recognition"</li>
+                                        <li>"Coreference resolution: pronouns like \u{201c}he\u{201d}/\u{201c}she\u{201d} resolve to actual entity names"</li>
+                                        <li>"NLI relation extraction: zero-shot, multilingual, ~80MB model \u{2014} classifies 21 relation types"</li>
                                         <li>"Relation gazetteer learns every edge you store \u{2192} instant recall next time"</li>
-                                        <li>"GLiREL gets better candidate labels from your growing graph"</li>
                                         <li>"KGE trains on your graph structure \u{2192} predicts new relationships from patterns"</li>
                                     </ul>
                                     <p><em>"The more you use engram, the faster and more accurate it becomes."</em></p>

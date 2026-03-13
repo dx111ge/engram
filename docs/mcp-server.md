@@ -283,11 +283,13 @@ Returns:
 
 Ingest text through the NER/entity-resolution pipeline. **Restricted** -- requires appropriate access level.
 
+Uses the configured NER backend (GLiNER via candle, or built-in rules) with optional coreference resolution (pronoun -> canonical entity mapping) and NLI-based relation extraction (zero-shot, multilingual).
+
 Parameters:
 - `text` (required) — text to ingest
 - `source` — provenance label for extracted entities
 - `pipeline` — pipeline name (default: `default`)
-- `skip` — list of pipeline stages to skip (e.g., `["coref"]`)
+- `skip` — list of pipeline stages to skip (e.g., `["coref", "nli-rel"]`)
 
 Example call:
 ```json

@@ -90,7 +90,7 @@ fn handle_store_via_pipeline(task_id: &str, text: &str, graph: &Arc<RwLock<Graph
         ..Default::default()
     };
 
-    let pipeline = engram_api::handlers::build_pipeline_mcp(graph.clone(), config, None);
+    let pipeline = engram_api::handlers::build_pipeline_mcp(graph.clone(), config, None, None, None);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

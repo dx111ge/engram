@@ -502,6 +502,36 @@ Response:
 {"pipeline": "default", "configured": true}
 ```
 
+#### POST /config -- Update engine configuration
+
+Update persistent engine configuration (NER/RE models, templates, coreference, embeddings). Saved to `.brain.config` sidecar.
+
+```bash
+curl -X POST http://localhost:3030/config \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "ner_provider": "anno",
+    "ner_model": "urchade/gliner_multi-v2.1",
+    "coreference_enabled": true,
+    "relation_templates": {
+      "works_at": "{head} works at {tail}",
+      "born_in": "{head} was born in {tail}",
+      "located_in": "{head} is located in {tail}"
+    }
+  }'
+```
+
+Fields:
+- `ner_provider` -- NER backend: `"anno"` (GLiNER candle), `"builtin"` (rules only), or external
+- `ner_model` -- NER model name (HuggingFace ID or local model name)
+- `coreference_enabled` -- Enable pronoun/noun-phrase resolution before RE (default: true)
+- `relation_templates` -- Custom NLI hypothesis templates for relation extraction. Format: `{"rel_type": "{head} verb {tail}"}`. Omit to use 21 defaults.
+
+Response:
+```json
+{"configured": true}
+```
+
 #### POST /ingest/webhook/{pipeline_id} -- Webhook receiver for external data
 
 Receives data from external systems (CI/CD, monitoring, RSS aggregators) and routes it through the specified pipeline.

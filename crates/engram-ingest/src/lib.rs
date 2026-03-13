@@ -39,6 +39,8 @@ pub mod rel_gazetteer;
 #[cfg(feature = "glirel")]
 pub mod rel_glirel;
 pub mod rel_kge;
+#[cfg(feature = "nli-rel")]
+pub mod rel_nli;
 pub mod rel_knowledge_base;
 pub mod rel_traits;
 pub mod resolver;

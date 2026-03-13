@@ -2,10 +2,32 @@ use engram_core::graph::{Graph, Provenance};
 use engram_core::Embedder;
 use std::path::PathBuf;
 
+/// Resolve the engram home directory (~/.engram/).
+/// Creates the directory structure if it doesn't exist.
+fn engram_home() -> PathBuf {
+    let home = std::env::var_os("ENGRAM_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| PathBuf::from(h).join(".engram"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".engram"));
+
+    // Ensure standard directories exist
+    for sub in ["data", "bin", "models", "models/ner", "models/rel", "models/embed"] {
+        let dir = home.join(sub);
+        if !dir.exists() {
+            let _ = std::fs::create_dir_all(&dir);
+        }
+    }
+    home
+}
+
 fn default_path(args: &[String], idx: usize) -> PathBuf {
     args.get(idx)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("knowledge.brain"))
+        .unwrap_or_else(|| engram_home().join("data").join("default.brain"))
 }
 
 fn main() {
@@ -198,7 +220,9 @@ fn cmd_delete(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_reset(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let path = args.get(2).map(|s| s.as_str()).unwrap_or("default.brain");
+    let default_brain = engram_home().join("data").join("default.brain");
+    let path = args.get(2).map(|s| s.to_string()).unwrap_or_else(|| default_brain.to_string_lossy().to_string());
+    let path = path.as_str();
     println!("WARNING: This will delete ALL nodes, edges, and learned data.");
     println!("Configuration, users, and secrets will be preserved.");
     print!("Type 'yes' to confirm: ");
@@ -324,26 +348,37 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         state.set_embedder_info(model, dim, endpoint);
         state.graph.write().unwrap().set_embedder(Box::new(embedder));
     } else {
-        // Try to auto-load ONNX model from sidecar files
+        // Try to auto-load ONNX model from ~/.engram/models/embed/
         let mut onnx_loaded = false;
         #[cfg(feature = "onnx")]
         {
-            let model_path = format!("{}.model.onnx", path.display());
-            let tokenizer_path = format!("{}.tokenizer.json", path.display());
-            if std::path::Path::new(&model_path).exists() && std::path::Path::new(&tokenizer_path).exists() {
-                match engram_core::OnnxEmbedder::load(
-                    std::path::Path::new(&model_path),
-                    std::path::Path::new(&tokenizer_path),
-                ) {
+            let home = engram_home();
+            let embed_dir = home.join("models").join("embed");
+            let embed_model = std::fs::read_dir(&embed_dir).ok()
+                .and_then(|entries| {
+                    entries.filter_map(|e| e.ok()).find(|e| {
+                        let p = e.path();
+                        p.join("model.onnx").exists() && p.join("tokenizer.json").exists()
+                    })
+                })
+                .map(|e| e.path());
+
+            if let Some(ref dir) = embed_model {
+                let model_path = dir.join("model.onnx");
+                let tokenizer_path = dir.join("tokenizer.json");
+                match engram_core::OnnxEmbedder::load(&model_path, &tokenizer_path) {
                     Ok(embedder) => {
                         let dim = embedder.dim();
-                        println!("Embedder: ONNX local ({}D)", dim);
-                        state.set_embedder_info("ONNX Local".into(), dim, "local".into());
+                        let label = dir.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "ONNX Local".into());
+                        println!("Embedder: {} ({}D)", label, dim);
+                        state.set_embedder_info(label, dim, "local".into());
                         state.graph.write().unwrap().set_embedder(Box::new(embedder));
                         onnx_loaded = true;
                     }
                     Err(e) => {
-                        println!("Embedder: ONNX files found but failed to load: {e}");
+                        println!("Embedder: ONNX model found but failed to load: {e}");
                     }
                 }
             }

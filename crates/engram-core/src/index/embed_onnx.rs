@@ -1,20 +1,13 @@
 /// Local ONNX embedder — runs embedding models directly in Rust via ONNX Runtime.
 ///
 /// For users who want zero-dependency semantic search without running Ollama or
-/// an external API. Loads an ONNX model and tokenizer from sidecar files next to
-/// the .brain file.
+/// an external API.
 ///
-/// Expected sidecar files:
-///   {brain_file}.model.onnx     — the ONNX embedding model
-///   {brain_file}.tokenizer.json — HuggingFace tokenizer configuration
+/// Model locations (checked in order):
+///   1. ~/.engram/models/embed/<model_name>/model.onnx + tokenizer.json
+///   2. {brain_file}.model.onnx + {brain_file}.tokenizer.json (legacy sidecar)
 ///
 /// Recommended model: multilingual-e5-small (384 shape, ~120 MB, 100+ languages)
-///
-/// To export a model for engram:
-///   pip install optimum[onnxruntime]
-///   optimum-cli export onnx --model intfloat/multilingual-e5-small ./e5-small-onnx/
-///   cp ./e5-small-onnx/model.onnx ./knowledge.brain.model.onnx
-///   cp ./e5-small-onnx/tokenizer.json ./knowledge.brain.tokenizer.json
 
 use super::embedding::{EmbedError, Embedder};
 use std::path::{Path, PathBuf};
@@ -28,17 +21,31 @@ pub struct OnnxEmbedder {
 }
 
 impl OnnxEmbedder {
-    /// Load an ONNX embedding model from sidecar files next to the brain file.
-    /// Returns None if the sidecar files don't exist.
-    pub fn from_brain_path(brain_path: &Path) -> Option<Self> {
-        let model_path = brain_path.with_extension("brain.model.onnx");
-        let tokenizer_path = brain_path.with_extension("brain.tokenizer.json");
+    /// Load an ONNX embedding model from ~/.engram/models/embed/.
+    /// The `brain_path` argument is unused but kept for API compatibility.
+    pub fn from_brain_path(_brain_path: &Path) -> Option<Self> {
+        let engram_home = std::env::var_os("ENGRAM_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .map(|h| PathBuf::from(h).join(".engram"))
+            })?;
 
-        if !model_path.exists() || !tokenizer_path.exists() {
-            return None;
+        let embed_dir = engram_home.join("models").join("embed");
+        let entries = std::fs::read_dir(&embed_dir).ok()?;
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let mp = p.join("model.onnx");
+            let tp = p.join("tokenizer.json");
+            if mp.exists() && tp.exists() {
+                if let Ok(embedder) = Self::load(&mp, &tp) {
+                    return Some(embedder);
+                }
+            }
         }
 
-        Self::load(&model_path, &tokenizer_path).ok()
+        None
     }
 
     /// Load from explicit paths.

@@ -1,10 +1,11 @@
-/// Anno NER backend: GLiNER zero-shot NER via external `engram-ner` binary.
+/// Anno NER backend: GLiNER2 zero-shot NER via the `anno` crate (candle backend).
 ///
-/// The `engram-ner` binary wraps gline-rs (ONNX GLiNER inference) and communicates
-/// via JSON Lines over stdin/stdout. This avoids an ort version conflict between
-/// engram-core's embedder (ort rc.12) and gline-rs (ort rc.9).
+/// Uses the `anno` crate with pure-Rust candle ML backend -- no ONNX Runtime
+/// dependency, no ort version conflict, no subprocess. Models are downloaded
+/// from HuggingFace Hub on first use and cached locally.
 ///
-/// The model is user-installed at `~/.engram/models/ner/<model-name>/`.
+/// Includes optional coreference resolution via MentionRankingCoref (rule-based)
+/// to resolve pronouns and noun phrases to canonical entity names before RE.
 ///
 /// This module is compiled only with `--features anno`.
 
@@ -13,146 +14,127 @@ use crate::traits::Extractor;
 #[cfg(feature = "anno")]
 use crate::types::{DetectedLanguage, ExtractedEntity, ExtractionMethod};
 
-/// Configuration for the GLiNER NER backend.
+/// Configuration for the anno NER + coreference backend.
 #[derive(Debug, Clone)]
 pub struct AnnoConfig {
-    /// Path to the model directory (containing model.onnx and tokenizer.json).
-    pub model_dir: std::path::PathBuf,
-    /// Entity types to extract (for zero-shot models).
+    /// HuggingFace model ID for GLiNER2 (e.g. "urchade/gliner_multi-v2.1").
+    /// If empty, uses the default model.
+    pub model_id: String,
+    /// Entity types to extract (zero-shot labels).
     pub entity_types: Vec<String>,
     /// Minimum confidence threshold for extracted entities.
     pub min_confidence: f32,
+    /// Enable coreference resolution after NER.
+    pub coreference_enabled: bool,
 }
 
 impl Default for AnnoConfig {
     fn default() -> Self {
         Self {
-            model_dir: std::path::PathBuf::new(),
+            model_id: String::new(),
             entity_types: vec![
-                "PERSON".into(),
-                "ORG".into(),
-                "LOC".into(),
-                "DATE".into(),
-                "EVENT".into(),
+                "person".into(),
+                "organization".into(),
+                "location".into(),
+                "date".into(),
+                "event".into(),
+                "product".into(),
             ],
-            min_confidence: 0.5,
+            min_confidence: 0.3,
+            coreference_enabled: true,
         }
     }
 }
 
-/// GLiNER NER backend via external `engram-ner` process.
+/// GLiNER2 NER backend via anno crate (candle, in-process).
 ///
 /// Feature-gated: only compiled with `--features anno`.
 #[cfg(feature = "anno")]
 pub struct AnnoBackend {
     config: AnnoConfig,
-    /// Path to the engram-ner binary.
-    ner_binary: std::path::PathBuf,
+    model: anno::backends::GLiNER2Candle,
+    coref: Option<anno::backends::coref::mention_ranking::MentionRankingCoref>,
 }
 
 #[cfg(feature = "anno")]
 impl AnnoBackend {
-    /// Create a new GLiNER NER backend.
+    /// Create a new anno NER backend.
     ///
-    /// Locates the `engram-ner` binary next to the current executable,
-    /// then verifies the model directory exists.
+    /// Downloads the model from HuggingFace on first use (cached via hf-hub).
+    /// Pass an empty `model_id` to use the default GLiNER2 model.
     pub fn new(config: AnnoConfig) -> Result<Self, crate::IngestError> {
-        let ner_binary = find_ner_binary().ok_or_else(|| {
-            crate::IngestError::Config(
-                "engram-ner binary not found. It should be in the same directory as engram."
-                    .into(),
-            )
-        })?;
+        let model_id = if config.model_id.is_empty() {
+            "urchade/gliner_multi-v2.1"
+        } else {
+            &config.model_id
+        };
 
-        if !config.model_dir.exists() {
-            return Err(crate::IngestError::Config(format!(
-                "NER model directory not found: {}",
-                config.model_dir.display()
-            )));
-        }
+        tracing::info!(model = %model_id, "loading GLiNER2 candle model");
 
-        let model_path = config.model_dir.join("model.onnx");
-        if !model_path.exists() {
-            return Err(crate::IngestError::Config(format!(
-                "model.onnx not found in {}. Run: engram model install ner <model-id>",
-                config.model_dir.display()
-            )));
-        }
+        let model = anno::backends::GLiNER2Candle::from_pretrained(model_id)
+            .map_err(|e| crate::IngestError::Config(format!(
+                "failed to load GLiNER2 model '{}': {}", model_id, e
+            )))?;
 
-        Ok(Self { config, ner_binary })
+        let coref = if config.coreference_enabled {
+            Some(anno::backends::coref::mention_ranking::MentionRankingCoref::new())
+        } else {
+            None
+        };
+
+        tracing::info!(
+            model = %model_id,
+            coref = config.coreference_enabled,
+            "anno NER backend ready (candle)"
+        );
+
+        Ok(Self { config, model, coref })
     }
 
     /// Check if the backend is ready for inference.
     pub fn is_ready(&self) -> bool {
-        self.config.model_dir.join("model.onnx").exists()
-            && self.config.model_dir.join("tokenizer.json").exists()
+        true // Model is loaded in constructor; if we got here, it's ready
     }
 
-    /// Run NER on a batch of texts via the engram-ner subprocess.
-    fn run_ner(&self, texts: &[&str]) -> Result<Vec<Vec<NerEntity>>, String> {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
+    /// Run coreference resolution on text.
+    /// Returns a mapping from mention text to canonical (longest) mention text.
+    fn resolve_coreferences(&self, text: &str) -> std::collections::HashMap<String, String> {
+        let mut mapping = std::collections::HashMap::new();
 
-        let request = serde_json::json!({
-            "model_dir": self.config.model_dir.to_string_lossy(),
-            "texts": texts,
-            "labels": self.config.entity_types,
-            "threshold": self.config.min_confidence,
-        });
+        if let Some(ref coref) = self.coref {
+            match coref.resolve(text) {
+                Ok(clusters) => {
+                    for cluster in &clusters {
+                        // Find the canonical mention (longest text = most informative)
+                        let canonical = cluster.mentions
+                            .iter()
+                            .max_by_key(|m| m.text.len())
+                            .map(|m| m.text.clone());
 
-        let mut child = Command::new(&self.ner_binary)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to spawn engram-ner: {e}"))?;
-
-        // Write request and close stdin to signal EOF
-        {
-            let stdin = child.stdin.as_mut().ok_or("failed to open stdin")?;
-            serde_json::to_writer(&mut *stdin, &request)
-                .map_err(|e| format!("failed to write request: {e}"))?;
-            writeln!(stdin).map_err(|e| format!("failed to write newline: {e}"))?;
+                        if let Some(ref canonical_text) = canonical {
+                            for mention in &cluster.mentions {
+                                if &mention.text != canonical_text {
+                                    mapping.insert(mention.text.clone(), canonical_text.clone());
+                                }
+                            }
+                        }
+                    }
+                    if !mapping.is_empty() {
+                        tracing::debug!(
+                            mappings = mapping.len(),
+                            "coreference resolved {} mentions",
+                            mapping.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("coreference resolution skipped: {e}");
+                }
+            }
         }
-        // Drop stdin to close it
-        drop(child.stdin.take());
 
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("engram-ner process error: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("engram-ner exited with {}: {stderr}", output.status));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let first_line = stdout.lines().next().unwrap_or("");
-
-        let resp: serde_json::Value = serde_json::from_str(first_line)
-            .map_err(|e| format!("invalid response from engram-ner: {e}"))?;
-
-        if resp.get("ok") == Some(&serde_json::Value::Bool(true)) {
-            let results: Vec<Vec<NerEntity>> =
-                serde_json::from_value(resp["results"].clone())
-                    .map_err(|e| format!("failed to parse results: {e}"))?;
-            Ok(results)
-        } else {
-            let error = resp["error"].as_str().unwrap_or("unknown error");
-            Err(error.to_string())
-        }
+        mapping
     }
-}
-
-/// Entity returned by the engram-ner process.
-#[cfg(feature = "anno")]
-#[derive(serde::Deserialize)]
-struct NerEntity {
-    text: String,
-    label: String,
-    score: f32,
-    start: usize,
-    end: usize,
 }
 
 #[cfg(feature = "anno")]
@@ -164,34 +146,44 @@ impl Extractor for AnnoBackend {
 
         let _ = lang; // GLiNER handles multilingual natively
 
-        match self.run_ner(&[text]) {
-            Ok(mut results) => {
-                if let Some(entities) = results.pop() {
-                    entities
-                        .into_iter()
-                        .map(|e| ExtractedEntity {
-                            text: e.text,
-                            entity_type: e.label,
-                            span: (e.start, e.end),
-                            confidence: e.score,
-                            method: ExtractionMethod::StatisticalModel,
-                            language: String::new(),
-                            resolved_to: None,
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
+        // Run zero-shot NER with custom entity types via ZeroShotNER trait
+        use anno::ZeroShotNER;
+        let labels: Vec<&str> = self.config.entity_types.iter().map(|s| s.as_str()).collect();
+
+        let entities = match self.model.extract_with_types(text, &labels, self.config.min_confidence) {
+            Ok(ents) => ents,
+            Err(e) => {
+                tracing::warn!(error = %e, "GLiNER2 candle inference failed");
+                return Vec::new();
+            }
+        };
+
+        // Run coreference resolution to get pronoun -> canonical mappings
+        let coref_map = self.resolve_coreferences(text);
+
+        // Convert anno entities to engram ExtractedEntity
+        entities
+            .into_iter()
+            .map(|e| {
+                let entity_text = e.text.clone();
+                // If coreference resolved this mention, use the canonical name
+                let resolved_text = coref_map.get(&entity_text).cloned();
+
+                ExtractedEntity {
+                    text: resolved_text.as_deref().unwrap_or(&entity_text).to_string(),
+                    entity_type: e.entity_type.as_label().to_string(),
+                    span: (e.start, e.end),
+                    confidence: e.confidence.value() as f32,
+                    method: ExtractionMethod::StatisticalModel,
+                    language: String::new(),
+                    resolved_to: None,
                 }
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "engram-ner inference failed");
-                Vec::new()
-            }
-        }
+            })
+            .collect()
     }
 
     fn name(&self) -> &str {
-        "gliner-onnx"
+        "gliner2-candle"
     }
 
     fn method(&self) -> ExtractionMethod {
@@ -199,56 +191,9 @@ impl Extractor for AnnoBackend {
     }
 
     fn supported_languages(&self) -> Vec<String> {
-        // Depends on the installed model — GLiNER Multi supports 100+ languages
+        // GLiNER Multi supports 100+ languages
         vec![]
     }
-}
-
-/// Find the `engram-ner` binary next to the current executable.
-fn find_ner_binary() -> Option<std::path::PathBuf> {
-    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-
-    #[cfg(target_os = "windows")]
-    let name = "engram-ner.exe";
-    #[cfg(not(target_os = "windows"))]
-    let name = "engram-ner";
-
-    let path = exe_dir.join(name);
-    if path.exists() {
-        Some(path)
-    } else {
-        // Also check PATH
-        which_in_path(name)
-    }
-}
-
-/// Check if a binary exists in PATH.
-fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(name))
-            .find(|p| p.exists())
-    })
-}
-
-/// Check if an NER model is installed at the standard location.
-pub fn find_ner_model(model_name: &str) -> Option<AnnoConfig> {
-    let home = dirs_next()?;
-    let model_dir = home.join(".engram").join("models").join("ner").join(model_name);
-
-    if model_dir.join("model.onnx").exists() && model_dir.join("tokenizer.json").exists() {
-        Some(AnnoConfig {
-            model_dir,
-            ..Default::default()
-        })
-    } else {
-        None
-    }
-}
-
-/// Check if the engram-ner binary is available.
-pub fn is_ner_binary_available() -> bool {
-    find_ner_binary().is_some()
 }
 
 /// Get the user's home directory.
@@ -258,7 +203,40 @@ fn dirs_next() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-/// List installed NER models.
+/// Check if a NER model is available (HuggingFace model ID or local path).
+///
+/// For candle backend, models are downloaded from HuggingFace on first use.
+/// This function checks if a model directory exists locally (legacy ONNX models)
+/// or returns a config with the model ID for HuggingFace download.
+pub fn find_ner_model(model_name: &str) -> Option<AnnoConfig> {
+    let home = dirs_next()?;
+    let model_dir = home.join(".engram").join("models").join("ner").join(model_name);
+
+    // Check for local model (legacy ONNX or downloaded safetensors)
+    let has_onnx = model_dir.join("model.onnx").exists();
+    let has_safetensors = model_dir.join("model.safetensors").exists()
+        || model_dir.join("gliner_model.safetensors").exists();
+
+    if has_onnx || has_safetensors {
+        return Some(AnnoConfig {
+            model_id: model_name.to_string(),
+            ..Default::default()
+        });
+    }
+
+    // For HuggingFace models (e.g. "urchade/gliner_multi-v2.1"),
+    // always return a config -- anno handles download + caching via hf-hub
+    if model_name.contains('/') {
+        return Some(AnnoConfig {
+            model_id: model_name.to_string(),
+            ..Default::default()
+        });
+    }
+
+    None
+}
+
+/// List installed NER models (local models only).
 pub fn list_installed_models() -> Vec<String> {
     let home = match dirs_next() {
         Some(h) => h,
@@ -276,11 +254,48 @@ pub fn list_installed_models() -> Vec<String> {
         .flatten()
         .filter_map(|entry| {
             let entry = entry.ok()?;
-            if entry.path().join("model.onnx").exists() {
+            let path = entry.path();
+            let has_model = path.join("model.onnx").exists()
+                || path.join("model.safetensors").exists()
+                || path.join("gliner_model.safetensors").exists();
+            if has_model {
                 entry.file_name().into_string().ok()
             } else {
                 None
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_anno_config_defaults() {
+        let config = AnnoConfig::default();
+        assert_eq!(config.entity_types.len(), 6);
+        assert!(config.entity_types.contains(&"person".to_string()));
+        assert!(config.entity_types.contains(&"organization".to_string()));
+        assert!(config.entity_types.contains(&"location".to_string()));
+        assert!((config.min_confidence - 0.3).abs() < f32::EPSILON);
+        assert!(config.coreference_enabled);
+        assert!(config.model_id.is_empty());
+    }
+
+    #[test]
+    fn test_find_ner_model_hf_id() {
+        // HuggingFace model IDs with "/" always return Some
+        let result = find_ner_model("urchade/gliner_multi-v2.1");
+        assert!(result.is_some());
+        let cfg = result.unwrap();
+        assert_eq!(cfg.model_id, "urchade/gliner_multi-v2.1");
+    }
+
+    #[test]
+    fn test_find_ner_model_nonexistent_local() {
+        // Non-existent local model without "/" returns None
+        let result = find_ner_model("nonexistent_model_xyz_123");
+        assert!(result.is_none());
+    }
 }

@@ -16,12 +16,16 @@ pub fn Dashboard() -> impl IntoView {
     let api3 = api.clone();
     let api_sources = api.clone();
 
+    // Version signal to trigger stats re-fetch after seed
+    let (stats_version, set_stats_version) = signal(0u32);
+
     let health = LocalResource::new(move || {
         let api = api1.clone();
         async move { api.get::<HealthResponse>("/health").await.ok() }
     });
 
     let stats = LocalResource::new(move || {
+        let _v = stats_version.get(); // re-run when version changes
         let api = api2.clone();
         async move { api.get::<StatsResponse>("/stats").await.ok() }
     });
@@ -123,6 +127,8 @@ pub fn Dashboard() -> impl IntoView {
                     )));
                     set_analyze_result.set(None);
                     set_seed_text.set(String::new());
+                    // Trigger stats refresh
+                    set_stats_version.update(|v| *v += 1);
                 }
                 Err(e) => set_seed_msg.set(Some(format!("Ingest failed: {e}"))),
             }

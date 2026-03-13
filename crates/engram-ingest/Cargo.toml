@@ -8,8 +8,9 @@ license.workspace = true
 [features]
 default = []
 lang-detect = ["dep:whatlang"]  # Language detection via whatlang
-anno = []                         # GLiNER NER via external engram-ner binary
-glirel = []                       # GLiREL relation extraction via external engram-rel binary
+anno = ["dep:anno"]             # GLiNER2 NER + coreference via anno crate (candle backend, in-process)
+nli-rel = []                     # NLI-based relation extraction via external engram-rel binary
+glirel = []                       # GLiREL relation extraction via external engram-rel binary (DEPRECATED)
 spacy = []                       # Feature-gated SpaCy HTTP sidecar integration
 llm-ner = []                    # Feature-gated LLM fallback NER
 file-source = ["dep:notify"]    # File watching source with notify crate
@@ -28,6 +29,7 @@ toml = "0.8"
 whatlang = { version = "0.18", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 notify = { version = "7", optional = true }
+anno = { git = "https://github.com/arclabs561/anno.git", rev = "2c4a232", default-features = false, features = ["candle", "analysis"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

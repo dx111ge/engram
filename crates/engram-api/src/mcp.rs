@@ -840,9 +840,12 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
             };
 
             let graph_clone = state.graph.clone();
+            let (ner_model, rel_model) = state.config.read()
+                .map(|c| (c.ner_model.clone(), c.rel_model.clone()))
+                .unwrap_or((None, None));
             let text_owned = text.to_string();
             let result = std::thread::spawn(move || {
-                let pipeline = crate::handlers::build_pipeline_mcp(graph_clone, config, None);
+                let pipeline = crate::handlers::build_pipeline_mcp(graph_clone, config, None, ner_model, rel_model);
                 let items = vec![engram_ingest::types::RawItem {
                     content: engram_ingest::types::Content::Text(text_owned),
                     source_url: None,

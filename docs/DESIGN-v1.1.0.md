@@ -1020,8 +1020,8 @@ confidence = 0.95
 | Graph Gazetteer | Instant | Perfect (known entities) | None (graph itself) | Always (first check) |
 | Regex/Rules | Very fast | Domain-specific | None | Domain entities (tickers, codes) |
 | Learned Patterns | Fast | Evidence-based | None (graph stats) | After enough data |
-| anno (GLiNER2) | Fast | High | anno crate (feature-gated) | Zero-shot, coreference, candle backend |
-| Raw ONNX Model | Fast | High | ort crate | Fallback if anno unavailable |
+| anno (GLiNER2, candle) | Fast | High | anno crate (feature-gated, pure Rust) | Zero-shot NER, in-process, no ort dependency |
+| NLI RE (subprocess) | Medium | High | ort + tokenizers (engram-rel binary) | Zero-shot relation extraction, multilingual |
 | SpaCy HTTP | Medium | High | Python sidecar | Full NLP pipeline needed |
 | LLM Fallback | Slow | Variable | External API | Last resort only |
 
@@ -1063,39 +1063,21 @@ Only `anno_backend.rs` imports the `anno` crate. All other NER code depends only
 ```toml
 # engram-ingest/Cargo.toml
 [dependencies]
-anno = { version = "0.3", optional = true, default-features = false, features = ["onnx"] }
+anno = { git = "...", optional = true, default-features = false, features = ["candle", "analysis"] }
 
 [features]
 default = []
-anno = ["dep:anno"]
-candle = ["anno/candle"]
+anno = ["dep:anno"]    # In-process NER via candle (no ort dependency)
+nli-rel = []           # NLI RE via engram-rel subprocess (ort + tokenizers in separate binary)
 ```
 
 ```rust
-// anno_backend.rs
+// anno_backend.rs -- uses candle backend (pure Rust ML, no ONNX Runtime)
 #[cfg(feature = "anno")]
 pub struct AnnoBackend {
-    pipeline: anno::Pipeline,
     config: AnnoConfig,
-}
-
-#[cfg(feature = "anno")]
-impl NerBackend for AnnoBackend {
-    fn extract(&self, text: &str, lang: &DetectedLanguage) -> Vec<ExtractedEntity> {
-        let anno_results = self.pipeline.extract(text);
-        anno_results.into_iter().map(|r| ExtractedEntity {
-            text: r.text,
-            entity_type: r.entity_type,
-            span: r.span,
-            confidence: r.confidence,
-            method: ExtractionMethod::StatisticalModel,
-            language: lang.code.clone(),
-            resolved_to: None,
-        }).collect()
-    }
-    fn name(&self) -> &str { "anno" }
-    fn method(&self) -> ExtractionMethod { ExtractionMethod::StatisticalModel }
-    fn supported_languages(&self) -> Vec<String> { vec![] } // anno handles internally
+    model: anno::backends::GLiNER2Candle,
+    coref: Option<anno::backends::coref::mention_ranking::MentionRankingCoref>,
 }
 ```
 
@@ -1128,7 +1110,7 @@ min_accuracy = 0.85                # accuracy floor
 max_patterns = 1000                # cap to prevent bloat
 
 [ner.model]
-default = "gliner-x-base"         # installed via 'engram model install ner'
+default = "urchade/gliner_multi-v2.1"  # HuggingFace model ID, auto-downloaded via candle
 # Per-language overrides possible:
 # zh = "gliner-moe-multi"
 # ja = "gliner-moe-multi"
@@ -1170,6 +1152,63 @@ engram model switch ner gliner-moe-multi  # switch to different model
 - Switching models does NOT re-run NER on previously ingested text (explicit opt-in only)
 - To re-run NER with a new model: `engram reindex --ner` (expensive, full re-extraction)
 - Model files stored in `{data_dir}/models/` alongside the `.brain` file
+
+### 4.14 Relation Extraction (NLI-based)
+
+**v1.2.0 update:** Relation extraction uses NLI (Natural Language Inference) instead of GLiREL.
+
+**Why NLI over GLiREL:**
+- GLiREL: 1.7GB FP32, English-only, CC BY-NC-SA license
+- NLI RE: ~100MB, 100+ languages, MIT license, zero-shot via hypothesis templates
+
+**Algorithm (EMNLP 2021, Sainz et al.):**
+
+For each text chunk after NER + coreference:
+1. Extract entity pairs (head, tail) from the same sentence
+2. For each entity pair x relation template:
+   - Premise: sentence containing both entities
+   - Hypothesis: template with entities filled in (e.g., "John works at Google")
+   - NLI model classifies: entailment / neutral / contradiction
+   - If entailment > threshold (default 0.5) -> emit relation
+3. Deduplicate and merge with other RE backends in the chain
+
+**Architecture:** NLI inference runs in a separate `engram-rel` binary (subprocess, JSON Lines protocol) because `tokenizers` (esaxx-rs, static CRT) and `ort_sys` (dynamic CRT) conflict on Windows MSVC debug builds. NER is in-process (candle, latency-sensitive). RE runs once per chunk (subprocess overhead negligible).
+
+**Relation templates (21 defaults):**
+
+Users can customize templates in system settings. Default set sourced from TACRED/FewRel/Wikidata:
+`works_at`, `born_in`, `lives_in`, `educated_at`, `spouse`, `parent_of`, `child_of`, `citizen_of`, `member_of`, `holds_position`, `founded_by`, `headquartered_in`, `subsidiary_of`, `acquired_by`, `located_in`, `instance_of`, `part_of`, `capital_of`, `cause_of`, `author_of`, `produces`.
+
+Template format: `"{head} works at {tail}"` -- natural language hypothesis with `{head}` and `{tail}` placeholders.
+
+**NLI models (recommended):**
+
+| Model | Size | Speed | Languages |
+|-------|------|-------|-----------|
+| multilingual-MiniLMv2-L6-mnli-xnli | ~100MB | Fast (~5ms/pair CPU) | 100+ |
+| mDeBERTa-v3-base-xnli | ~280MB | Medium | 100+ |
+
+**Performance:** O(entity_pairs x templates) NLI calls. Typical: 5 entities -> 20 pairs x 21 templates = 420 calls at ~5ms = ~2s per chunk. Acceptable for batch ingest.
+
+### 4.15 Coreference Resolution
+
+Coreference runs after NER, before RE. Resolves pronouns and noun phrases to canonical entity names.
+
+**Backends (rule-based, no model download):**
+
+| Backend | Feature gate | Approach |
+|---------|-------------|----------|
+| MentionRankingCoref | always available | Antecedent ranking, acronyms, "be-phrase" patterns |
+| SimpleCorefResolver | `analysis` feature | 9-sieve cascade (exact match, head match, pronoun, fuzzy) |
+
+**Pipeline:**
+```
+NER output: ["John Smith", "He", "Apple", "the company"]
+     -> Coreference -> ["John Smith", "John Smith", "Apple", "Apple"]
+     -> RE input uses canonical names
+```
+
+Coreference is enabled by default and configured via `coreference_enabled` in `EngineConfig`.
 
 ---
 

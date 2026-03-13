@@ -72,6 +72,12 @@ pub struct EngineConfig {
     pub ner_model: Option<String>,
     /// NER endpoint URL (for external NER services)
     pub ner_endpoint: Option<String>,
+    /// Relation extraction model name (e.g. "multilingual-MiniLMv2-L6-mnli-xnli")
+    pub rel_model: Option<String>,
+    /// Custom relation templates for NLI-based RE: { rel_type: hypothesis_template }
+    pub relation_templates: Option<std::collections::HashMap<String, String>>,
+    /// Enable coreference resolution (pronoun → canonical entity). Default: true.
+    pub coreference_enabled: Option<bool>,
     /// Mesh enabled flag
     pub mesh_enabled: Option<bool>,
     /// Mesh topology: "star", "full", "ring"
@@ -141,6 +147,15 @@ impl EngineConfig {
         }
         if other.ner_endpoint.is_some() {
             self.ner_endpoint = other.ner_endpoint.clone();
+        }
+        if other.rel_model.is_some() {
+            self.rel_model = other.rel_model.clone();
+        }
+        if other.relation_templates.is_some() {
+            self.relation_templates = other.relation_templates.clone();
+        }
+        if other.coreference_enabled.is_some() {
+            self.coreference_enabled = other.coreference_enabled;
         }
         if other.mesh_enabled.is_some() {
             self.mesh_enabled = other.mesh_enabled;
@@ -542,5 +557,54 @@ impl AppState {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_config_serde_round_trip() {
+        let mut config = EngineConfig::default();
+        config.ner_provider = Some("anno".into());
+        config.ner_model = Some("urchade/gliner_multi-v2.1".into());
+        config.rel_model = Some("multilingual-MiniLMv2-L6-mnli-xnli".into());
+        config.coreference_enabled = Some(true);
+        config.relation_templates = Some({
+            let mut m = HashMap::new();
+            m.insert("works_at".into(), "{head} works at {tail}".into());
+            m.insert("born_in".into(), "{head} was born in {tail}".into());
+            m
+        });
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: EngineConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.ner_provider, Some("anno".into()));
+        assert_eq!(parsed.ner_model, Some("urchade/gliner_multi-v2.1".into()));
+        assert_eq!(parsed.rel_model, Some("multilingual-MiniLMv2-L6-mnli-xnli".into()));
+        assert_eq!(parsed.coreference_enabled, Some(true));
+        assert_eq!(parsed.relation_templates.as_ref().unwrap().len(), 2);
+        assert_eq!(
+            parsed.relation_templates.as_ref().unwrap().get("works_at").unwrap(),
+            "{head} works at {tail}"
+        );
+    }
+
+    #[test]
+    fn engine_config_merge_new_fields() {
+        let mut base = EngineConfig::default();
+        let mut overlay = EngineConfig::default();
+        overlay.relation_templates = Some({
+            let mut m = HashMap::new();
+            m.insert("test".into(), "{head} tests {tail}".into());
+            m
+        });
+        overlay.coreference_enabled = Some(false);
+
+        base.merge(&overlay);
+        assert_eq!(base.relation_templates.as_ref().unwrap().len(), 1);
+        assert_eq!(base.coreference_enabled, Some(false));
     }
 }

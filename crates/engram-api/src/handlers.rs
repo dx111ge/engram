@@ -1749,16 +1749,23 @@ pub fn build_pipeline_mcp(
     graph: std::sync::Arc<std::sync::RwLock<engram_core::graph::Graph>>,
     config: engram_ingest::PipelineConfig,
     kb_endpoints: Option<Vec<crate::state::KbEndpointConfig>>,
+    ner_model: Option<String>,
+    rel_model: Option<String>,
 ) -> engram_ingest::Pipeline {
-    build_pipeline(graph, config, kb_endpoints)
+    build_pipeline(graph, config, kb_endpoints, ner_model, rel_model, None, None)
 }
 
-/// Build a pipeline with all available NER backends wired up.
+/// Build a pipeline with all available NER + relation extraction backends wired up.
+/// `ner_model` / `rel_model` come from EngineConfig — the user's chosen models.
 #[cfg(feature = "ingest")]
 fn build_pipeline(
     graph: std::sync::Arc<std::sync::RwLock<engram_core::graph::Graph>>,
     config: engram_ingest::PipelineConfig,
     kb_endpoints: Option<Vec<crate::state::KbEndpointConfig>>,
+    ner_model: Option<String>,
+    rel_model: Option<String>,
+    relation_templates: Option<std::collections::HashMap<String, String>>,
+    _coreference_enabled: Option<bool>,
 ) -> engram_ingest::Pipeline {
     use engram_ingest::{NerChain, ChainStrategy};
 
@@ -1788,23 +1795,36 @@ fn build_pipeline(
     }
 
     // 3. GLiNER/anno backend (zero-shot NER for new entities)
+    //    Uses the model from system config (set via wizard or /config API).
+    //    Falls back to first installed model if config is empty.
     #[cfg(feature = "anno")]
     {
-        use engram_ingest::anno_backend::{AnnoBackend, find_ner_model};
-        if let Some(mut cfg) = find_ner_model("gliner_small-v2.1") {
-            cfg.entity_types = vec![
-                "person".into(), "organization".into(), "location".into(),
-                "date".into(), "event".into(), "product".into(),
-            ];
-            cfg.min_confidence = 0.3;
-            match AnnoBackend::new(cfg) {
-                Ok(backend) => {
-                    tracing::info!("GLiNER NER backend loaded");
-                    chain.add_backend(Box::new(backend));
+        use engram_ingest::anno_backend::{AnnoBackend, find_ner_model, list_installed_models};
+
+        // Determine which model to load: config > first installed > none
+        let model_name = ner_model
+            .as_deref()
+            .map(String::from)
+            .or_else(|| list_installed_models().into_iter().next());
+
+        if let Some(ref name) = model_name {
+            if let Some(mut cfg) = find_ner_model(name) {
+                cfg.entity_types = vec![
+                    "person".into(), "organization".into(), "location".into(),
+                    "date".into(), "event".into(), "product".into(),
+                ];
+                cfg.min_confidence = 0.3;
+                match AnnoBackend::new(cfg) {
+                    Ok(backend) => {
+                        tracing::info!(model = %name, "GLiNER NER backend loaded from config");
+                        chain.add_backend(Box::new(backend));
+                    }
+                    Err(e) => {
+                        tracing::warn!(model = %name, "GLiNER NER backend failed: {e}");
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("GLiNER NER backend unavailable: {e}");
-                }
+            } else {
+                tracing::warn!(model = %name, "GLiNER model not found on disk");
             }
         }
     }
@@ -1872,6 +1892,94 @@ fn build_pipeline(
         rel_chain.add_backend(Box::new(engram_ingest::KgeRelationExtractor::new(kge)));
     }
 
+    // 3. GLiREL zero-shot relation extraction (DEPRECATED — use NLI-rel instead)
+    #[cfg(feature = "glirel")]
+    {
+        use engram_ingest::rel_glirel::{GlirelBackend, find_rel_model, list_installed_rel_models};
+
+        let model_name = rel_model
+            .as_deref()
+            .map(String::from)
+            .or_else(|| {
+                ner_model.as_deref().and_then(|n| {
+                    if n.starts_with("gliner_") {
+                        Some(n.replace("gliner_", "glirel_"))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .or_else(|| list_installed_rel_models().into_iter().next());
+
+        if let Some(ref name) = model_name {
+            if let Some(mut cfg) = find_rel_model(name) {
+                cfg.candidate_labels = vec![
+                    "invaded".into(), "attacked".into(), "allied_with".into(),
+                    "sanctioned".into(), "borders".into(), "capital_of".into(),
+                    "part_of".into(), "located_in".into(),
+                    "supplied_to".into(), "commanded_by".into(), "deployed_to".into(),
+                    "fought_in".into(), "defeated".into(),
+                    "trades_with".into(), "exports_to".into(), "funded_by".into(),
+                    "subsidiary_of".into(), "acquired_by".into(),
+                    "leads".into(), "member_of".into(), "founded_by".into(),
+                    "born_in".into(), "works_at".into(), "married_to".into(),
+                    "created_by".into(), "successor_of".into(),
+                ];
+                cfg.min_confidence = 0.3;
+                match GlirelBackend::new(cfg) {
+                    Ok(backend) => {
+                        tracing::info!(model = %name, "GLiREL relation extraction loaded (deprecated)");
+                        rel_chain.add_backend(Box::new(backend));
+                    }
+                    Err(e) => {
+                        tracing::warn!(model = %name, "GLiREL backend failed: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. NLI-based relation extraction (zero-shot, multilingual, ~80MB model)
+    //    Uses rel_model from config, falls back to first installed NLI model.
+    //    Custom relation templates can be set via EngineConfig.relation_templates.
+    #[cfg(feature = "nli-rel")]
+    {
+        use engram_ingest::rel_nli::{NliRelBackend, find_nli_model, list_installed_nli_models};
+
+        let model_name = rel_model
+            .as_deref()
+            .map(String::from)
+            .or_else(|| list_installed_nli_models().into_iter().next());
+
+        if let Some(ref name) = model_name {
+            if let Some(mut cfg) = find_nli_model(name) {
+                // Apply custom relation templates from config if provided
+                if let Some(ref templates) = relation_templates {
+                    if !templates.is_empty() {
+                        cfg.relation_templates = templates.clone();
+                    }
+                }
+                cfg.min_confidence = 0.5;
+
+                match NliRelBackend::new(cfg) {
+                    Ok(backend) => {
+                        tracing::info!(
+                            model = %name,
+                            templates = backend.template_count(),
+                            "NLI relation extraction backend loaded"
+                        );
+                        rel_chain.add_backend(Box::new(backend));
+                    }
+                    Err(e) => {
+                        tracing::warn!(model = %name, "NLI-rel backend failed: {e}");
+                    }
+                }
+            } else {
+                tracing::debug!(model = %name, "NLI-rel model not found");
+            }
+        }
+    }
+
     tracing::info!("Relation chain: MergeAll with {} backends", rel_chain.backend_count());
     pipeline.add_relation_extractor(Box::new(rel_chain));
 
@@ -1907,8 +2015,13 @@ pub async fn ingest(
         ..Default::default()
     };
 
-    let kb_endpoints = state.config.read().unwrap().kb_endpoints.clone();
-    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints);
+    let (kb_endpoints, ner_model, rel_model, relation_templates, coreference_enabled) = {
+        let c = state.config.read().unwrap();
+        (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
+         c.relation_templates.clone(), c.coreference_enabled)
+    };
+    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints, ner_model, rel_model,
+        relation_templates, coreference_enabled);
 
     // Convert IngestItems to RawItems
     let items: Vec<engram_ingest::types::RawItem> = req.items
@@ -1989,8 +2102,13 @@ pub async fn ingest_analyze(
     use engram_ingest::PipelineConfig;
 
     let config = PipelineConfig::default();
-    let kb_endpoints = state.config.read().unwrap().kb_endpoints.clone();
-    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints);
+    let (kb_endpoints, ner_model, rel_model, relation_templates, coreference_enabled) = {
+        let c = state.config.read().unwrap();
+        (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
+         c.relation_templates.clone(), c.coreference_enabled)
+    };
+    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints, ner_model, rel_model,
+        relation_templates, coreference_enabled);
 
     let items = vec![engram_ingest::types::RawItem {
         content: engram_ingest::types::Content::Text(req.text),
@@ -2080,8 +2198,13 @@ pub async fn ingest_file(
         ..Default::default()
     };
 
-    let kb_endpoints = state.config.read().unwrap().kb_endpoints.clone();
-    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints);
+    let (kb_endpoints, ner_model, rel_model, relation_templates, coreference_enabled) = {
+        let c = state.config.read().unwrap();
+        (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
+         c.relation_templates.clone(), c.coreference_enabled)
+    };
+    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints, ner_model, rel_model,
+        relation_templates, coreference_enabled);
 
     // Try to parse body as UTF-8 text
     let text = String::from_utf8(body.to_vec())
@@ -3116,27 +3239,33 @@ pub async fn upload_onnx_model(
 pub async fn check_onnx_model(
     State(state): State<AppState>,
 ) -> ApiResult<serde_json::Value> {
-    let brain_path = state.config_path.as_ref()
-        .and_then(|p| p.to_str())
-        .and_then(|s| s.strip_suffix(".config"))
-        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine brain file path"))?;
+    // Check ~/.engram/models/embed/ for any installed model
+    let embed_dir = engram_home().map(|h| h.join("models").join("embed"));
+    let found_model = embed_dir.as_ref().and_then(|dir| {
+        std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).find(|e| {
+            let p = e.path();
+            p.join("model.onnx").exists() && p.join("tokenizer.json").exists()
+        }).map(|e| e.path())
+    });
 
-    let model_path = format!("{}.model.onnx", brain_path);
-    let tokenizer_path = format!("{}.tokenizer.json", brain_path);
-    let model_exists = std::path::Path::new(&model_path).exists();
-    let tokenizer_exists = std::path::Path::new(&tokenizer_path).exists();
-    let model_size = if model_exists {
-        std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0)
-    } else { 0 };
-
-    Ok(Json(serde_json::json!({
-        "ready": model_exists && tokenizer_exists,
-        "model_exists": model_exists,
-        "tokenizer_exists": tokenizer_exists,
-        "model_path": model_path,
-        "tokenizer_path": tokenizer_path,
-        "model_size_mb": model_size as f64 / 1_048_576.0,
-    })))
+    if let Some(ref model_dir) = found_model {
+        let model_path = model_dir.join("model.onnx");
+        let model_size = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
+        Ok(Json(serde_json::json!({
+            "ready": true,
+            "model_exists": true,
+            "tokenizer_exists": true,
+            "model_path": model_path.to_string_lossy(),
+            "model_size_mb": model_size as f64 / 1_048_576.0,
+        })))
+    } else {
+        Ok(Json(serde_json::json!({
+            "ready": false,
+            "model_exists": false,
+            "tokenizer_exists": false,
+            "model_size_mb": 0.0,
+        })))
+    }
 }
 
 /// POST /config/onnx-download — Download ONNX embedding model from HuggingFace.
@@ -3161,13 +3290,23 @@ pub async fn download_onnx_model(
         }
     }
 
-    let brain_path = state.config_path.as_ref()
-        .and_then(|p| p.to_str())
-        .and_then(|s| s.strip_suffix(".config"))
-        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine brain file path"))?;
+    // Derive model name from URL or request body
+    let model_name = body["model_id"].as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            // Extract from URL: https://huggingface.co/intfloat/multilingual-e5-small/resolve/...
+            model_url.split('/').nth(4).unwrap_or("default").to_string()
+        });
 
-    let model_path = format!("{}.model.onnx", brain_path);
-    let tokenizer_path = format!("{}.tokenizer.json", brain_path);
+    // Save to ~/.engram/models/embed/<model_name>/
+    let home = engram_home()
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
+    let model_dir = home.join("models").join("embed").join(&model_name);
+    tokio::fs::create_dir_all(&model_dir).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create model dir failed: {e}")))?;
+
+    let model_path = model_dir.join("model.onnx");
+    let tokenizer_path = model_dir.join("tokenizer.json");
 
     let client = reqwest::Client::new();
 
@@ -3206,24 +3345,21 @@ pub async fn download_onnx_model(
     }
     file.flush().await.map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("flush failed: {e}")))?;
 
-    tracing::info!("downloaded {} MB model to {}", downloaded / 1_048_576, model_path);
+    tracing::info!("downloaded {} MB model to {}", downloaded / 1_048_576, model_path.display());
 
     // Hot-load the ONNX embedder
     let mut activated = false;
     let mut load_error: Option<String> = None;
     #[cfg(feature = "onnx")]
     {
-        match engram_core::OnnxEmbedder::load(
-            std::path::Path::new(&model_path),
-            std::path::Path::new(&tokenizer_path),
-        ) {
+        match engram_core::OnnxEmbedder::load(&model_path, &tokenizer_path) {
             Ok(embedder) => {
                 let dim = embedder.dim();
                 let mut g = state.graph.write().map_err(|_| write_lock_err())?;
                 g.set_embedder(Box::new(embedder));
                 drop(g);
-                state.set_embedder_info("ONNX Local".into(), dim, "local".into());
-                tracing::info!("hot-loaded ONNX embedder ({}D)", dim);
+                state.set_embedder_info(model_name.clone(), dim, "local".into());
+                tracing::info!("hot-loaded ONNX embedder {} ({}D)", model_name, dim);
                 activated = true;
             }
             Err(e) => {
@@ -3243,8 +3379,8 @@ pub async fn download_onnx_model(
 
     Ok(Json(serde_json::json!({
         "status": "ok",
-        "model_path": model_path,
-        "tokenizer_path": tokenizer_path,
+        "model_path": model_path.to_string_lossy(),
+        "tokenizer_path": tokenizer_path.to_string_lossy(),
         "model_size_mb": downloaded as f64 / 1_048_576.0,
         "content_length_mb": content_length as f64 / 1_048_576.0,
         "activated": activated,
@@ -3431,6 +3567,13 @@ fn dirs_next_home() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)
+}
+
+/// Resolve the engram home directory (~/.engram/).
+fn engram_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("ENGRAM_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs_next_home().map(|h| h.join(".engram")))
 }
 
 // ── POST /reindex — Re-embed all nodes ──────────────────────────────
