@@ -3261,11 +3261,13 @@ pub async fn ollama_pull(
     let model = body["model"].as_str()
         .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "model required"))?;
 
-    // Get Ollama endpoint from config, or default
+    // Get Ollama endpoint from config -- prefer llm_endpoint, skip non-HTTP (e.g. onnx://)
     let ollama_base = {
         let cfg = state.config.read().map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "config lock"))?;
-        cfg.embed_endpoint.clone()
-            .or_else(|| cfg.llm_endpoint.clone())
+        let candidates = [cfg.llm_endpoint.clone(), cfg.embed_endpoint.clone()];
+        candidates.into_iter()
+            .flatten()
+            .find(|ep| ep.starts_with("http://") || ep.starts_with("https://"))
             .unwrap_or_else(|| "http://localhost:11434".to_string())
     };
     // Extract base URL (strip path)

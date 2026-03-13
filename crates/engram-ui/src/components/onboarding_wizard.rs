@@ -141,7 +141,7 @@ const NER_PRESETS: &[NerPreset] = &[
             ("gliner_medium-v2.1", "GLiNER Medium v2.1", "~110MB, better accuracy", "onnx-community/gliner_medium-v2.1", "EN"),
             ("gliner_large-v2.1", "GLiNER Large v2.1", "~340MB, best accuracy", "onnx-community/gliner_large-v2.1", "EN"),
             ("gliner_multi-v2.1", "GLiNER Multi v2.1", "~220MB, 12 languages", "onnx-community/gliner_multi-v2.1", "Multilingual"),
-            ("gliner_multi_pii-v1", "GLiNER Multi PII v1", "~220MB, PII detection", "onnx-community/gliner_multi_pii-v1", "Multilingual"),
+            ("gliner_multi_pii-v1", "GLiNER Multi PII v1", "~220MB, names/phones/emails/addresses", "onnx-community/gliner_multi_pii-v1", "Multilingual"),
         ],
     },
     NerPreset {
@@ -365,10 +365,14 @@ pub fn OnboardingWizard(
                             set_save_error.set(Some(format!("ONNX download failed: {e}. You can configure this later in System settings.")));
                         }
                     } else if embed == "ollama" && !embed_m.is_empty() {
-                        // Pull the selected model in Ollama
-                        let dl = api.post_text("/config/ollama-pull", &serde_json::json!({ "model": embed_m })).await;
-                        if let Err(e) = dl {
-                            set_save_error.set(Some(format!("Ollama pull failed: {e}. Make sure Ollama is running and pull '{}' manually.", embed_m)));
+                        // Only pull if not already installed
+                        let installed = ollama_embed_models.get_untracked();
+                        let already_have = installed.iter().any(|m| m == &embed_m || m.starts_with(&format!("{}:", embed_m)));
+                        if !already_have {
+                            let dl = api.post_text("/config/ollama-pull", &serde_json::json!({ "model": embed_m })).await;
+                            if let Err(e) = dl {
+                                set_save_error.set(Some(format!("Ollama pull failed: {e}. Make sure Ollama is running and pull '{}' manually.", embed_m)));
+                            }
                         }
                     }
                     api.post_text("/config", &config).await
@@ -425,11 +429,15 @@ pub fn OnboardingWizard(
                     let mut config = serde_json::json!({ "llm_endpoint": endpoint });
                     if !llm_k.is_empty() { config["llm_api_key"] = serde_json::json!(llm_k); }
                     if !llm_m.is_empty() { config["llm_model"] = serde_json::json!(llm_m); }
-                    // Pull model in Ollama if selected
+                    // Pull model in Ollama if selected and not already installed
                     if llm == "ollama" && !llm_m.is_empty() {
-                        let dl = api.post_text("/config/ollama-pull", &serde_json::json!({ "model": llm_m })).await;
-                        if let Err(e) = dl {
-                            set_save_error.set(Some(format!("Ollama pull failed: {e}. Make sure Ollama is running and pull '{}' manually.", llm_m)));
+                        let installed = ollama_llm_models.get_untracked();
+                        let already_have = installed.iter().any(|m| m == &llm_m || m.starts_with(&format!("{}:", llm_m)));
+                        if !already_have {
+                            let dl = api.post_text("/config/ollama-pull", &serde_json::json!({ "model": llm_m })).await;
+                            if let Err(e) = dl {
+                                set_save_error.set(Some(format!("Ollama pull failed: {e}. Make sure Ollama is running and pull '{}' manually.", llm_m)));
+                            }
                         }
                     }
                     api.post_text("/config", &config).await
