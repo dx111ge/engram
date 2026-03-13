@@ -18,3 +18,13 @@ crates/engram-ui/Cargo.lock
 crates/engram-intel/target/
 crates/engram-intel/Cargo.lock
 frontend/dist/
+tools/engram-ner/target/
+tools/engram-ner/Cargo.lock
+tools/engram-rel/target/
+tools/engram-rel/Cargo.lock
+*.brain.config
+*.brain.schedules
+*.brain.secrets
+*.brain.users
+*.brain.nodetypes
+*.nodetypes

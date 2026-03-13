@@ -21,6 +21,36 @@ engram serve
 engram serve /path/to/my.brain 127.0.0.1:8080
 ```
 
+## Performance
+
+Engram's API latency is sub-2ms for all core operations (store, query, search, stats) in release builds.
+
+| Operation | Latency |
+|-----------|---------|
+| Health check | ~1.2 ms |
+| Store entity | ~1.3 ms |
+| Query / Search | ~1.1 ms |
+| Stats | ~1.1 ms |
+
+Measured on Windows 11, Rust release build, single `.brain` file.
+
+**Important: Windows `localhost` performance pitfall.**
+On Windows, `localhost` may resolve to IPv6 (`::1`) first, causing a ~210 ms TCP connect delay before falling back to IPv4. This is an OS-level DNS issue, not an engram issue. To get accurate latency:
+
+- Use `127.0.0.1` instead of `localhost` in URLs and API clients
+- Or add `127.0.0.1 localhost` to `C:\Windows\System32\drivers\etc\hosts`
+- Or bind engram to `127.0.0.1:3030` instead of `0.0.0.0:3030`
+
+```bash
+# Slow (~230 ms due to IPv6 fallback)
+curl http://localhost:3030/health
+
+# Fast (~1 ms)
+curl http://127.0.0.1:3030/health
+```
+
+This applies to all HTTP services on Windows, not just engram.
+
 ## Authentication
 
 Engram uses bearer-token authentication. On first launch the server is in **setup mode** (no users exist) and all endpoints are open. Once the first admin account is created, all API endpoints require authentication.

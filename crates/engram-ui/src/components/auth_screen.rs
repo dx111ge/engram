@@ -18,7 +18,8 @@ pub fn AuthScreen() -> impl IntoView {
         async move {
             match api.get::<AuthStatusResponse>("/auth/status").await {
                 Ok(status) => {
-                    if status.setup_required.unwrap_or(false) {
+                    let is_setup = status.status.as_deref() == Some("setup_required");
+                    if is_setup {
                         set_mode.set(AuthMode::Setup);
                     } else {
                         set_mode.set(AuthMode::Login);
@@ -39,7 +40,7 @@ pub fn AuthScreen() -> impl IntoView {
     let (submitting, set_submitting) = signal(false);
 
     // Setup form state
-    let (setup_user, set_setup_user) = signal(String::new());
+    let (setup_user, set_setup_user) = signal("admin".to_string());
     let (setup_pass, set_setup_pass) = signal(String::new());
     let (setup_confirm, set_setup_confirm) = signal(String::new());
 
@@ -124,12 +125,19 @@ pub fn AuthScreen() -> impl IntoView {
                 <div class="auth-header">
                     <i class="fa-solid fa-brain"></i>
                     <h1>"engram"</h1>
-                    <p class="text-secondary">"Sign in to your knowledge base"</p>
+                    <p class="text-secondary">
+                        {move || match mode.get() {
+                            AuthMode::Setup => "Create your admin account to get started",
+                            AuthMode::Login => "Sign in to your knowledge base",
+                            AuthMode::Loading => "Connecting...",
+                        }}
+                    </p>
                 </div>
 
                 {move || error.get().map(|e| view! {
-                    <div class="auth-error">
-                        <i class="fa-solid fa-exclamation-triangle"></i>
+                    <div class="auth-error" style="display:block; margin-bottom:1rem;">
+                        <i class="fa-solid fa-circle-exclamation"></i>
+                        " "
                         {e}
                     </div>
                 })}
@@ -147,6 +155,7 @@ pub fn AuthScreen() -> impl IntoView {
                                 <label><i class="fa-solid fa-user"></i>" Username"</label>
                                 <input
                                     type="text"
+                                    autocomplete="username"
                                     prop:value=login_user
                                     on:input=move |ev| set_login_user.set(event_target_value(&ev))
                                     on:keydown=move |ev| {
@@ -158,6 +167,7 @@ pub fn AuthScreen() -> impl IntoView {
                                 <label><i class="fa-solid fa-lock"></i>" Password"</label>
                                 <input
                                     type="password"
+                                    autocomplete="current-password"
                                     prop:value=login_pass
                                     on:input=move |ev| set_login_pass.set(event_target_value(&ev))
                                     on:keydown=move |ev| {
@@ -177,27 +187,29 @@ pub fn AuthScreen() -> impl IntoView {
                     }.into_any(),
                     AuthMode::Setup => view! {
                         <div class="auth-form">
-                            <p class="text-secondary mb-2">"Create your admin account to get started."</p>
                             <div class="form-group">
-                                <label>"Username"</label>
+                                <label><i class="fa-solid fa-user-shield"></i>" Admin Username"</label>
                                 <input
                                     type="text"
+                                    autocomplete="username"
                                     prop:value=setup_user
                                     on:input=move |ev| set_setup_user.set(event_target_value(&ev))
                                 />
                             </div>
                             <div class="form-group">
-                                <label>"Password (min 8 chars)"</label>
+                                <label><i class="fa-solid fa-lock"></i>" Password (min 8 chars)"</label>
                                 <input
                                     type="password"
+                                    autocomplete="new-password"
                                     prop:value=setup_pass
                                     on:input=move |ev| set_setup_pass.set(event_target_value(&ev))
                                 />
                             </div>
                             <div class="form-group">
-                                <label>"Confirm Password"</label>
+                                <label><i class="fa-solid fa-lock"></i>" Confirm Password"</label>
                                 <input
                                     type="password"
+                                    autocomplete="new-password"
                                     prop:value=setup_confirm
                                     on:input=move |ev| set_setup_confirm.set(event_target_value(&ev))
                                     on:keydown=move |ev| {
@@ -210,7 +222,8 @@ pub fn AuthScreen() -> impl IntoView {
                                 on:click=move |_| { do_setup.dispatch(()); }
                                 disabled=submitting
                             >
-                                {move || if submitting.get() { "Setting up..." } else { "Create Account" }}
+                                <i class="fa-solid fa-shield-halved"></i>
+                                {move || if submitting.get() { " Setting up..." } else { " Create Admin Account" }}
                             </button>
                         </div>
                     }.into_any(),

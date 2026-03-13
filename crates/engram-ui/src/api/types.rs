@@ -25,8 +25,11 @@ pub struct StatsResponse {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AuthStatusResponse {
+    /// Backend returns "setup_required" or "ready"
     #[serde(default)]
-    pub setup_required: Option<bool>,
+    pub status: Option<String>,
+    #[serde(default)]
+    pub users_count: Option<u32>,
     #[serde(default)]
     pub authenticated: Option<bool>,
     #[serde(default)]
