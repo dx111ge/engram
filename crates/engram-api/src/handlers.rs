@@ -2958,6 +2958,13 @@ pub async fn set_config(
         drop(cfg);
 
         match (endpoint, model) {
+            (Some(ep), Some(_m)) if ep.starts_with("onnx://") => {
+                // ONNX uses local sidecar files, not an API endpoint.
+                // The /config/onnx-download or /config/onnx-model handler
+                // hot-loads the OnnxEmbedder once files are present.
+                // Skip probe here -- save config only.
+                None
+            }
             (Some(ep), Some(m)) => {
                 // Create new embedder with probe for dimension detection
                 let embedder = engram_core::ApiEmbedder::new(

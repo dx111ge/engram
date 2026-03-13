@@ -56,36 +56,75 @@ impl ApiEmbedder {
     }
 
     /// Send a probe embedding to detect the model's output dimension.
+    ///
+    /// For Ollama native endpoints (`/api`), uses `/api/embed` which returns
+    /// `{"embeddings": [[...]]}`. For all others, uses the OpenAI-compatible
+    /// `/embeddings` path which returns `{"data":[{"embedding":[...]}]}`.
     pub fn probe_dimension(&self) -> Result<usize, EmbedError> {
         let body = format!(
             r#"{{"model":"{}","input":"dimension probe"}}"#,
             escape_json(&self.model)
         );
-        let url = format!("{}/embeddings", self.endpoint);
+
+        // Ollama native API uses /api/embed (not /api/embeddings which returns empty)
+        let url = if self.endpoint.ends_with("/api") {
+            format!("{}/embed", self.endpoint)
+        } else {
+            format!("{}/embeddings", self.endpoint)
+        };
+
         let response_body = http_post(&url, &body, self.api_key.as_deref())
             .map_err(EmbedError::RuntimeError)?;
 
-        // Parse just the first embedding array to get its length
-        let embed_key = response_body
-            .find("\"embedding\"")
-            .ok_or_else(|| EmbedError::RuntimeError("probe: missing 'embedding' field".into()))?;
-        let arr_open = response_body[embed_key..]
-            .find('[')
-            .map(|p| embed_key + p)
-            .ok_or_else(|| EmbedError::RuntimeError("probe: missing array".into()))?;
-        let arr_close = response_body[arr_open..]
-            .find(']')
-            .map(|p| arr_open + p)
-            .ok_or_else(|| EmbedError::RuntimeError("probe: unclosed array".into()))?;
-
-        let arr_str = &response_body[arr_open + 1..arr_close];
-        let count = arr_str.split(',').filter(|s| !s.trim().is_empty()).count();
-        if count == 0 {
-            return Err(EmbedError::RuntimeError("probe: empty embedding".into()));
-        }
-        Ok(count)
+        parse_probe_response(&response_body)
     }
 
+}
+
+/// Parse a probe response from either OpenAI or Ollama format to extract dimension.
+///
+/// OpenAI format: `{"data":[{"embedding":[0.1, 0.2, ...]}]}`
+/// Ollama format: `{"embeddings":[[0.1, 0.2, ...]]}`
+///
+/// Both contain `"embedding"` as a substring, so we find the innermost `[...]`
+/// array containing actual float values.
+fn parse_probe_response(response_body: &str) -> Result<usize, EmbedError> {
+    // Find "embedding" (matches both "embedding" and "embeddings")
+    let embed_key = response_body
+        .find("\"embedding")
+        .ok_or_else(|| EmbedError::RuntimeError("probe: missing 'embedding' field".into()))?;
+
+    // Find the first '[' after the key
+    let first_open = response_body[embed_key..]
+        .find('[')
+        .map(|p| embed_key + p)
+        .ok_or_else(|| EmbedError::RuntimeError("probe: missing array".into()))?;
+
+    // Check if this is a nested array (Ollama: [[...]]) by looking at next non-whitespace
+    let after_open = &response_body[first_open + 1..];
+    let inner_start = after_open.find(|c: char| !c.is_whitespace()).unwrap_or(0);
+    let arr_open = if after_open.as_bytes().get(inner_start) == Some(&b'[') {
+        // Nested array -- skip to inner array
+        first_open + 1 + inner_start
+    } else {
+        // Flat array -- use as-is
+        first_open
+    };
+
+    let arr_close = response_body[arr_open..]
+        .find(']')
+        .map(|p| arr_open + p)
+        .ok_or_else(|| EmbedError::RuntimeError("probe: unclosed array".into()))?;
+
+    let arr_str = &response_body[arr_open + 1..arr_close];
+    let count = arr_str.split(',').filter(|s| !s.trim().is_empty()).count();
+    if count == 0 {
+        return Err(EmbedError::RuntimeError("probe: empty embedding".into()));
+    }
+    Ok(count)
+}
+
+impl ApiEmbedder {
     fn call_api(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
         // Build request body: OpenAI-compatible format
         let body = if texts.len() == 1 {
@@ -106,11 +145,12 @@ impl ApiEmbedder {
             )
         };
 
-        let url = format!("{}/embeddings", self.endpoint);
-
-        // Use ureq-style minimal HTTP via std::net -- but that's complex.
-        // Instead, use a blocking TCP + HTTP/1.1 approach via std.
-        // For robustness, we use a simple HTTP client built on std::net.
+        // Ollama native API uses /api/embed, others use /embeddings
+        let url = if self.endpoint.ends_with("/api") {
+            format!("{}/embed", self.endpoint)
+        } else {
+            format!("{}/embeddings", self.endpoint)
+        };
         let response_body = http_post(&url, &body, self.api_key.as_deref())
             .map_err(|e| EmbedError::RuntimeError(e))?;
 
@@ -233,9 +273,36 @@ fn escape_json(s: &str) -> String {
     out
 }
 
+/// HTTPS POST using reqwest blocking client. Enabled with the `https` feature.
+/// Supports cloud embedding providers (OpenAI, Cohere, Voyage, Jina, etc.).
+#[cfg(feature = "https")]
+fn https_post(url: &str, body: &str, api_key: Option<&str>) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("HTTPS client init: {e}"))?;
+
+    let mut req = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .body(body.to_owned());
+
+    if let Some(key) = api_key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+
+    let resp = req.send().map_err(|e| format!("HTTPS request failed: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().map_err(|e| format!("HTTPS read body: {e}"))?;
+
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status.as_u16(), text));
+    }
+    Ok(text)
+}
+
 /// Minimal blocking HTTP POST using std::net::TcpStream.
-/// Supports http:// URLs. For https, we'd need rustls/native-tls --
-/// but most local embedding servers (Ollama, vLLM, TEI) use plain HTTP.
+/// Supports http:// URLs. Cloud providers (HTTPS) use reqwest via the `https` feature.
 fn http_post(url: &str, body: &str, api_key: Option<&str>) -> Result<String, String> {
     let url = url.trim();
 
@@ -249,9 +316,16 @@ fn http_post(url: &str, body: &str, api_key: Option<&str>) -> Result<String, Str
     };
 
     if scheme == "https" {
-        return Err(
-            "HTTPS not supported in built-in HTTP client. Use http:// for local embedding servers, or enable the 'embed-reqwest' feature.".into()
-        );
+        #[cfg(feature = "https")]
+        {
+            return https_post(url, body, api_key);
+        }
+        #[cfg(not(feature = "https"))]
+        {
+            return Err(
+                "HTTPS not supported. Build with --features https for cloud embedding providers (OpenAI, Cohere, etc.).".into()
+            );
+        }
     }
 
     let (host_port, path) = match rest.find('/') {
@@ -393,21 +467,27 @@ fn parse_embeddings_response(
     expected_count: usize,
     expected_dim: usize,
 ) -> Result<Vec<Vec<f32>>, EmbedError> {
-    // Simple JSON parsing without serde dependency in engram-core.
-    // We parse the "data" array and extract "embedding" arrays.
+    // Supports two response formats:
+    // OpenAI: {"data": [{"embedding": [0.1, ...], "index": 0}, ...]}
+    // Ollama: {"embeddings": [[0.1, ...], ...]}
 
-    // Find "data" array
-    let data_start = body
-        .find("\"data\"")
-        .ok_or_else(|| EmbedError::RuntimeError("missing 'data' field in response".into()))?;
+    if let Some(data_start) = body.find("\"data\"") {
+        // OpenAI format
+        parse_openai_embeddings(body, data_start, expected_count, expected_dim)
+    } else if let Some(embeds_start) = body.find("\"embeddings\"") {
+        // Ollama format: {"embeddings": [[...], [...]]}
+        parse_ollama_embeddings(body, embeds_start, expected_count, expected_dim)
+    } else {
+        Err(EmbedError::RuntimeError("missing 'data' or 'embeddings' field in response".into()))
+    }
+}
 
-    let after_data = &body[data_start + 6..];
-    let _arr_start = after_data
-        .find('[')
-        .ok_or_else(|| EmbedError::RuntimeError("missing data array".into()))?;
-
-    // We need to extract embedding arrays. Strategy:
-    // Find each "embedding": [...] block.
+fn parse_openai_embeddings(
+    body: &str,
+    data_start: usize,
+    expected_count: usize,
+    expected_dim: usize,
+) -> Result<Vec<Vec<f32>>, EmbedError> {
     let mut embeddings = Vec::with_capacity(expected_count);
     let mut search_from = data_start;
 
@@ -442,6 +522,60 @@ fn parse_embeddings_response(
 
         embeddings.push(values);
         search_from = arr_close + 1;
+    }
+
+    if embeddings.len() != expected_count {
+        return Err(EmbedError::RuntimeError(format!(
+            "expected {} embeddings, got {}",
+            expected_count,
+            embeddings.len()
+        )));
+    }
+
+    Ok(embeddings)
+}
+
+fn parse_ollama_embeddings(
+    body: &str,
+    embeds_start: usize,
+    expected_count: usize,
+    expected_dim: usize,
+) -> Result<Vec<Vec<f32>>, EmbedError> {
+    // Find the outer array: "embeddings": [[...], [...]]
+    let outer_open = body[embeds_start..]
+        .find('[')
+        .map(|p| embeds_start + p)
+        .ok_or_else(|| EmbedError::RuntimeError("missing embeddings array".into()))?;
+
+    let mut embeddings = Vec::with_capacity(expected_count);
+    let mut pos = outer_open + 1;
+
+    for _ in 0..expected_count {
+        // Find next inner array [...]
+        let inner_open = match body[pos..].find('[') {
+            Some(p) => pos + p,
+            None => break,
+        };
+        let inner_close = match body[inner_open..].find(']') {
+            Some(p) => inner_open + p,
+            None => break,
+        };
+
+        let arr_str = &body[inner_open + 1..inner_close];
+        let values: Vec<f32> = arr_str
+            .split(',')
+            .filter_map(|s| s.trim().parse::<f32>().ok())
+            .collect();
+
+        if expected_dim > 0 && values.len() != expected_dim {
+            return Err(EmbedError::DimensionMismatch {
+                expected: expected_dim,
+                got: values.len(),
+            });
+        }
+
+        embeddings.push(values);
+        pos = inner_close + 1;
     }
 
     if embeddings.len() != expected_count {

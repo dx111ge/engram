@@ -32,7 +32,8 @@ path = "src/main.rs"
 
 [features]
 default = []
-all = ["mesh", "llm", "grpc", "ingest", "actions", "reason", "assess", "onnx", "anno"]
+all = ["mesh", "llm", "grpc", "ingest", "actions", "reason", "assess", "onnx", "anno", "https"]
+https = ["engram-core/https"]
 mesh = ["engram-api/mesh", "engram-mesh"]
 llm = ["engram-api/llm"]
 onnx = ["engram-core/onnx", "engram-api/onnx"]

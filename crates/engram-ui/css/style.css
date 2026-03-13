@@ -1792,6 +1792,54 @@ input[type="range"] {
   margin-top: 2px;
 }
 
+/* Language badges */
+.wizard-lang-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.3px;
+}
+.wizard-lang-en {
+  background: var(--bg-tertiary, #2a2d35);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.wizard-lang-multi {
+  background: rgba(46, 160, 67, 0.15);
+  color: #3fb950;
+  border: 1px solid rgba(46, 160, 67, 0.3);
+}
+
+/* Provider links for custom embedder */
+.wizard-provider-links {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.wizard-provider-links a {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.85rem;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+.wizard-provider-links a:hover {
+  background: var(--bg-secondary);
+}
+.wizard-provider-links a small {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
 .wizard-custom-model {
   border-top: 1px solid var(--border);
   padding-top: 10px;

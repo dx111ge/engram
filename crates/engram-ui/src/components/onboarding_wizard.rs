@@ -45,7 +45,7 @@ struct EmbedPreset {
     performance: &'static str,
     privacy: &'static str,
     cost: &'static str,
-    models: &'static [(&'static str, &'static str)],  // (model_name, description)
+    models: &'static [(&'static str, &'static str, &'static str)],  // (model_name, description, lang_badge)
     default_model: &'static str,
 }
 
@@ -56,9 +56,9 @@ const EMBED_PRESETS: &[EmbedPreset] = &[
         quality: "Good (384D all-MiniLM)", performance: "Fast, uses your GPU/CPU",
         privacy: "Everything stays local", cost: "Free, ~50MB download",
         models: &[
-            ("all-MiniLM-L6-v2", "384D, 90MB, English, best balance"),
-            ("multilingual-e5-small", "384D, 120MB, 100+ languages"),
-            ("bge-small-en-v1.5", "384D, 130MB, English, high quality"),
+            ("all-MiniLM-L6-v2", "384D, 90MB, best balance", "EN"),
+            ("multilingual-e5-small", "384D, 120MB, strong multilingual", "100+ langs"),
+            ("bge-small-en-v1.5", "384D, 130MB, high quality", "EN"),
         ],
         default_model: "all-MiniLM-L6-v2",
     },
@@ -68,10 +68,10 @@ const EMBED_PRESETS: &[EmbedPreset] = &[
         quality: "Good-Excellent (model dependent)", performance: "Fast if local GPU",
         privacy: "Local", cost: "Free",
         models: &[
-            ("nomic-embed-text", "768D, 274MB, strong all-rounder"),
-            ("mxbai-embed-large", "1024D, 670MB, highest quality"),
-            ("all-minilm", "384D, 23MB, fastest"),
-            ("snowflake-arctic-embed", "1024D, 335MB, top benchmark"),
+            ("nomic-embed-text", "768D, 274MB, strong all-rounder", "EN"),
+            ("mxbai-embed-large", "1024D, 670MB, highest quality", "EN"),
+            ("all-minilm", "384D, 23MB, fastest", "EN"),
+            ("snowflake-arctic-embed", "1024D, 335MB, top benchmark", "Multilingual"),
         ],
         default_model: "nomic-embed-text",
     },
@@ -81,8 +81,8 @@ const EMBED_PRESETS: &[EmbedPreset] = &[
         quality: "Excellent (text-embedding-3)", performance: "Network latency per op",
         privacy: "Data sent to OpenAI", cost: "~$0.02/1M tokens",
         models: &[
-            ("text-embedding-3-small", "1536D, cheapest, good quality"),
-            ("text-embedding-3-large", "3072D, best quality, 6x cost"),
+            ("text-embedding-3-small", "1536D, cheapest, good quality", "Multilingual"),
+            ("text-embedding-3-large", "3072D, best quality, 6x cost", "Multilingual"),
         ],
         default_model: "text-embedding-3-small",
     },
@@ -99,6 +99,14 @@ const EMBED_PRESETS: &[EmbedPreset] = &[
         needs_key: false,
         quality: "Model dependent", performance: "Fast with GPU",
         privacy: "Local", cost: "Free",
+        models: &[],
+        default_model: "",
+    },
+    EmbedPreset {
+        id: "custom", name: "Custom Provider", endpoint: "",
+        needs_key: true,
+        quality: "Provider dependent", performance: "Network latency",
+        privacy: "Data sent to provider", cost: "Provider dependent",
         models: &[],
         default_model: "",
     },
@@ -215,6 +223,7 @@ pub fn OnboardingWizard(
     let (embed_choice, set_embed_choice) = signal(String::new());
     let (embed_key, set_embed_key) = signal(String::new());
     let (embed_model, set_embed_model) = signal(String::new());
+    let (embed_endpoint, set_embed_endpoint) = signal(String::new());
     let (ner_choice, set_ner_choice) = signal("gliner".to_string());
     let (ner_model, set_ner_model) = signal("gliner_small-v2.1".to_string());
     let (llm_choice, set_llm_choice) = signal(String::new());
@@ -312,6 +321,7 @@ pub fn OnboardingWizard(
         let embed = embed_choice.get_untracked();
         let embed_k = embed_key.get_untracked();
         let embed_m = embed_model.get_untracked();
+        let embed_ep = embed_endpoint.get_untracked();
         let ner = ner_choice.get_untracked();
         let ner_m = ner_model.get_untracked();
         let llm = llm_choice.get_untracked();
@@ -327,8 +337,9 @@ pub fn OnboardingWizard(
             let result = match step_num {
                 STEP_EMBEDDER => {
                     if embed.is_empty() { set_save_error.set(Some("Please select an embedding provider".into())); set_saving.set(false); return false; }
+                    if embed == "custom" && embed_ep.trim().is_empty() { set_save_error.set(Some("Please enter the provider's endpoint URL".into())); set_saving.set(false); return false; }
                     let preset = EMBED_PRESETS.iter().find(|p| p.id == embed);
-                    let endpoint = preset.map(|p| p.endpoint).unwrap_or("");
+                    let endpoint = if embed == "custom" { embed_ep.as_str() } else { preset.map(|p| p.endpoint).unwrap_or("") };
                     let mut config = serde_json::json!({ "embed_endpoint": endpoint });
                     if !embed_k.is_empty() { config["embed_api_key"] = serde_json::json!(embed_k); }
                     if !embed_m.is_empty() { config["embed_model"] = serde_json::json!(embed_m); }
@@ -459,7 +470,17 @@ pub fn OnboardingWizard(
             match result {
                 Ok(_) => true,
                 Err(e) => {
-                    set_save_error.set(Some(format!("Save failed: {e}")));
+                    let msg = format!("{e}");
+                    let friendly = if msg.contains("probe failed") || msg.contains("unsupported URL scheme") {
+                        format!("Configuration saved, but the provider is not reachable yet. You can fix this later in System settings. (Details: {msg})")
+                    } else if msg.contains("timeout") || msg.contains("Timeout") {
+                        format!("The download timed out. Check your internet connection and try again, or configure this later in System settings.")
+                    } else if msg.contains("connection refused") || msg.contains("Connection refused") {
+                        format!("Could not connect to the provider. Make sure it is running and try again.")
+                    } else {
+                        format!("Configuration failed: {msg}")
+                    };
+                    set_save_error.set(Some(friendly));
                     false
                 }
             }
@@ -646,14 +667,36 @@ pub fn OnboardingWizard(
                                     let choice = embed_choice.get();
                                     let preset = EMBED_PRESETS.iter().find(|p| p.id == choice.as_str());
                                     preset.map(|p| {
-                                        // Auto-set default model if empty
-                                        if embed_model.get_untracked().is_empty() && !p.default_model.is_empty() {
-                                            set_embed_model.set(p.default_model.to_string());
-                                        }
+                                        // Set default model for this provider (or clear if none)
+                                        set_embed_model.set(p.default_model.to_string());
                                         let show_key = p.needs_key;
-                                        let models: Vec<(&str, &str)> = p.models.to_vec();
-                                        let show_custom = p.models.is_empty();
+                                        let models: Vec<(&str, &str, &str)> = p.models.to_vec();
+                                        let is_custom_provider = choice == "custom";
+                                        let show_custom = p.models.is_empty() && !is_custom_provider;
                                         view! {
+                                            // Custom provider: endpoint URL input + provider links
+                                            {is_custom_provider.then(|| view! {
+                                                <div class="form-group mt-1">
+                                                    <label><i class="fa-solid fa-link"></i>" Endpoint URL"</label>
+                                                    <input type="text" class="form-control" placeholder="https://api.example.com/v1/embeddings"
+                                                        prop:value=embed_endpoint
+                                                        on:input=move |ev| set_embed_endpoint.set(event_target_value(&ev))
+                                                    />
+                                                    <small class="text-secondary">"OpenAI-compatible /v1/embeddings endpoint"</small>
+                                                </div>
+                                                <div class="wizard-info-box" style="margin-top: 0.75rem;">
+                                                    <h4><i class="fa-solid fa-cloud"></i>" Popular embedding providers"</h4>
+                                                    <div class="wizard-provider-links">
+                                                        <a href="https://cohere.com/embed" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square"></i>" Cohere Embed v3"<small>" \u{2014} multilingual, 1024D"</small></a>
+                                                        <a href="https://jina.ai/embeddings/" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square"></i>" Jina Embeddings"<small>" \u{2014} multilingual, 8K context"</small></a>
+                                                        <a href="https://docs.voyageai.com/docs/embeddings" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square"></i>" Voyage AI"<small>" \u{2014} code + text, domain-tuned"</small></a>
+                                                        <a href="https://cloud.google.com/vertex-ai/docs/generative-ai/embeddings/get-text-embeddings" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square"></i>" Google Vertex AI"<small>" \u{2014} text-embedding-005, multimodal"</small></a>
+                                                        <a href="https://docs.mistral.ai/capabilities/embeddings/" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square"></i>" Mistral Embed"<small>" \u{2014} 1024D, multilingual"</small></a>
+                                                        <a href="https://docs.aws.amazon.com/bedrock/latest/userguide/titan-embedding-models.html" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square"></i>" AWS Titan"<small>" \u{2014} via Bedrock, multimodal"</small></a>
+                                                    </div>
+                                                    <small class="text-secondary">"Any provider with an OpenAI-compatible embeddings API will work."</small>
+                                                </div>
+                                            })}
                                             {show_key.then(|| view! {
                                                 <div class="form-group mt-1">
                                                     <label><i class="fa-solid fa-key"></i>" API Key"</label>
@@ -670,15 +713,21 @@ pub fn OnboardingWizard(
                                                     let is_onnx = choice == "onnx";
                                                     view! {
                                                         <div class="wizard-model-chips">
-                                                            {models2.into_iter().map(|(name, desc)| {
+                                                            {models2.into_iter().map(|(name, desc, lang)| {
                                                                 let n = name.to_string();
                                                                 let n2 = n.clone();
+                                                                let badge_class = if lang.contains("100+") || lang.contains("ulti") {
+                                                                    "wizard-lang-badge wizard-lang-multi"
+                                                                } else {
+                                                                    "wizard-lang-badge wizard-lang-en"
+                                                                };
                                                                 view! {
                                                                     <button
                                                                         class=move || if embed_model.get() == n { "wizard-model-chip active" } else { "wizard-model-chip" }
                                                                         on:click=move |_| set_embed_model.set(n2.clone())
                                                                     >
                                                                         <strong>{name}</strong>
+                                                                        <span class=badge_class><i class="fa-solid fa-language"></i>" "{lang}</span>
                                                                         <small>{desc}</small>
                                                                     </button>
                                                                 }
@@ -742,6 +791,12 @@ pub fn OnboardingWizard(
                                                 })}
                                                 {show_custom.then(|| view! {
                                                     <input type="text" class="form-control" placeholder="Enter model name..."
+                                                        prop:value=embed_model
+                                                        on:input=move |ev| set_embed_model.set(event_target_value(&ev))
+                                                    />
+                                                })}
+                                                {is_custom_provider.then(|| view! {
+                                                    <input type="text" class="form-control" placeholder="e.g. embed-english-v3.0"
                                                         prop:value=embed_model
                                                         on:input=move |ev| set_embed_model.set(event_target_value(&ev))
                                                     />
@@ -1155,7 +1210,26 @@ pub fn OnboardingWizard(
                             <button class="btn btn-primary" on:click=go_next
                                 disabled=saving>
                                 {move || if saving.get() {
-                                    view! { <span class="spinner"></span>" Saving..." }.into_any()
+                                    let msg = match step.get() {
+                                        STEP_EMBEDDER => {
+                                            let e = embed_choice.get();
+                                            if e == "onnx" { " Downloading ONNX model... this may take a minute" }
+                                            else if e == "ollama" { " Pulling model from Ollama..." }
+                                            else { " Saving configuration..." }
+                                        }
+                                        STEP_NER => {
+                                            let n = ner_choice.get();
+                                            if n == "gliner" { " Downloading GLiNER model..." }
+                                            else { " Saving configuration..." }
+                                        }
+                                        STEP_LLM => {
+                                            let l = llm_choice.get();
+                                            if l == "ollama" { " Pulling model from Ollama..." }
+                                            else { " Saving configuration..." }
+                                        }
+                                        _ => " Saving configuration...",
+                                    };
+                                    view! { <span class="spinner"></span>{msg} }.into_any()
                                 } else {
                                     view! { <>"Next "<i class="fa-solid fa-arrow-right"></i></> }.into_any()
                                 }}
