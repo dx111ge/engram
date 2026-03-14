@@ -23,19 +23,40 @@ diplomatic negotiations. One coherent graph, not islands.
 
 ## Architecture: 4 Steps
 
-### Step 0: Extract Area of Interest
+### Step 0: Identify Area of Interest (MOST IMPORTANT STEP)
 
-Parse the seed text for the DOMAIN/TOPIC. This is the organizing principle for everything.
+This is the organizing principle for everything. Must be accurate.
 
-- Primary: use EVENT entities from GLiNER2 NER (e.g., "Russia Ukraine war")
-- Fallback: first sentence of seed text, or top-3 entity labels concatenated
+**Strategy cascade (try in order):**
+
+1. **LLM extraction** (if configured): Ask the local LLM:
+   "What is the primary area of interest in this text? Reply with a short topic phrase."
+   Input: seed text. Output: "Russia-Ukraine war" or "semiconductor supply chain".
+   Most reliable for complex/ambiguous seeds. Uses Ollama if configured in wizard.
+
+2. **EVENT entity from NER**: GLiNER2 extracts EVENT entities (e.g., "Russia Ukraine war").
+   Use the highest-confidence EVENT as area of interest.
+
+3. **First sentence analysis**: The first sentence usually states the domain.
+   "I track the Russia Ukraine war..." → extract after "I track" / "I monitor" / "I analyze".
+
+4. **User confirmation**: Show the detected area of interest in the wizard seed step
+   and let the user confirm or edit. "Detected area of interest: Russia Ukraine war [Edit]"
+
 - Store as graph property: `area_of_interest = "Russia Ukraine war"`
 - This drives ALL subsequent enrichment
+- Wrong area of interest = wrong connections = useless graph
 
 ```
 Input:  "I track the Russia Ukraine war across military..."
-Output: area_of_interest = "Russia Ukraine war"
+Output: area_of_interest = "Russia Ukraine war" (confirmed by user)
 ```
+
+**Wizard integration**: The seed step should show:
+1. Text input for seed
+2. Auto-detected "Area of Interest" field (editable)
+3. "Analyze" previews entities + area of interest
+4. "Seed KB" starts enrichment with confirmed area of interest
 
 ### Step 1: Identify Entities via Wikipedia
 
@@ -195,6 +216,26 @@ For the Russia Ukraine war seed text:
 
 ---
 
+## Web Search Integration
+
+Web search should be available from the start -- configured in the setup wizard alongside
+the LLM and embedding model. Used for:
+
+1. **Entity context enrichment** (Step 2c): when Wikipedia doesn't have a direct article,
+   web search for "{entity} {area_of_interest}" finds news articles, analysis pieces
+   that contain factual connections.
+
+2. **Entity disambiguation** (Step 1): if Wikipedia returns ambiguous results, web search
+   for "{entity} {area_of_interest}" naturally returns the right person/thing.
+
+3. **Current events**: Wikipedia may not have the latest events. Web search catches
+   recent developments (e.g., latest weapons deliveries, diplomatic meetings).
+
+**Wizard setup**: Step 2 (or new step) should configure web search:
+- Provider: DuckDuckGo (no API key), Brave Search (API key), SearXNG (self-hosted)
+- Or: use MCP web search tool if available
+- Store in config: `web_search_provider`, `web_search_api_key`
+
 ## Configuration
 
 ```json
@@ -205,13 +246,101 @@ For the Russia Ukraine war seed text:
     "property_expansion": true,
     "shortest_path_fallback": true,
     "max_wikipedia_fetches": 25,
-    "interactive_disambiguation": false
+    "interactive_disambiguation": false,
+    "web_search_provider": "duckduckgo",
+    "use_llm_for_area_of_interest": true
   }
 }
 ```
 
-For private/internal domains: set `skip_wikidata: true`. Seed will only use GLiNER2 NER+RE,
-no Wikipedia/Wikidata enrichment.
+For private/internal domains: set `skip_wikidata: true` and `enabled: false`.
+Seed will only use GLiNER2 NER+RE, no external enrichment.
+
+---
+
+## Mandatory Prerequisites (Setup Wizard)
+
+LLM and web search are NOT optional -- they're required for quality seed enrichment.
+The setup wizard must configure both BEFORE allowing seed:
+
+1. **LLM** (mandatory): Ollama endpoint + model. Used for area-of-interest extraction,
+   entity disambiguation confirmation, and relationship classification.
+   Wizard step: "Configure Language Model" -- cannot proceed without a working LLM.
+
+2. **Web Search** (mandatory): DuckDuckGo (default, no key), Brave, or SearXNG.
+   Used for contextual entity enrichment and current events.
+   Wizard step: "Configure Web Search" -- defaults to DuckDuckGo if no API key provided.
+
+3. **Wikidata** (default on): SPARQL endpoint for structured knowledge.
+   Wizard step: "Knowledge Sources" -- enabled by default.
+
+Without LLM + web search, the seed produces a mediocre graph. With them, it produces
+a "wow" graph. Make them mandatory, not optional.
+
+---
+
+## Human-in-the-Loop (ALL steps)
+
+The seed enrichment is NOT a black box. Every step shows results and asks for confirmation
+via SSE streaming to the frontend. The user stays engaged and in control.
+
+### Step 0: Area of Interest
+- LLM proposes: "Russia-Ukraine war"
+- UI shows: "Detected area of interest: **Russia-Ukraine war** [Confirm] [Edit]"
+- User confirms or edits before proceeding
+
+### Step 1: Entity Identification
+- For each entity, show the Wikipedia/Wikidata match:
+  ```
+  Putin         → Vladimir Putin (President of Russia)     [OK] [Change]
+  Macron        → Emmanuel Macron (President of France)    [OK] [Change]
+  HIMARS        → M142 HIMARS (rocket launcher)            [OK] [Change]
+  EU            → European Union (political union)         [OK] [Change]
+  drones        → Unmanned aerial vehicle                  [OK] [Change] [Skip]
+  oil           → Petroleum                                [OK] [Change] [Skip]
+  ```
+- Ambiguous entities show choices:
+  ```
+  China         → ?
+    [ ] People's Republic of China (country)
+    [ ] China national football team
+    [ ] China (porcelain)
+    [Select]
+  ```
+- User confirms all before proceeding
+
+### Step 2: Contextual Connections
+- Show discovered connections as they're found (SSE streaming):
+  ```
+  Finding connections via "Russo-Ukrainian war" article...
+  ✓ Putin ← participant → Russia Ukraine war
+  ✓ Zelensky ← participant → Russia Ukraine war
+  ✓ NATO ← military support → Ukraine
+  ✓ HIMARS ← weapon used → Russia Ukraine war
+  ✓ Leopard 2 ← military aid → Ukraine
+  ...
+  [Accept All] [Review] [Skip]
+  ```
+
+### Step 3: SPARQL Structured Relations
+- Show typed relations found:
+  ```
+  Wikidata relations:
+  ✓ Putin → citizen_of → Russia
+  ✓ Macron → citizen_of → France
+  ✓ NATO → headquartered_in → Brussels
+  ✓ HIMARS → manufactured_by → Lockheed Martin
+  ...
+  [Accept All] [Review]
+  ```
+
+### Progress Bar
+- Overall: "Building knowledge graph... Step 2/4 (connecting entities)"
+- Per-entity: "Linking entities (14/20)..."
+- Time estimate: "~15 seconds remaining"
+
+This turns a 25-second wait into an interactive experience where the user
+sees the graph being built and can correct mistakes in real-time.
 
 ---
 
