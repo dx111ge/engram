@@ -322,11 +322,6 @@ impl KbRelationExtractor {
                     None => continue,
                 };
 
-                // Skip if value is already one of our entities
-                if entity_labels.contains(&value_label.to_string()) {
-                    continue;
-                }
-
                 // Deduplicate
                 let key = (entity_label.clone(), value_label.to_string());
                 if seen.contains(&key) { continue; }
@@ -336,6 +331,92 @@ impl KbRelationExtractor {
                 let rel_type = wikidata_prop_to_rel_type(prop_label);
 
                 results.push((entity_label, rel_type, value_label.to_string()));
+            }
+        }
+
+        results
+    }
+
+    /// Batch shortest path: find 1-hop intermediate entities between ALL entity pairs
+    /// in a single SPARQL query. Returns (from_label, rel_type, to_label) triples
+    /// including the intermediate node.
+    fn batch_shortest_paths(
+        &self,
+        endpoint: &KbEndpoint,
+        qids: &[(&str, usize)],
+        entity_labels: &[String],
+        connected_pairs: &std::collections::HashSet<(usize, usize)>,
+        language: &str,
+    ) -> Vec<(String, String, String)> {
+        if qids.len() < 2 {
+            return Vec::new();
+        }
+
+        let values: String = qids.iter()
+            .map(|(qid, _)| format!("wd:{}", extract_qid(qid)))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let qid_to_idx: HashMap<String, usize> = qids.iter()
+            .map(|(qid, idx)| (extract_qid(qid).to_string(), *idx))
+            .collect();
+
+        // 1-hop: A → ?mid → B (single SPARQL for ALL pairs)
+        let query = format!(
+            r#"SELECT ?s ?o ?mid ?midLabel ?p1Label ?p2Label WHERE {{
+                VALUES ?s {{ {values} }}
+                VALUES ?o {{ {values} }}
+                ?s ?prop1 ?mid . ?mid ?prop2 ?o .
+                ?p1 wikibase:directClaim ?prop1 .
+                ?p2 wikibase:directClaim ?prop2 .
+                FILTER(?s != ?o && isIRI(?mid))
+                SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,{lang}" }}
+            }} LIMIT 500"#,
+            values = values, lang = language,
+        );
+
+        let json = match self.sparql_query(endpoint, &query) {
+            Ok(j) => j,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut results = Vec::new();
+        let mut newly_connected = std::collections::HashSet::new();
+
+        if let Some(bindings) = json.pointer("/results/bindings").and_then(|b| b.as_array()) {
+            for binding in bindings {
+                let s_uri = binding.pointer("/s/value").and_then(|v| v.as_str()).unwrap_or("");
+                let o_uri = binding.pointer("/o/value").and_then(|v| v.as_str()).unwrap_or("");
+                let mid_label = binding.pointer("/midLabel/value").and_then(|v| v.as_str()).unwrap_or("");
+                let p1_label = binding.pointer("/p1Label/value").and_then(|v| v.as_str()).unwrap_or("");
+                let p2_label = binding.pointer("/p2Label/value").and_then(|v| v.as_str()).unwrap_or("");
+
+                if mid_label.is_empty() || mid_label.starts_with("http://") {
+                    continue;
+                }
+
+                let s_qid = extract_qid(s_uri);
+                let o_qid = extract_qid(o_uri);
+
+                let (s_idx, o_idx) = match (qid_to_idx.get(s_qid), qid_to_idx.get(o_qid)) {
+                    (Some(&s), Some(&o)) => (s, o),
+                    _ => continue,
+                };
+
+                // Only add paths for pairs not already connected
+                let pair = (s_idx.min(o_idx), s_idx.max(o_idx));
+                if connected_pairs.contains(&pair) || newly_connected.contains(&pair) {
+                    continue;
+                }
+                newly_connected.insert(pair);
+
+                let s_label = &entity_labels[s_idx];
+                let o_label = &entity_labels[o_idx];
+                let r1 = wikidata_prop_to_rel_type(p1_label);
+                let r2 = wikidata_prop_to_rel_type(p2_label);
+
+                results.push((s_label.clone(), r1, mid_label.to_string()));
+                results.push((mid_label.to_string(), r2, o_label.clone()));
             }
         }
 
@@ -509,8 +590,8 @@ impl RelationExtractor for KbRelationExtractor {
             // Phase 4: Property expansion — discover NEW entities from Wikidata properties.
             // E.g., Putin → position_held → "President of Russia", HIMARS → manufacturer → "Lockheed Martin"
             // Creates new nodes directly in the graph and returns relations to them.
+            let entity_labels: Vec<String> = input.entities.iter().map(|e| e.text.clone()).collect();
             {
-                let entity_labels: Vec<String> = input.entities.iter().map(|e| e.text.clone()).collect();
                 let expansion = self.property_expansion(endpoint, &qids, &entity_labels, &input.language);
 
                 if !expansion.is_empty() {
@@ -521,11 +602,55 @@ impl RelationExtractor for KbRelationExtractor {
 
                     if let Ok(mut g) = self.graph.write() {
                         for (from_label, rel_type, to_label) in &expansion {
-                            // Create new node for the discovered entity
+                            // Create new node for the discovered entity (with type from property)
                             let _ = g.store_with_confidence(to_label, 0.70, &provenance);
+
+                            // Set entity type based on the Wikidata property that discovered it
+                            let node_type = match rel_type.as_str() {
+                                "citizen_of" | "located_in" | "origin_country" | "capital_of" => "location",
+                                "headquartered_in" => "location",
+                                "manufactured_by" => "organization",
+                                "holds_position" => "position",
+                                "governed_by" => "person",
+                                _ => "entity",
+                            };
+                            let _ = g.set_node_type(to_label, node_type);
 
                             // Create the edge
                             match g.relate(from_label, to_label, rel_type, &provenance) {
+                                Ok(_) => stats.relations_found += 1,
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Phase 5: Shortest path discovery — for entity pairs still not connected,
+            // find 1-hop intermediate entities via batch SPARQL. Creates new connecting nodes.
+            {
+                // Collect all connected pairs so far
+                let connected: std::collections::HashSet<(usize, usize)> = all_relations.iter()
+                    .map(|r| (r.head_idx.min(r.tail_idx), r.head_idx.max(r.tail_idx)))
+                    .collect();
+
+                let path_results = self.batch_shortest_paths(
+                    endpoint, &qids, &entity_labels, &connected, &input.language,
+                );
+
+                if !path_results.is_empty() {
+                    let provenance = engram_core::graph::Provenance {
+                        source_type: engram_core::graph::SourceType::Api,
+                        source_id: format!("kb:{}", endpoint.name),
+                    };
+
+                    if let Ok(mut g) = self.graph.write() {
+                        for (from_label, rel_type, to_label) in &path_results {
+                            // Auto-create intermediate nodes
+                            let _ = g.store_with_confidence(to_label, 0.65, &provenance);
+                            let _ = g.store_with_confidence(from_label, 0.65, &provenance);
+
+                            match g.relate(from_label, to_label, &rel_type, &provenance) {
                                 Ok(_) => stats.relations_found += 1,
                                 Err(_) => {}
                             }
