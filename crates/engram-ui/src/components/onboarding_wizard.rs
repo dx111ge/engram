@@ -8,12 +8,13 @@ use crate::api::types::{AnalyzeRequest, AnalyzeResponse, IngestRequest, IngestIt
 const STEP_WELCOME: u32 = 1;
 const STEP_EMBEDDER: u32 = 2;
 const STEP_NER: u32 = 3;
-const STEP_LLM: u32 = 4;
-const STEP_QUANTIZATION: u32 = 5;
-const STEP_KB_SOURCES: u32 = 6;
-const STEP_SEED: u32 = 7;
-const STEP_READY: u32 = 8;
-const TOTAL_STEPS: u32 = 8;
+const STEP_NLI: u32 = 4;
+const STEP_LLM: u32 = 5;
+const STEP_QUANTIZATION: u32 = 6;
+const STEP_KB_SOURCES: u32 = 7;
+const STEP_SEED: u32 = 8;
+const STEP_READY: u32 = 9;
+const TOTAL_STEPS: u32 = 9;
 
 // ── Quality score weights ──
 
@@ -232,7 +233,10 @@ pub fn OnboardingWizard(
     let (llm_key, set_llm_key) = signal(String::new());
     let (llm_model, set_llm_model) = signal(String::new());
     let (rel_threshold, set_rel_threshold) = signal(0.9_f64);
+    let (rel_model_choice, set_rel_model_choice) = signal("multilingual-MiniLMv2-L6-mnli-xnli".to_string());
     let (rel_download_progress, set_rel_download_progress) = signal(String::new());
+    let (rel_templates_mode, set_rel_templates_mode) = signal("general".to_string()); // "general", "custom"
+    let (rel_custom_templates_json, set_rel_custom_templates_json) = signal(String::new());
     let (quant_choice, set_quant_choice) = signal("int8".to_string());
     let (kb_wikidata, set_kb_wikidata) = signal(true);
     let (kb_dbpedia, set_kb_dbpedia) = signal(false);
@@ -329,6 +333,9 @@ pub fn OnboardingWizard(
         let ner = ner_choice.get_untracked();
         let ner_m = ner_model.get_untracked();
         let rel_thresh = rel_threshold.get_untracked();
+        let rel_m = rel_model_choice.get_untracked();
+        let rel_tpl_mode = rel_templates_mode.get_untracked();
+        let rel_custom_tpl = rel_custom_templates_json.get_untracked();
         let llm = llm_choice.get_untracked();
         let llm_k = llm_key.get_untracked();
         let llm_m = llm_model.get_untracked();
@@ -384,13 +391,11 @@ pub fn OnboardingWizard(
                     let provider = if ner == "gliner" { "gliner" } else { &ner };
                     let mut config = serde_json::json!({
                         "ner_provider": provider,
-                        "rel_threshold": rel_thresh,
                     });
                     if ner == "gliner" && !ner_m.is_empty() {
                         config["ner_model"] = serde_json::json!(&ner_m);
 
                         // Download GLiNER ONNX model
-                        set_rel_download_progress.set("Downloading NER model...".into());
                         let variant = if ner_m.starts_with("onnx-community/") { "int8" } else { "quantized" };
                         let ner_dl = api.post_text("/config/ner-download", &serde_json::json!({
                             "model_id": &ner_m,
@@ -399,22 +404,42 @@ pub fn OnboardingWizard(
                         if let Err(e) = &ner_dl {
                             set_save_error.set(Some(format!("NER model download note: {e}. Model will be downloaded on first use.")));
                         }
+                    }
+                    api.post_text("/config", &config).await
+                }
+                STEP_NLI => {
+                    let mut config = serde_json::json!({
+                        "rel_threshold": rel_thresh,
+                    });
 
-                        // NLI-based relation extraction model (ONNX, separate download)
-                        set_rel_download_progress.set("Downloading NLI relation extraction model (~100MB)...".into());
-                        let rel_model_id = "multilingual-MiniLMv2-L6-mnli-xnli".to_string();
-                        let rel_repo = "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli";
-                        config["rel_model"] = serde_json::json!(&rel_model_id);
-                        let rel_dl = api.post_text("/config/rel-download", &serde_json::json!({
-                            "model_id": rel_model_id,
-                            "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", rel_repo),
-                            "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", rel_repo),
-                        })).await;
-                        set_rel_download_progress.set(String::new());
-                        if let Err(e) = &rel_dl {
-                            set_save_error.set(Some(format!("NLI RE download note: {e}. Relation extraction model can be installed later in System settings.")));
+                    // Download NLI model
+                    let rel_repo = match rel_m.as_str() {
+                        "mDeBERTa-v3-base-xnli" => "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7",
+                        _ => "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli",
+                    };
+                    config["rel_model"] = serde_json::json!(&rel_m);
+                    set_rel_download_progress.set(format!("Downloading NLI model ({})...", rel_m));
+                    let rel_dl = api.post_text("/config/rel-download", &serde_json::json!({
+                        "model_id": &rel_m,
+                        "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", rel_repo),
+                        "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", rel_repo),
+                    })).await;
+                    set_rel_download_progress.set(String::new());
+                    if let Err(e) = &rel_dl {
+                        set_save_error.set(Some(format!("NLI download note: {e}. Can be installed later in System settings.")));
+                    }
+
+                    // Import custom templates if provided
+                    if rel_tpl_mode == "custom" && !rel_custom_tpl.trim().is_empty() {
+                        if let Ok(templates) = serde_json::from_str::<serde_json::Value>(&rel_custom_tpl) {
+                            let import_body = serde_json::json!({
+                                "templates": templates,
+                                "threshold": rel_thresh,
+                            });
+                            let _ = api.post_text("/config/relation-templates/import", &import_body).await;
                         }
                     }
+
                     api.post_text("/config", &config).await
                 }
                 STEP_LLM => {
@@ -567,7 +592,7 @@ pub fn OnboardingWizard(
     let go_next = move |_| {
         let current = step.get_untracked();
         // For steps that need saving, dispatch save and advance on success
-        if matches!(current, STEP_EMBEDDER | STEP_NER | STEP_LLM | STEP_QUANTIZATION | STEP_KB_SOURCES) {
+        if matches!(current, STEP_EMBEDDER | STEP_NER | STEP_NLI | STEP_LLM | STEP_QUANTIZATION | STEP_KB_SOURCES) {
             save_step_config.dispatch(current);
         } else {
             set_step.set((current + 1).min(TOTAL_STEPS));
@@ -929,43 +954,114 @@ pub fn OnboardingWizard(
                                         })
                                     })
                                 }}
-                                // ── NLI Relation Extraction section (visible when GLiNER selected) ──
+                            </div>
+                        }.into_any(),
+
+                        STEP_NLI => view! {
+                            <div class="wizard-step">
+                                <h2><i class="fa-solid fa-link"></i>" Relation Extraction (NLI)"</h2>
+                                <p class="wizard-desc">"Zero-shot relation extraction via Natural Language Inference. When two entities appear in a sentence, NLI classifies the relationship between them (e.g. works_at, born_in, headquartered_in)."</p>
+
+                                // NLI Model selection
+                                <div class="form-group">
+                                    <label><i class="fa-solid fa-cube"></i>" NLI Model"</label>
+                                    <div class="wizard-model-chips">
+                                        {[
+                                            ("multilingual-MiniLMv2-L6-mnli-xnli", "MiniLMv2", "~100MB, 100+ langs, fast"),
+                                            ("mDeBERTa-v3-base-xnli", "mDeBERTa v3", "~280MB, 100+ langs, more accurate"),
+                                        ].into_iter().map(|(id, name, desc)| {
+                                            let mid = id.to_string();
+                                            let mid2 = mid.clone();
+                                            view! {
+                                                <button
+                                                    class=move || if rel_model_choice.get() == mid { "wizard-model-chip active" } else { "wizard-model-chip" }
+                                                    on:click=move |_| set_rel_model_choice.set(mid2.clone())
+                                                >
+                                                    <strong>{name}</strong>
+                                                    <span class="wizard-lang-badge wizard-lang-multi"><i class="fa-solid fa-language"></i>" Multilingual"</span>
+                                                    <small>{desc}</small>
+                                                </button>
+                                            }
+                                        }).collect::<Vec<_>>()}
+                                    </div>
+                                </div>
+
+                                // Confidence Threshold
+                                <div class="form-group" style="margin-top: 1rem;">
+                                    <label><i class="fa-solid fa-sliders"></i>" Confidence Threshold: "
+                                        <strong>{move || format!("{:.2}", rel_threshold.get())}</strong>
+                                    </label>
+                                    <input type="range"
+                                        min="0.30" max="0.95" step="0.05"
+                                        style="width: 100%; margin-top: 0.25rem;"
+                                        prop:value=move || format!("{:.2}", rel_threshold.get())
+                                        on:input=move |ev| {
+                                            if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                                set_rel_threshold.set(v);
+                                            }
+                                        }
+                                    />
+                                    <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: rgba(255,255,255,0.4);">
+                                        <span>"0.30 (more relations, less precise)"</span>
+                                        <span>"0.90 (default)"</span>
+                                        <span>"0.95 (very precise)"</span>
+                                    </div>
+                                </div>
+
+                                // Relation Templates
+                                <div class="form-group" style="margin-top: 1rem;">
+                                    <label><i class="fa-solid fa-list-check"></i>" Relation Templates"</label>
+                                    <p class="wizard-hint">"Templates define what relationships NLI can detect. Each template is a natural language pattern with {head} and {tail} placeholders."</p>
+                                    <div class="wizard-cards" style="margin-top: 0.5rem;">
+                                        <div
+                                            class=move || if rel_templates_mode.get() == "general" { "wizard-card wizard-card-selected" } else { "wizard-card" }
+                                            on:click=move |_| set_rel_templates_mode.set("general".into())
+                                            style="min-width: 200px;"
+                                        >
+                                            <h4>"General (21 templates)"</h4>
+                                            <p style="font-size: 0.8rem;">"works_at, born_in, lives_in, member_of, founded_by, headquartered_in, subsidiary_of, located_in, and 13 more. Covers TACRED/FewRel/Wikidata relation types."</p>
+                                            <p style="font-size: 0.75rem; color: rgba(255,255,255,0.5);"><i class="fa-solid fa-wifi-slash" style="margin-right: 0.25rem;"></i>"Works offline / air-gapped"</p>
+                                        </div>
+                                        <div
+                                            class=move || if rel_templates_mode.get() == "custom" { "wizard-card wizard-card-selected" } else { "wizard-card" }
+                                            on:click=move |_| set_rel_templates_mode.set("custom".into())
+                                            style="min-width: 200px;"
+                                        >
+                                            <h4>"Import Custom"</h4>
+                                            <p style="font-size: 0.8rem;">"Load templates from a JSON file. Use for domain-specific relation types (biomedical, legal, financial) or templates exported from another engram instance."</p>
+                                            <p style="font-size: 0.75rem; color: rgba(255,255,255,0.5);"><i class="fa-solid fa-file-import" style="margin-right: 0.25rem;"></i>"Air-gapped import supported"</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                // Custom template import (shown when "custom" selected)
                                 {move || {
-                                    let is_gliner = ner_choice.get() == "gliner";
-                                    is_gliner.then(|| view! {
-                                        <div class="wizard-info-box" style="margin-top: 1rem;">
-                                            <h4><i class="fa-solid fa-link"></i>" NLI Relation Extraction"</h4>
-                                            <p style="font-size: 0.85rem; margin-bottom: 0.5rem;">
-                                                "Zero-shot relation extraction via Natural Language Inference. Classifies 21 relation types (works_at, born_in, etc.) using a ~100MB multilingual model. Downloaded automatically with the NER model."
-                                            </p>
-                                            <div style="margin: 0.75rem 0;">
-                                                <label style="font-weight: 500;"><i class="fa-solid fa-sliders"></i>" Confidence Threshold: "
-                                                    <strong>{move || format!("{:.2}", rel_threshold.get())}</strong>
-                                                </label>
-                                                <input type="range"
-                                                    min="0.30" max="0.95" step="0.05"
-                                                    style="width: 100%; margin-top: 0.25rem;"
-                                                    prop:value=move || format!("{:.2}", rel_threshold.get())
-                                                    on:input=move |ev| {
-                                                        if let Ok(v) = event_target_value(&ev).parse::<f64>() {
-                                                            set_rel_threshold.set(v);
-                                                        }
-                                                    }
-                                                />
-                                                <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: rgba(255,255,255,0.4);">
-                                                    <span>"0.30 (more relations, less precise)"</span>
-                                                    <span>"0.95 (fewer relations, very precise)"</span>
-                                                </div>
+                                    (rel_templates_mode.get() == "custom").then(|| view! {
+                                        <div class="form-group" style="margin-top: 0.75rem;">
+                                            <label>"Paste template JSON or use file import in System settings after setup"</label>
+                                            <textarea
+                                                class="form-control"
+                                                style="width: 100%; min-height: 120px; font-family: monospace; font-size: 0.8rem; background: rgba(0,0,0,0.2); color: inherit; border: 1px solid rgba(255,255,255,0.1);"
+                                                prop:value=rel_custom_templates_json
+                                                on:input=move |ev| {
+                                                    set_rel_custom_templates_json.set(event_target_value(&ev));
+                                                }
+                                                placeholder=r#"{"works_at": "{head} works at {tail}", "treats": "{head} is used to treat {tail}"}"#
+                                            ></textarea>
+                                            <div class="wizard-info-box" style="margin-top: 0.5rem; font-size: 0.8rem;">
+                                                <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>
+                                                " Format: {\"relation_type\": \"{head} verb {tail}\"}. Templates are merged with defaults. You can also import a JSON file via System settings after setup."
                                             </div>
-                                            // Download progress indicator
-                                            {move || {
-                                                let progress = rel_download_progress.get();
-                                                (!progress.is_empty()).then(|| view! {
-                                                    <div style="margin-top: 0.5rem; padding: 0.35rem 0.5rem; background: rgba(52,152,219,0.1); border: 1px solid rgba(52,152,219,0.3); border-radius: 4px; font-size: 0.8rem;">
-                                                        <i class="fa-solid fa-spinner fa-spin" style="margin-right: 0.25rem;"></i>{progress}
-                                                    </div>
-                                                })
-                                            }}
+                                        </div>
+                                    })
+                                }}
+
+                                // Download progress
+                                {move || {
+                                    let progress = rel_download_progress.get();
+                                    (!progress.is_empty()).then(|| view! {
+                                        <div style="margin-top: 0.75rem; padding: 0.5rem 0.75rem; background: rgba(52,152,219,0.1); border: 1px solid rgba(52,152,219,0.3); border-radius: 4px; font-size: 0.85rem;">
+                                            <i class="fa-solid fa-spinner fa-spin" style="margin-right: 0.25rem;"></i>{progress}
                                         </div>
                                     })
                                 }}
@@ -1294,6 +1390,7 @@ pub fn OnboardingWizard(
                                             if n == "gliner" { " Downloading GLiNER model..." }
                                             else { " Saving configuration..." }
                                         }
+                                        STEP_NLI => " Downloading NLI model...",
                                         STEP_LLM => {
                                             let l = llm_choice.get();
                                             if l == "ollama" { " Pulling model from Ollama..." }
