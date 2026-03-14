@@ -835,11 +835,23 @@ impl Pipeline {
             // Write lock drops here — readers can interleave between chunks
         }
 
-        // Pass 2: Create all deferred relations (all entity nodes now exist)
+        // Pass 2: Create all deferred relations.
+        // Auto-creates missing nodes (e.g., KB enrichment discovers "Lockheed Martin"
+        // as manufacturer of HIMARS -- we create the node automatically).
         if !deferred_relations.is_empty() {
             let mut graph = self.graph.write().map_err(|_| IngestError::Graph("graph write lock poisoned".into()))?;
             for (provenance, relations) in &deferred_relations {
                 for rel in relations {
+                    // Auto-create missing nodes (KB enrichment discovers new entities)
+                    for label in [&rel.from, &rel.to] {
+                        if graph.find_node_id(label).ok().flatten().is_none() {
+                            let _ = graph.store_with_confidence(
+                                label, 0.70, provenance,
+                            );
+                            result.facts_stored += 1;
+                        }
+                    }
+
                     match graph.relate(
                         &rel.from,
                         &rel.to,

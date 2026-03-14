@@ -261,6 +261,87 @@ impl KbRelationExtractor {
         results
     }
 
+    /// Property expansion: fetch key Wikidata properties for all linked entities.
+    /// Discovers NEW entities (e.g., "Lockheed Martin" as manufacturer of HIMARS)
+    /// and returns them as (entity_label, property_label, new_entity_label) triples.
+    fn property_expansion(
+        &self,
+        endpoint: &KbEndpoint,
+        qids: &[(&str, usize)], // (QID URI, entity_index)
+        entity_labels: &[String],
+        language: &str,
+    ) -> Vec<(String, String, String)> {
+        if qids.is_empty() {
+            return Vec::new();
+        }
+
+        let values: String = qids.iter()
+            .map(|(qid, _)| format!("wd:{}", extract_qid(qid)))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // Key Wikidata properties that discover interesting connected entities
+        let query = format!(
+            r#"SELECT ?entity ?entityLabel ?propLabel ?value ?valueLabel WHERE {{
+                VALUES ?entity {{ {values} }}
+                VALUES ?prop {{ wdt:P39 wdt:P27 wdt:P17 wdt:P159 wdt:P176 wdt:P495 wdt:P36 }}
+                ?entity ?prop ?value .
+                FILTER(isIRI(?value))
+                SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,{lang}" }}
+            }} LIMIT 300"#,
+            values = values,
+            lang = language,
+        );
+
+        let json = match self.sparql_query(endpoint, &query) {
+            Ok(j) => j,
+            Err(_) => return Vec::new(),
+        };
+
+        // Build QID → entity label map
+        let qid_to_label: HashMap<String, String> = qids.iter()
+            .map(|(qid, idx)| (extract_qid(qid).to_string(), entity_labels[*idx].clone()))
+            .collect();
+
+        let mut results = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        if let Some(bindings) = json.pointer("/results/bindings").and_then(|b| b.as_array()) {
+            for binding in bindings {
+                let entity_qid = binding.pointer("/entity/value").and_then(|v| v.as_str()).unwrap_or("");
+                let prop_label = binding.pointer("/propLabel/value").and_then(|v| v.as_str()).unwrap_or("");
+                let value_label = binding.pointer("/valueLabel/value").and_then(|v| v.as_str()).unwrap_or("");
+
+                // Skip self-references and empty values
+                if value_label.is_empty() || value_label.starts_with("http://") {
+                    continue;
+                }
+
+                let entity_label = match qid_to_label.get(extract_qid(entity_qid)) {
+                    Some(l) => l.clone(),
+                    None => continue,
+                };
+
+                // Skip if value is already one of our entities
+                if entity_labels.contains(&value_label.to_string()) {
+                    continue;
+                }
+
+                // Deduplicate
+                let key = (entity_label.clone(), value_label.to_string());
+                if seen.contains(&key) { continue; }
+                seen.insert(key);
+
+                // Map Wikidata property URIs to readable relation types
+                let rel_type = wikidata_prop_to_rel_type(prop_label);
+
+                results.push((entity_label, rel_type, value_label.to_string()));
+            }
+        }
+
+        results
+    }
+
     /// Look up relations between two KB entity IDs.
     fn relation_lookup(
         &self,
@@ -425,6 +506,34 @@ impl RelationExtractor for KbRelationExtractor {
                 }
             }
 
+            // Phase 4: Property expansion — discover NEW entities from Wikidata properties.
+            // E.g., Putin → position_held → "President of Russia", HIMARS → manufacturer → "Lockheed Martin"
+            // Creates new nodes directly in the graph and returns relations to them.
+            {
+                let entity_labels: Vec<String> = input.entities.iter().map(|e| e.text.clone()).collect();
+                let expansion = self.property_expansion(endpoint, &qids, &entity_labels, &input.language);
+
+                if !expansion.is_empty() {
+                    let provenance = engram_core::graph::Provenance {
+                        source_type: engram_core::graph::SourceType::Api,
+                        source_id: format!("kb:{}", endpoint.name),
+                    };
+
+                    if let Ok(mut g) = self.graph.write() {
+                        for (from_label, rel_type, to_label) in &expansion {
+                            // Create new node for the discovered entity
+                            let _ = g.store_with_confidence(to_label, 0.70, &provenance);
+
+                            // Create the edge
+                            match g.relate(from_label, to_label, rel_type, &provenance) {
+                                Ok(_) => stats.relations_found += 1,
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                }
+            }
+
             stats.lookup_ms = start.elapsed().as_millis() as u64;
 
             // Merge into total stats
@@ -539,6 +648,28 @@ fn uri_to_label(uri: &str) -> String {
         result.push(ch.to_ascii_lowercase());
     }
     result
+}
+
+/// Map Wikidata property labels to engram relation types.
+fn wikidata_prop_to_rel_type(prop_label: &str) -> String {
+    // prop_label comes from Wikidata SERVICE wikibase:label, often as URI paths
+    let label = if prop_label.contains('/') {
+        uri_to_label(prop_label)
+    } else {
+        prop_label.to_lowercase().replace(' ', "_")
+    };
+
+    match label.as_str() {
+        "p39" | "position_held" => "holds_position".to_string(),
+        "p27" | "country_of_citizenship" => "citizen_of".to_string(),
+        "p17" | "country" => "located_in".to_string(),
+        "p159" | "headquarters_location" => "headquartered_in".to_string(),
+        "p176" | "manufacturer" => "manufactured_by".to_string(),
+        "p495" | "country_of_origin" => "origin_country".to_string(),
+        "p36" | "capital" => "capital_of".to_string(),
+        "p6" | "head_of_government" => "governed_by".to_string(),
+        _ => label,
+    }
 }
 
 #[cfg(test)]
