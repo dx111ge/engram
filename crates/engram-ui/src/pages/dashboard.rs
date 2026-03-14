@@ -3,7 +3,7 @@ use leptos::prelude::*;
 use crate::api::ApiClient;
 use crate::api::types::{
     HealthResponse, StatsResponse, ComputeResponse, AnalyzeResponse, AnalyzeRequest,
-    IngestRequest, IngestItem, IngestResponse, SourceInfo,
+    IngestRequest, IngestItem, IngestResponse, SourceInfo, KbEndpointInfo,
 };
 use crate::components::stat_card::StatCard;
 
@@ -38,6 +38,17 @@ pub fn Dashboard() -> impl IntoView {
     let sources = LocalResource::new(move || {
         let api = api_sources.clone();
         async move { api.get::<Vec<SourceInfo>>("/sources").await.ok() }
+    });
+
+    let api_kb = api.clone();
+    let kb_endpoints = LocalResource::new(move || {
+        let api = api_kb.clone();
+        async move {
+            // API returns {"endpoints": [...]} wrapper
+            #[derive(Clone, Debug, serde::Deserialize)]
+            struct KbResponse { #[serde(default)] endpoints: Vec<KbEndpointInfo> }
+            api.get::<KbResponse>("/config/kb").await.ok().map(|r| r.endpoints)
+        }
     });
 
     // 3 stat cards: Facts stored, Connections, Status
@@ -226,20 +237,29 @@ pub fn Dashboard() -> impl IntoView {
             </div>
             {move || {
                 let src_list = sources.get().flatten().unwrap_or_default();
-                if src_list.is_empty() {
+                let kb_list = kb_endpoints.get().flatten().unwrap_or_default();
+                let kb_enabled: Vec<_> = kb_list.iter().filter(|k| k.enabled).collect();
+                if src_list.is_empty() && kb_enabled.is_empty() {
                     view! {
                         <p class="text-secondary mt-1" style="font-size: 0.9rem;">"No sources configured yet."</p>
                     }.into_any()
                 } else {
                     view! {
                         <table class="mt-1">
-                            <thead><tr><th>"Name"</th><th>"Type"</th><th>"Ingested"</th></tr></thead>
+                            <thead><tr><th>"Name"</th><th>"Type"</th><th>"Status"</th></tr></thead>
                             <tbody>
                                 {src_list.iter().map(|s| view! {
                                     <tr>
                                         <td>{s.name.clone()}</td>
                                         <td class="text-secondary">{s.source_type.clone().unwrap_or_default()}</td>
-                                        <td>{s.total_ingested.unwrap_or(0).to_string()}</td>
+                                        <td>{s.total_ingested.unwrap_or(0).to_string()}" ingested"</td>
+                                    </tr>
+                                }).collect::<Vec<_>>()}
+                                {kb_enabled.iter().map(|k| view! {
+                                    <tr>
+                                        <td><i class="fa-solid fa-database" style="margin-right: 0.3rem; color: var(--accent);"></i>{k.name.clone()}</td>
+                                        <td class="text-secondary">"SPARQL endpoint"</td>
+                                        <td><span style="color: #66bb6a;"><i class="fa-solid fa-circle" style="font-size: 0.5rem; margin-right: 0.3rem;"></i>"Active"</span></td>
                                     </tr>
                                 }).collect::<Vec<_>>()}
                             </tbody>

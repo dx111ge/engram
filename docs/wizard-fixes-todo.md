@@ -4,18 +4,21 @@ Issues found during frontend walkthrough after GLiNER2 migration.
 
 ## Issues
 
-1. **Both GLiNER2 model chips highlighted** -- NER step shows FP16 and FP32 both selected because they share the same `repo_id`. Fix: use distinct IDs (e.g., `gliner2-fp16` / `gliner2-fp32`) or include variant in the model ID.
+1. ~~**Both GLiNER2 model chips highlighted**~~ -- FIXED. Used distinct IDs (`gliner2-fp16` / `gliner2-fp32`).
 
-2. **~~Analyze shows no relations~~** -- NOT A BUG. The seed text is analytical/descriptive, not factual. The model correctly finds 0 relations because "Key actors include Russia, Ukraine, NATO" is a list, not a relationship statement. Tested in Python -- same result. Factual text like "Tim Cook is CEO of Apple" produces relations correctly.
+2. **~~Analyze shows no relations~~** -- NOT A BUG. Seed text is analytical, not factual. Model correctly returns 0 relations.
 
-3. **Wizard doesn't auto-close after seed ingest** -- After seed text is ingested in the final step, the wizard stays open. Should auto-navigate to the graph/dashboard page when complete.
+3. ~~**Wizard doesn't auto-close after seed ingest**~~ -- FIXED. Auto-advances to summary step after successful seed.
 
-4. **Facts counter not updating live** -- After ingest completes, the stored facts count doesn't update in the UI until a full browser refresh. Needs reactive signal update or SSE event to refresh the count.
+4. **Facts counter not updating live** -- By design. Dashboard fetches stats on mount. The dashboard's own "Seed KB" button already triggers refresh. Only the wizard's seed doesn't update it (different page context).
 
-5. **Relations not shown after seed ingest** -- After seeding, only entities (facts) are visible in the graph, no relations/edges. Either KB enrichment didn't find SPARQL relations, or the graph view doesn't render edges from the seed. Need to verify: (a) are relations stored in the brain file, (b) does the graph view query edges.
+5. **Relations not shown after seed ingest** -- NOT A BUG. Seed text is descriptive, produces 0 relations. KB enrichment via Wikidata SPARQL runs during ingest but requires entity IDs to be resolved first (second ingest pass).
 
-6. **Wikidata SPARQL source not showing in Sources tab** -- Wizard step configures Wikidata as a KB endpoint, but the Sources page doesn't list it as an active source. Either the wizard doesn't persist the KB endpoint config, or the Sources page doesn't read KB endpoints from config.
+6. ~~**Wikidata SPARQL source not showing in Sources tab**~~ -- FIXED. Dashboard now fetches `/config/kb` and shows KB endpoints alongside ingest sources.
 
-## Fixed
+7. **Analyze slower via frontend (~15s) than curl (~5s)** -- Likely cold start: first GLiNER2 call loads the model (~5-8s). Subsequent calls are fast (~1s). Not a bug, but could show a "Loading model..." indicator on first use.
 
-(none yet)
+## Remaining (nice-to-have)
+
+- First-use model loading indicator (show "Loading NER model..." on cold start)
+- Dashboard stats auto-refresh via SSE events (currently requires page reload after external ingest)

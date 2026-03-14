@@ -139,8 +139,8 @@ const NER_PRESETS: &[NerPreset] = &[
         download: "~530MB\u{2013}1.1GB ONNX model (in-process, no sidecar)", license: "Apache-2.0",
         learning: "Discovers entities + relations in one pass. Feeds gazetteer for instant future recognition.",
         models: &[
-            ("dx111ge/gliner2-multi-v1-onnx", "GLiNER2 Multi v1 FP16", "530MB FP16 hybrid, 100+ languages (recommended)", "dx111ge/gliner2-multi-v1-onnx", "Multilingual"),
-            ("dx111ge/gliner2-multi-v1-onnx", "GLiNER2 Multi v1 FP32", "1.1GB FP32, 100+ languages (maximum precision)", "dx111ge/gliner2-multi-v1-onnx", "Multilingual"),
+            ("gliner2-fp16", "GLiNER2 Multi v1 FP16", "530MB FP16 hybrid, 100+ languages (recommended)", "dx111ge/gliner2-multi-v1-onnx", "Multilingual"),
+            ("gliner2-fp32", "GLiNER2 Multi v1 FP32", "1.1GB FP32, 100+ languages (maximum precision)", "dx111ge/gliner2-multi-v1-onnx", "Multilingual"),
         ],
     },
     NerPreset {
@@ -226,7 +226,7 @@ pub fn OnboardingWizard(
     let (embed_model, set_embed_model) = signal(String::new());
     let (embed_endpoint, set_embed_endpoint) = signal(String::new());
     let (ner_choice, set_ner_choice) = signal("gliner2".to_string());
-    let (ner_model, set_ner_model) = signal("dx111ge/gliner2-multi-v1-onnx".to_string());
+    let (ner_model, set_ner_model) = signal("gliner2-fp16".to_string());
     let (llm_choice, set_llm_choice) = signal(String::new());
     let (llm_key, set_llm_key) = signal(String::new());
     let (llm_model, set_llm_model) = signal(String::new());
@@ -394,7 +394,7 @@ pub fn OnboardingWizard(
                         config["ner_model"] = serde_json::json!(&ner_m);
 
                         // Download GLiNER2 ONNX model (unified NER+RE)
-                        let variant = if ner_m.contains("FP32") { "fp32" } else { "fp16" };
+                        let variant = if ner_m.contains("fp32") { "fp32" } else { "fp16" };
                         let ner_dl = api.post_text("/config/gliner2-download", &serde_json::json!({
                             "repo_id": "dx111ge/gliner2-multi-v1-onnx",
                             "variant": variant,
@@ -548,9 +548,11 @@ pub fn OnboardingWizard(
             match api.post::<_, IngestResponse>("/ingest", &body).await {
                 Ok(resp) => {
                     set_seed_result.set(Some(format!(
-                        "Seeded! {} facts, {} relations ({}ms)",
+                        "Seeded! {} facts, {} relations ({}ms). Advancing to summary...",
                         resp.facts_stored, resp.relations_created, resp.duration_ms,
                     )));
+                    // Auto-advance to summary step after successful seed
+                    set_step.set(TOTAL_STEPS);
                 }
                 Err(e) => {
                     set_seed_result.set(Some(format!("Ingest failed: {e}")));

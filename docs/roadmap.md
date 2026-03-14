@@ -83,33 +83,56 @@ Six new subsystems transform engram from passive storage into an active intellig
 
 **Status:** In Progress
 
-### GLiNER ONNX Migration (anno+candle -> gline-rs+ort)
+### GLiNER2 Unified NER+RE (replaces gline-rs + NLI sidecars)
 
-**Design document:** `docs/design-gliner-onnx-migration.md`
+**Design document:** `docs/eval-re-approaches.md`
+**Model:** [dx111ge/gliner2-multi-v1-onnx](https://huggingface.co/dx111ge/gliner2-multi-v1-onnx) (Apache-2.0)
+**Status:** Complete -- NER+RE working in-process, 10/10 tests pass
 
-The `anno` crate with candle backend proved unreliable for GLiNER NER:
-- 3 bugs hit in one session (config.json fallback, encoder resolution, SentencePiece unsupported)
-- No multilingual GLiNER model works out of the box with anno's candle backend
-- The encoder for all multilingual GLiNER models (`microsoft/mdeberta-v3-base`) ships SentencePiece only, which candle doesn't support
+Evaluated 3 approaches (GLiNER-Multitask, GLiNER2, NLI). GLiNER2 (`fastino/gliner2-multi-v1`)
+wins decisively: 100% recall on German, ~125ms/sentence, zero-shot multilingual via mDeBERTa-v3-base.
 
-**Solution:** Replace anno+candle with `gline-rs` (Rust GLiNER ONNX inference) as a sidecar binary.
-Default model: `knowledgator/gliner-x-small` (quantized ONNX = 173 MB, 20 languages, ~0.75 F1).
-Alternative: `onnx-community/gliner_multi-v2.1` (INT8 = 349 MB, 6 languages, ~0.66 F1).
-Sidecar pattern avoids ort version conflict (gline-rs pins ort rc.9, engram uses rc.12).
+**Architecture:**
+- In-process via `ort` rc.12 + `tokenizers` -- no sidecar, no subprocess, no gline-rs
+- 5 ONNX sessions: encoder, span_rep, count_embed, count_pred, classifier
+- FP16 hybrid encoder (530MB): weights FP16 on disk, Cast nodes auto-upcast to FP32 at runtime
+- Combined multi-relation schema (single encoder pass, prevents noise from per-type scoring)
+- rayon parallel span scoring, dynamic thread count via `available_parallelism()`
+- `Extractor` + `RelationExtractor` traits on shared `Arc<Gliner2PipelineBackend>`
+- NER threshold 0.5, RE threshold 0.85 (facts only, no noise)
 
-| # | Task | Effort | Status |
-|---|------|--------|--------|
-| NER.1 | Create `engram-ner` sidecar binary (gline-rs + JSON stdin/stdout) | Medium | DONE |
-| NER.2 | Create `gliner_backend.rs` in engram-ingest (subprocess, Extractor trait) | Medium | DONE |
-| NER.3 | NER model download endpoint for ONNX models from onnx-community | Small | DONE |
-| NER.4 | Update wizard for ONNX model download + progress indication | Small | DONE |
-| NER.5 | Remove `anno` dependency, delete `anno_backend.rs` | Small | DONE |
-| NER.6 | End-to-end test: wizard -> download -> analyze -> ingest | Medium | DONE |
-| NLI.1 | Wizard: NLI threshold slider + download progress | Small | DONE |
-| NLI.2 | System: threshold slider + template import/export | Small | DONE |
-| NLI.3 | Backend: rel_threshold merge fix, GET /config fields, template endpoints | Small | DONE |
+**Why not INT8:** Special token embeddings (`[R]`, `[E]`) have cosine 0.80 vs FP32 (vs 0.97 overall).
+This cascades through count_embed (tail cosine drops to 0.65) and flips relation rankings.
+INT8 is acceptable for NER-only but produces wrong RE results. Full analysis in design doc.
 
-**NLI relation extraction** (`engram-rel` sidecar) is migrated and working. Wizard + System UI complete.
+**Removed:** `gliner_backend.rs`, `rel_nli.rs`, `rel_glirel.rs`, `gliner`/`nli-rel`/`glirel` features,
+`engram-ner` sidecar, `engram-rel` sidecar, gline-rs dependency.
+
+| # | Task | Status |
+|---|------|--------|
+| G2.1 | Evaluate GLiNER-Multitask, GLiNER2, NLI with German test corpus | DONE |
+| G2.2 | ONNX export (5 models) + reusable `export_gliner2_onnx.py` | DONE |
+| G2.3 | FP16 hybrid encoder (Cast-node trick: FP16 weights, FP32 compute) | DONE |
+| G2.4 | INT8 investigation (special token precision loss root-caused) | DONE |
+| G2.5 | `gliner2_backend.rs` -- full NER+RE pipeline in Rust | DONE |
+| G2.6 | `[R]` token fix (250107, distinct from `[E]` 250106) | DONE |
+| G2.7 | Word-level embedding fix (first-token pooling, not all subwords) | DONE |
+| G2.8 | Combined multi-relation schema (single encoder pass, noise elimination) | DONE |
+| G2.9 | Pipeline wiring (Extractor + RelationExtractor traits, handler, feature flag) | DONE |
+| G2.10 | Remove old sidecars (gliner_backend, rel_nli, rel_glirel, 3 features) | DONE |
+| G2.11 | HuggingFace upload (FP32 + FP16 + INT8 with warning + export script) | DONE |
+| G2.12 | `POST /config/gliner2-download` endpoint | DONE |
+| G2.13 | Wizard UI updated for GLiNER2 + RE threshold | DONE |
+| G2.14 | 10 integration tests (EN, DE, FR, ES, mixed-lang) | DONE |
+| G2.15 | End-to-end server test (analyze + ingest with fresh brain) | DONE |
+
+### Performance optimization (deferred)
+
+| # | Task | Priority | Notes |
+|---|------|----------|-------|
+| P.1 | Parallelize per-relation scoring loop with rayon | Low | Currently sequential over 6 relation types. Inner span scoring already uses `par_iter`. Constraint: `count_embed` ONNX session needs `&mut self`. Fix: batch all `count_embed` calls first (serial), then parallelize scoring (no ONNX calls needed). Encoder pass (~100ms) dominates runtime, scoring loop is ~5ms -- marginal gain. |
+| P.2 | Memory-mapped model loading | Low | `ort` `commit_from_file` handles external data natively. Mmap only benefits single-file models. |
+| P.3 | GPU/DirectML acceleration for encoder | Medium | `ort` supports DirectML/CUDA providers. Would reduce encoder from ~100ms to ~10ms. Needs feature flag + provider selection in config. |
 
 ### Google Workspace Integration (via `gws` CLI)
 
