@@ -1803,55 +1803,57 @@ fn build_pipeline(
         chain.add_backend(Box::new(engram_ingest::GazetteerExtractor::new(gaz)));
     }
 
-    // 3. GLiNER ONNX backend (zero-shot NER via engram-ner sidecar)
-    //    Uses cached backend if available, otherwise spawns subprocess and caches.
-    #[cfg(feature = "gliner")]
-    {
-        use engram_ingest::gliner_backend::{GlinerBackend, find_ner_model, list_installed_models};
+    // 3. GLiNER2 in-process backend (unified NER + RE, no sidecar)
+    #[cfg(feature = "gliner2")]
+    let gliner2_arc: Option<std::sync::Arc<engram_ingest::gliner2_backend::Gliner2PipelineBackend>> = {
+        use engram_ingest::gliner2_backend::{Gliner2Backend, find_gliner2_model};
 
-        // Check cache first
-        let cached = ner_cache.read().ok().and_then(|c| c.clone());
-
-        if let Some(cached_backend) = cached {
-            tracing::debug!("using cached GLiNER ONNX NER backend");
-            chain.add_backend(Box::new(engram_ingest::ArcExtractor(cached_backend)));
-        } else {
-            // Determine which model to load: config > first installed > none
-            let model_name = ner_model
-                .as_deref()
-                .map(String::from)
-                .or_else(|| list_installed_models().into_iter().next());
-
-            eprintln!("[build_pipeline] gliner: model_name={:?}", model_name);
-            if let Some(ref name) = model_name {
-                if let Some(mut cfg) = find_ner_model(name) {
-                    cfg.entity_types = vec![
+        if let Some(cfg) = find_gliner2_model() {
+            let variant = "fp16"; // default to FP16 hybrid (half size, full precision)
+            match Gliner2Backend::load(&cfg.model_dir, variant) {
+                Ok(backend) => {
+                    // Default entity labels and relation types
+                    let entity_labels = vec![
                         "person".into(), "organization".into(), "location".into(),
                         "date".into(), "event".into(), "product".into(),
                     ];
-                    cfg.min_confidence = 0.3;
-                    match GlinerBackend::new(cfg) {
-                        Ok(backend) => {
-                            eprintln!("[build_pipeline] gliner: ONNX NER loaded OK");
-                            tracing::info!(model = %name, "GLiNER ONNX NER backend loaded");
-                            let arc_backend: std::sync::Arc<dyn engram_ingest::Extractor> = std::sync::Arc::new(backend);
-                            if let Ok(mut cache) = ner_cache.write() {
-                                *cache = Some(arc_backend.clone());
-                            }
-                            chain.add_backend(Box::new(engram_ingest::ArcExtractor(arc_backend)));
-                        }
-                        Err(e) => {
-                            eprintln!("[build_pipeline] gliner: ONNX NER FAILED: {e}");
-                            tracing::warn!(model = %name, "GLiNER ONNX NER backend failed: {e}");
-                        }
-                    }
-                } else {
-                    tracing::warn!(model = %name, "GLiNER ONNX model not found on disk");
+                    let relation_types: Vec<String> = relation_templates
+                        .as_ref()
+                        .map(|t| t.keys().cloned().collect())
+                        .unwrap_or_else(|| vec![
+                            "works_at".into(), "headquartered_in".into(),
+                            "located_in".into(), "founded".into(),
+                            "leads".into(), "supports".into(),
+                        ]);
+                    let threshold = rel_threshold.unwrap_or(0.85);
+
+                    let pb = engram_ingest::gliner2_backend::Gliner2PipelineBackend::new(
+                        backend,
+                        entity_labels,
+                        relation_types,
+                        0.5,       // NER threshold
+                        threshold, // RE threshold (0.85 default -- facts only, no noise)
+                    );
+                    eprintln!("[build_pipeline] gliner2: loaded OK (variant={variant})");
+                    tracing::info!(variant, "GLiNER2 unified NER+RE backend loaded");
+                    Some(std::sync::Arc::new(pb))
+                }
+                Err(e) => {
+                    eprintln!("[build_pipeline] gliner2: FAILED: {e}");
+                    tracing::warn!("GLiNER2 backend failed: {e}");
+                    None
                 }
             }
+        } else {
+            None
         }
-    }
+    };
 
+    #[cfg(feature = "gliner2")]
+    if let Some(ref arc) = gliner2_arc {
+        let ner_arc: std::sync::Arc<dyn engram_ingest::Extractor> = arc.clone();
+        chain.add_backend(Box::new(engram_ingest::ArcExtractor(ner_arc)));
+    }
 
     eprintln!("[build_pipeline] NER chain: {} backends", chain.backend_count());
     tracing::info!("NER chain: MergeAll with {} backends", chain.backend_count());
@@ -1917,101 +1919,11 @@ fn build_pipeline(
         rel_chain.add_backend(Box::new(engram_ingest::KgeRelationExtractor::new(kge)));
     }
 
-    // 3. GLiREL zero-shot relation extraction (DEPRECATED — use NLI-rel instead)
-    #[cfg(feature = "glirel")]
-    {
-        use engram_ingest::rel_glirel::{GlirelBackend, find_rel_model, list_installed_rel_models};
-
-        let model_name = rel_model
-            .as_deref()
-            .map(String::from)
-            .or_else(|| {
-                ner_model.as_deref().and_then(|n| {
-                    if n.starts_with("gliner_") {
-                        Some(n.replace("gliner_", "glirel_"))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .or_else(|| list_installed_rel_models().into_iter().next());
-
-        if let Some(ref name) = model_name {
-            if let Some(mut cfg) = find_rel_model(name) {
-                cfg.candidate_labels = vec![
-                    "invaded".into(), "attacked".into(), "allied_with".into(),
-                    "sanctioned".into(), "borders".into(), "capital_of".into(),
-                    "part_of".into(), "located_in".into(),
-                    "supplied_to".into(), "commanded_by".into(), "deployed_to".into(),
-                    "fought_in".into(), "defeated".into(),
-                    "trades_with".into(), "exports_to".into(), "funded_by".into(),
-                    "subsidiary_of".into(), "acquired_by".into(),
-                    "leads".into(), "member_of".into(), "founded_by".into(),
-                    "born_in".into(), "works_at".into(), "married_to".into(),
-                    "created_by".into(), "successor_of".into(),
-                ];
-                cfg.min_confidence = 0.3;
-                match GlirelBackend::new(cfg) {
-                    Ok(backend) => {
-                        tracing::info!(model = %name, "GLiREL relation extraction loaded (deprecated)");
-                        rel_chain.add_backend(Box::new(backend));
-                    }
-                    Err(e) => {
-                        tracing::warn!(model = %name, "GLiREL backend failed: {e}");
-                    }
-                }
-            }
-        }
-    }
-
-    // 4. NLI-based relation extraction (zero-shot, multilingual, ~80MB model)
-    //    Uses cached backend if available, otherwise loads and caches.
-    #[cfg(feature = "nli-rel")]
-    {
-        use engram_ingest::rel_nli::{NliRelBackend, find_nli_model, list_installed_nli_models};
-
-        // Check cache first
-        let cached = rel_cache.read().ok().and_then(|c| c.clone());
-
-        if let Some(cached_backend) = cached {
-            eprintln!("[build_pipeline] nli-rel: using cached backend");
-            rel_chain.add_backend(Box::new(engram_ingest::ArcRelationExtractor(cached_backend)));
-        } else {
-            let model_name = rel_model
-                .as_deref()
-                .map(String::from)
-                .or_else(|| list_installed_nli_models().into_iter().next());
-
-            eprintln!("[build_pipeline] nli-rel: model_name={:?}", model_name);
-            if let Some(ref name) = model_name {
-                if let Some(mut cfg) = find_nli_model(name) {
-                    // Apply custom relation templates from config if provided
-                    if let Some(ref templates) = relation_templates {
-                        if !templates.is_empty() {
-                            cfg.relation_templates = templates.clone();
-                        }
-                    }
-                    cfg.min_confidence = rel_threshold.unwrap_or(0.9);
-
-                    match NliRelBackend::new(cfg) {
-                        Ok(backend) => {
-                            eprintln!("[build_pipeline] nli-rel: loaded OK, {} templates", backend.template_count());
-                            let arc_backend: std::sync::Arc<dyn engram_ingest::RelationExtractor> = std::sync::Arc::new(backend);
-                            // Cache for next time
-                            if let Ok(mut cache) = rel_cache.write() {
-                                *cache = Some(arc_backend.clone());
-                            }
-                            rel_chain.add_backend(Box::new(engram_ingest::ArcRelationExtractor(arc_backend)));
-                        }
-                        Err(e) => {
-                            eprintln!("[build_pipeline] nli-rel: FAILED: {e}");
-                        }
-                    }
-                } else {
-                    eprintln!("[build_pipeline] nli-rel: model not found for '{name}'");
-                }
-            }
-        }
+    // 3. GLiNER2 relation extraction (same backend instance as NER, shared Arc)
+    #[cfg(feature = "gliner2")]
+    if let Some(ref arc) = gliner2_arc {
+        let re_arc: std::sync::Arc<dyn engram_ingest::RelationExtractor> = arc.clone();
+        rel_chain.add_backend(Box::new(engram_ingest::ArcRelationExtractor(re_arc)));
     }
 
     tracing::info!("Relation chain: MergeAll with {} backends", rel_chain.backend_count());
@@ -3555,11 +3467,152 @@ pub async fn ollama_pull(
 ///
 /// Downloads `tokenizer.json` + `onnx/model_{variant}.onnx` (saved as `model.onnx`).
 /// Default model: `knowledgator/gliner-x-small`, default variant: `quantized` (173 MB).
+// ── POST /config/gliner2-download — Download GLiNER2 ONNX model from HuggingFace ──
+
+/// Download GLiNER2 multi-file ONNX model from HuggingFace.
+///
+/// Request: `{"repo_id": "dx111ge/gliner2-multi-v1-onnx", "variant": "fp16", "force": false}`
+///
+/// Downloads all required ONNX files + tokenizer + config to `~/.engram/models/gliner2/<model>/`.
+pub async fn download_gliner2_model(
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    use tokio::io::AsyncWriteExt;
+
+    let repo_id = body["repo_id"].as_str()
+        .unwrap_or("dx111ge/gliner2-multi-v1-onnx")
+        .to_string();
+    let variant = body["variant"].as_str().unwrap_or("fp16").to_string();
+    let force = body["force"].as_bool().unwrap_or(false);
+
+    if repo_id.matches('/').count() != 1 || repo_id.contains("..") || repo_id.contains('\\') {
+        return Err(api_err(StatusCode::BAD_REQUEST, "invalid repo_id format"));
+    }
+
+    // Model name from repo_id (e.g., "gliner2-multi-v1-onnx")
+    let model_name = repo_id.split('/').last().unwrap_or("gliner2");
+
+    let home = engram_home()
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
+    let model_dir = home.join("models").join("gliner2").join(model_name);
+
+    // Skip if already installed
+    let config_path = model_dir.join("gliner2_config.json");
+    if !force && config_path.exists() {
+        return Ok(Json(serde_json::json!({
+            "status": "ok",
+            "skipped": true,
+            "message": "model already installed",
+            "model_dir": model_dir.to_string_lossy(),
+        })));
+    }
+
+    tokio::fs::create_dir_all(&model_dir).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create dir: {e}")))?;
+
+    let base_url = format!("https://huggingface.co/{}/resolve/main", repo_id);
+    let client = reqwest::Client::new();
+
+    // Files to download: config first (tells us which ONNX files to get)
+    let config_files = vec![
+        "gliner2_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "added_tokens.json",
+        "spm.model",
+    ];
+
+    // Download config files
+    for filename in &config_files {
+        let url = format!("{}/{}", base_url, filename);
+        let dest = model_dir.join(filename);
+        tracing::info!(file = %filename, "downloading");
+        let resp = client.get(&url).send().await
+            .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("download {filename}: {e}")))?;
+        if resp.status().is_success() {
+            let bytes = resp.bytes().await
+                .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("read {filename}: {e}")))?;
+            tokio::fs::write(&dest, &bytes).await
+                .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write {filename}: {e}")))?;
+        }
+    }
+
+    // Read config to find ONNX files for requested variant
+    let cfg_str = tokio::fs::read_to_string(&config_path).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("read config: {e}")))?;
+    let cfg: serde_json::Value = serde_json::from_str(&cfg_str)
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("parse config: {e}")))?;
+
+    let onnx_files = &cfg["onnx_files"][&variant];
+    if onnx_files.is_null() {
+        return Err(api_err(StatusCode::BAD_REQUEST,
+            format!("variant '{}' not found in config", variant)));
+    }
+
+    // Collect unique ONNX filenames (+ their .data files)
+    let mut files_to_download: Vec<String> = Vec::new();
+    for (_key, val) in onnx_files.as_object().unwrap_or(&serde_json::Map::new()) {
+        if let Some(fname) = val.as_str() {
+            if !files_to_download.contains(&fname.to_string()) {
+                files_to_download.push(fname.to_string());
+                files_to_download.push(format!("{}.data", fname));
+            }
+        }
+    }
+
+    // Stream-download ONNX files
+    let mut total_bytes: u64 = 0;
+    for filename in &files_to_download {
+        let url = format!("{}/{}", base_url, filename);
+        let dest = model_dir.join(filename);
+
+        if !force && dest.exists() {
+            let size = tokio::fs::metadata(&dest).await.map(|m| m.len()).unwrap_or(0);
+            if size > 0 {
+                total_bytes += size;
+                continue;
+            }
+        }
+
+        tracing::info!(file = %filename, "downloading ONNX file");
+        let resp = client.get(&url).send().await
+            .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("download {filename}: {e}")))?;
+
+        if !resp.status().is_success() {
+            // .data files might not exist for single-file models (e.g., int8)
+            if filename.ends_with(".data") {
+                continue;
+            }
+            return Err(api_err(StatusCode::BAD_GATEWAY,
+                format!("{} returned {}", filename, resp.status())));
+        }
+
+        let mut file = tokio::fs::File::create(&dest).await
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create {filename}: {e}")))?;
+        let mut stream = resp.bytes_stream();
+        use futures::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("stream {filename}: {e}")))?;
+            total_bytes += chunk.len() as u64;
+            file.write_all(&chunk).await
+                .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write {filename}: {e}")))?;
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "repo_id": repo_id,
+        "variant": variant,
+        "model_dir": model_dir.to_string_lossy(),
+        "total_mb": total_bytes / 1_048_576,
+    })))
+}
+
 ///
 /// Request: `{"model_id": "knowledgator/gliner-x-small", "variant": "quantized", "force": false}`
 ///
 /// For air-gapped systems, use `/config/model-upload` instead.
-#[cfg(feature = "gliner")]
 pub async fn download_ner_model(
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<serde_json::Value> {
@@ -3665,15 +3718,6 @@ pub async fn download_ner_model(
         "model_size_mb": size / 1_048_576,
         "model_dir": model_dir.to_string_lossy(),
     })))
-}
-
-/// Fallback when gliner feature is not enabled.
-#[cfg(not(feature = "gliner"))]
-pub async fn download_ner_model(
-    Json(_body): Json<serde_json::Value>,
-) -> ApiResult<serde_json::Value> {
-    Err(api_err(StatusCode::NOT_IMPLEMENTED,
-        "gliner feature not enabled — rebuild with --features gliner for GLiNER NER support"))
 }
 
 // ── POST /config/ner-download-onnx — Download legacy ONNX NER model ──
@@ -4585,7 +4629,14 @@ pub async fn export_relation_templates(
 
     // Start with configured templates (or defaults)
     let configured: std::collections::HashMap<String, String> = cfg.relation_templates.clone()
-        .unwrap_or_else(|| engram_ingest::rel_nli::default_templates());
+        .unwrap_or_else(|| std::collections::HashMap::from([
+                ("works_at".to_string(), "{head} works at {tail}".to_string()),
+                ("headquartered_in".to_string(), "{head} is headquartered in {tail}".to_string()),
+                ("located_in".to_string(), "{head} is located in {tail}".to_string()),
+                ("founded".to_string(), "{head} founded {tail}".to_string()),
+                ("leads".to_string(), "{head} leads {tail}".to_string()),
+                ("supports".to_string(), "{head} supports {tail}".to_string()),
+            ]));
     let threshold = cfg.rel_threshold.unwrap_or(0.9);
     drop(cfg);
 
@@ -4643,7 +4694,14 @@ pub async fn import_relation_templates(
         })?;
         // Merge: existing templates + imported (imported wins on conflict)
         let mut merged = cfg.relation_templates.clone()
-            .unwrap_or_else(|| engram_ingest::rel_nli::default_templates());
+            .unwrap_or_else(|| std::collections::HashMap::from([
+                ("works_at".to_string(), "{head} works at {tail}".to_string()),
+                ("headquartered_in".to_string(), "{head} is headquartered in {tail}".to_string()),
+                ("located_in".to_string(), "{head} is located in {tail}".to_string()),
+                ("founded".to_string(), "{head} founded {tail}".to_string()),
+                ("leads".to_string(), "{head} leads {tail}".to_string()),
+                ("supports".to_string(), "{head} supports {tail}".to_string()),
+            ]));
         merged.extend(templates.clone());
         cfg.relation_templates = Some(merged.clone());
         if let Some(t) = threshold {

@@ -134,15 +134,13 @@ const NER_PRESETS: &[NerPreset] = &[
         models: &[],
     },
     NerPreset {
-        id: "gliner", name: "GLiNER (Recommended)",
-        quality: "High \u{2014} any entity type, zero-shot", speed: "~50ms/sentence",
-        download: "~173\u{2013}610MB ONNX model (gline-rs sidecar)", license: "Apache-2.0",
-        learning: "Discovers new entities \u{2192} feeds gazetteer for instant future recognition. NLI relation extraction discovers relationships.",
+        id: "gliner2", name: "GLiNER2 (Recommended)",
+        quality: "High \u{2014} NER + Relation Extraction, zero-shot, multilingual", speed: "~125ms/sentence",
+        download: "~530MB\u{2013}1.1GB ONNX model (in-process, no sidecar)", license: "Apache-2.0",
+        learning: "Discovers entities + relations in one pass. Feeds gazetteer for instant future recognition.",
         models: &[
-            ("knowledgator/gliner-x-small", "GLiNER-X Small", "173MB quantized, 20 languages (recommended)", "knowledgator/gliner-x-small", "Multilingual"),
-            ("onnx-community/gliner_multi-v2.1", "GLiNER Multi v2.1", "349MB INT8, 6 languages", "onnx-community/gliner_multi-v2.1", "Multilingual"),
-            ("knowledgator/gliner-x-base", "GLiNER-X Base", "303MB quantized, 20 languages", "knowledgator/gliner-x-base", "Multilingual"),
-            ("knowledgator/gliner-x-large", "GLiNER-X Large", "610MB quantized, 20 languages (best accuracy)", "knowledgator/gliner-x-large", "Multilingual"),
+            ("dx111ge/gliner2-multi-v1-onnx", "GLiNER2 Multi v1 FP16", "530MB FP16 hybrid, 100+ languages (recommended)", "dx111ge/gliner2-multi-v1-onnx", "Multilingual"),
+            ("dx111ge/gliner2-multi-v1-onnx", "GLiNER2 Multi v1 FP32", "1.1GB FP32, 100+ languages (maximum precision)", "dx111ge/gliner2-multi-v1-onnx", "Multilingual"),
         ],
     },
     NerPreset {
@@ -227,16 +225,16 @@ pub fn OnboardingWizard(
     let (embed_key, set_embed_key) = signal(String::new());
     let (embed_model, set_embed_model) = signal(String::new());
     let (embed_endpoint, set_embed_endpoint) = signal(String::new());
-    let (ner_choice, set_ner_choice) = signal("gliner".to_string());
-    let (ner_model, set_ner_model) = signal("knowledgator/gliner-x-small".to_string());
+    let (ner_choice, set_ner_choice) = signal("gliner2".to_string());
+    let (ner_model, set_ner_model) = signal("dx111ge/gliner2-multi-v1-onnx".to_string());
     let (llm_choice, set_llm_choice) = signal(String::new());
     let (llm_key, set_llm_key) = signal(String::new());
     let (llm_model, set_llm_model) = signal(String::new());
-    let (rel_threshold, set_rel_threshold) = signal(0.9_f64);
-    let (rel_model_choice, set_rel_model_choice) = signal("multilingual-MiniLMv2-L6-mnli-xnli".to_string());
+    let (rel_threshold, set_rel_threshold) = signal(0.85_f64);
+    let (rel_model_choice, set_rel_model_choice) = signal("gliner2".to_string());
     let (rel_download_progress, set_rel_download_progress) = signal(String::new());
-    let (rel_templates_mode, set_rel_templates_mode) = signal("general".to_string()); // "general", "custom"
     let (rel_custom_templates_json, set_rel_custom_templates_json) = signal(String::new());
+    let (rel_templates_mode, set_rel_templates_mode) = signal("general".to_string());
     let (quant_choice, set_quant_choice) = signal("int8".to_string());
     let (kb_wikidata, set_kb_wikidata) = signal(true);
     let (kb_dbpedia, set_kb_dbpedia) = signal(false);
@@ -388,46 +386,30 @@ pub fn OnboardingWizard(
                     api.post_text("/config", &config).await
                 }
                 STEP_NER => {
-                    let provider = if ner == "gliner" { "gliner" } else { &ner };
+                    let provider = if ner == "gliner2" { "gliner2" } else { &ner };
                     let mut config = serde_json::json!({
                         "ner_provider": provider,
                     });
-                    if ner == "gliner" && !ner_m.is_empty() {
+                    if ner == "gliner2" && !ner_m.is_empty() {
                         config["ner_model"] = serde_json::json!(&ner_m);
 
-                        // Download GLiNER ONNX model
-                        let variant = if ner_m.starts_with("onnx-community/") { "int8" } else { "quantized" };
-                        let ner_dl = api.post_text("/config/ner-download", &serde_json::json!({
-                            "model_id": &ner_m,
+                        // Download GLiNER2 ONNX model (unified NER+RE)
+                        let variant = if ner_m.contains("FP32") { "fp32" } else { "fp16" };
+                        let ner_dl = api.post_text("/config/gliner2-download", &serde_json::json!({
+                            "repo_id": "dx111ge/gliner2-multi-v1-onnx",
                             "variant": variant,
                         })).await;
                         if let Err(e) = &ner_dl {
-                            set_save_error.set(Some(format!("NER model download note: {e}. Model will be downloaded on first use.")));
+                            set_save_error.set(Some(format!("GLiNER2 model download note: {e}. Model will be downloaded on first use.")));
                         }
                     }
                     api.post_text("/config", &config).await
                 }
                 STEP_NLI => {
-                    let mut config = serde_json::json!({
+                    // GLiNER2 handles both NER and RE -- NLI step just saves threshold config
+                    let config = serde_json::json!({
                         "rel_threshold": rel_thresh,
                     });
-
-                    // Download NLI model
-                    let rel_repo = match rel_m.as_str() {
-                        "mDeBERTa-v3-base-xnli" => "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7",
-                        _ => "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli",
-                    };
-                    config["rel_model"] = serde_json::json!(&rel_m);
-                    set_rel_download_progress.set(format!("Downloading NLI model ({})...", rel_m));
-                    let rel_dl = api.post_text("/config/rel-download", &serde_json::json!({
-                        "model_id": &rel_m,
-                        "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", rel_repo),
-                        "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", rel_repo),
-                    })).await;
-                    set_rel_download_progress.set(String::new());
-                    if let Err(e) = &rel_dl {
-                        set_save_error.set(Some(format!("NLI download note: {e}. Can be installed later in System settings.")));
-                    }
 
                     // Import custom templates if provided
                     if rel_tpl_mode == "custom" && !rel_custom_tpl.trim().is_empty() {
@@ -868,7 +850,7 @@ pub fn OnboardingWizard(
                                     <ul>
                                         <li>"NER discovers new entities \u{2192} stored in graph \u{2192} gazetteer indexes them for instant future recognition"</li>
                                         <li>"Coreference resolution: pronouns like \u{201c}he\u{201d}/\u{201c}she\u{201d} resolve to actual entity names"</li>
-                                        <li>"NLI relation extraction: zero-shot, multilingual, ~80MB model \u{2014} classifies 21 relation types"</li>
+                                        <li>"GLiNER2 relation extraction: zero-shot, multilingual, in single model pass \u{2014} configurable relation types"</li>
                                         <li>"Relation gazetteer learns every edge you store \u{2192} instant recall next time"</li>
                                         <li>"KGE trains on your graph structure \u{2192} predicts new relationships from patterns"</li>
                                     </ul>
@@ -959,32 +941,8 @@ pub fn OnboardingWizard(
 
                         STEP_NLI => view! {
                             <div class="wizard-step">
-                                <h2><i class="fa-solid fa-link"></i>" Relation Extraction (NLI)"</h2>
-                                <p class="wizard-desc">"Zero-shot relation extraction via Natural Language Inference. When two entities appear in a sentence, NLI classifies the relationship between them (e.g. works_at, born_in, headquartered_in)."</p>
-
-                                // NLI Model selection
-                                <div class="form-group">
-                                    <label><i class="fa-solid fa-cube"></i>" NLI Model"</label>
-                                    <div class="wizard-model-chips">
-                                        {[
-                                            ("multilingual-MiniLMv2-L6-mnli-xnli", "MiniLMv2", "~100MB, 100+ langs, fast"),
-                                            ("mDeBERTa-v3-base-xnli", "mDeBERTa v3", "~280MB, 100+ langs, more accurate"),
-                                        ].into_iter().map(|(id, name, desc)| {
-                                            let mid = id.to_string();
-                                            let mid2 = mid.clone();
-                                            view! {
-                                                <button
-                                                    class=move || if rel_model_choice.get() == mid { "wizard-model-chip active" } else { "wizard-model-chip" }
-                                                    on:click=move |_| set_rel_model_choice.set(mid2.clone())
-                                                >
-                                                    <strong>{name}</strong>
-                                                    <span class="wizard-lang-badge wizard-lang-multi"><i class="fa-solid fa-language"></i>" Multilingual"</span>
-                                                    <small>{desc}</small>
-                                                </button>
-                                            }
-                                        }).collect::<Vec<_>>()}
-                                    </div>
-                                </div>
+                                <h2><i class="fa-solid fa-link"></i>" Relation Extraction"</h2>
+                                <p class="wizard-desc">"GLiNER2 extracts both entities and relations in a single model pass. Configure which relation types to detect and the confidence threshold."</p>
 
                                 // Confidence Threshold
                                 <div class="form-group" style="margin-top: 1rem;">
@@ -992,7 +950,7 @@ pub fn OnboardingWizard(
                                         <strong>{move || format!("{:.2}", rel_threshold.get())}</strong>
                                     </label>
                                     <input type="range"
-                                        min="0.30" max="0.95" step="0.05"
+                                        min="0.50" max="0.95" step="0.05"
                                         style="width: 100%; margin-top: 0.25rem;"
                                         prop:value=move || format!("{:.2}", rel_threshold.get())
                                         on:input=move |ev| {
@@ -1002,24 +960,24 @@ pub fn OnboardingWizard(
                                         }
                                     />
                                     <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: rgba(255,255,255,0.4);">
-                                        <span>"0.30 (more relations, less precise)"</span>
-                                        <span>"0.90 (default)"</span>
-                                        <span>"0.95 (very precise)"</span>
+                                        <span>"0.50 (more relations)"</span>
+                                        <span>"0.85 (recommended)"</span>
+                                        <span>"0.95 (facts only)"</span>
                                     </div>
                                 </div>
 
-                                // Relation Templates
+                                // Relation Types
                                 <div class="form-group" style="margin-top: 1rem;">
-                                    <label><i class="fa-solid fa-list-check"></i>" Relation Templates"</label>
-                                    <p class="wizard-hint">"Templates define what relationships NLI can detect. Each template is a natural language pattern with {head} and {tail} placeholders."</p>
+                                    <label><i class="fa-solid fa-list-check"></i>" Relation Types"</label>
+                                    <p class="wizard-hint">"GLiNER2 uses zero-shot relation labels. Select a preset or define custom relation types for your domain."</p>
                                     <div class="wizard-cards" style="margin-top: 0.5rem;">
                                         <div
                                             class=move || if rel_templates_mode.get() == "general" { "wizard-card wizard-card-selected" } else { "wizard-card" }
                                             on:click=move |_| set_rel_templates_mode.set("general".into())
                                             style="min-width: 200px;"
                                         >
-                                            <h4>"General (21 templates)"</h4>
-                                            <p style="font-size: 0.8rem;">"works_at, born_in, lives_in, member_of, founded_by, headquartered_in, subsidiary_of, located_in, and 13 more. Covers TACRED/FewRel/Wikidata relation types."</p>
+                                            <h4>"General (6 types)"</h4>
+                                            <p style="font-size: 0.8rem;">"works_at, headquartered_in, located_in, founded, leads, supports. Covers common entity relationships."</p>
                                             <p style="font-size: 0.75rem; color: rgba(255,255,255,0.5);"><i class="fa-solid fa-wifi-slash" style="margin-right: 0.25rem;"></i>"Works offline / air-gapped"</p>
                                         </div>
                                         <div
@@ -1027,18 +985,18 @@ pub fn OnboardingWizard(
                                             on:click=move |_| set_rel_templates_mode.set("custom".into())
                                             style="min-width: 200px;"
                                         >
-                                            <h4>"Import Custom"</h4>
-                                            <p style="font-size: 0.8rem;">"Load templates from a JSON file. Use for domain-specific relation types (biomedical, legal, financial) or templates exported from another engram instance."</p>
+                                            <h4>"Custom Relations"</h4>
+                                            <p style="font-size: 0.8rem;">"Define domain-specific relation types (e.g. treats, manufactures, regulates). Just name them \u{2014} GLiNER2 extracts zero-shot."</p>
                                             <p style="font-size: 0.75rem; color: rgba(255,255,255,0.5);"><i class="fa-solid fa-file-import" style="margin-right: 0.25rem;"></i>"Air-gapped import supported"</p>
                                         </div>
                                     </div>
                                 </div>
 
-                                // Custom template import (shown when "custom" selected)
+                                // Custom relation types (shown when "custom" selected)
                                 {move || {
                                     (rel_templates_mode.get() == "custom").then(|| view! {
                                         <div class="form-group" style="margin-top: 0.75rem;">
-                                            <label>"Paste template JSON or use file import in System settings after setup"</label>
+                                            <label>"Paste relation types JSON or configure in System settings after setup"</label>
                                             <textarea
                                                 class="form-control"
                                                 style="width: 100%; min-height: 120px; font-family: monospace; font-size: 0.8rem; background: rgba(0,0,0,0.2); color: inherit; border: 1px solid rgba(255,255,255,0.1);"
@@ -1046,22 +1004,12 @@ pub fn OnboardingWizard(
                                                 on:input=move |ev| {
                                                     set_rel_custom_templates_json.set(event_target_value(&ev));
                                                 }
-                                                placeholder=r#"{"works_at": "{head} works at {tail}", "treats": "{head} is used to treat {tail}"}"#
+                                                placeholder=r#"{"treats": "{head} treats {tail}", "manufactures": "{head} manufactures {tail}", "regulates": "{head} regulates {tail}"}"#
                                             ></textarea>
                                             <div class="wizard-info-box" style="margin-top: 0.5rem; font-size: 0.8rem;">
                                                 <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>
-                                                " Format: {\"relation_type\": \"{head} verb {tail}\"}. Templates are merged with defaults. You can also import a JSON file via System settings after setup."
+                                                " Format: {\"relation_type\": \"description\"}. GLiNER2 uses the relation name as a zero-shot label. Custom types are merged with defaults."
                                             </div>
-                                        </div>
-                                    })
-                                }}
-
-                                // Download progress
-                                {move || {
-                                    let progress = rel_download_progress.get();
-                                    (!progress.is_empty()).then(|| view! {
-                                        <div style="margin-top: 0.75rem; padding: 0.5rem 0.75rem; background: rgba(52,152,219,0.1); border: 1px solid rgba(52,152,219,0.3); border-radius: 4px; font-size: 0.85rem;">
-                                            <i class="fa-solid fa-spinner fa-spin" style="margin-right: 0.25rem;"></i>{progress}
                                         </div>
                                     })
                                 }}
@@ -1390,7 +1338,7 @@ pub fn OnboardingWizard(
                                             if n == "gliner" { " Downloading GLiNER model..." }
                                             else { " Saving configuration..." }
                                         }
-                                        STEP_NLI => " Downloading NLI model...",
+                                        STEP_NLI => " Saving relation config...",
                                         STEP_LLM => {
                                             let l = llm_choice.get();
                                             if l == "ollama" { " Pulling model from Ollama..." }

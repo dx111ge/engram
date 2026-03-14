@@ -121,6 +121,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/onnx-download", post(handlers::download_onnx_model))
         .route("/config/ner-download", post(handlers::download_ner_model))
         .route("/config/ner-download-onnx", post(handlers::download_ner_model_onnx))
+        .route("/config/gliner2-download", post(handlers::download_gliner2_model))
         .route("/config/ollama-pull", post(handlers::ollama_pull))
         .route("/config/ner-model", get(handlers::check_ner_model))
         .route("/config/rel-download", post(handlers::download_rel_model))

@@ -18,7 +18,8 @@
 /// (rayon for CPU-bound NER, tokio for async I/O). Writes are batched
 /// and chunked to keep reads alive during large imports.
 
-pub mod gliner_backend;
+#[cfg(feature = "gliner2")]
+pub mod gliner2_backend;
 pub mod confidence;
 pub mod conflict;
 pub mod dedup;
@@ -36,11 +37,7 @@ pub mod ner_chain;
 pub mod pipeline;
 pub mod rel_chain;
 pub mod rel_gazetteer;
-#[cfg(feature = "glirel")]
-pub mod rel_glirel;
 pub mod rel_kge;
-#[cfg(feature = "nli-rel")]
-pub mod rel_nli;
 pub mod rel_knowledge_base;
 pub mod rel_traits;
 pub mod resolver;
