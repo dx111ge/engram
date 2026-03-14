@@ -762,6 +762,10 @@ impl Pipeline {
 
         let chunk_size = self.config.batch_size;
 
+        // Two-pass write: store ALL entities first, then create ALL relations.
+        // This ensures target nodes exist before edges reference them.
+        let mut deferred_relations: Vec<(engram_core::graph::Provenance, Vec<crate::types::ExtractedRelation>)> = Vec::new();
+
         for chunk in facts.chunks(chunk_size) {
             let mut graph = self.graph.write().map_err(|_| IngestError::Graph("graph write lock poisoned".into()))?;
 
@@ -810,20 +814,9 @@ impl Pipeline {
                             result.facts_resolved += 1;
                         }
 
-                        // Create relations
-                        for rel in &fact.relations {
-                            match graph.relate(
-                                &rel.from,
-                                &rel.to,
-                                &rel.rel_type,
-                                &provenance,
-                            ) {
-                                Ok(_) => result.relations_created += 1,
-                                Err(e) => result.errors.push(format!(
-                                    "relation {}-[{}]->{}: {}",
-                                    rel.from, rel.rel_type, rel.to, e
-                                )),
-                            }
+                        // Defer relations to second pass (all nodes must exist first)
+                        if !fact.relations.is_empty() {
+                            deferred_relations.push((provenance.clone(), fact.relations.clone()));
                         }
 
                         // Track conflicts
@@ -840,6 +833,27 @@ impl Pipeline {
             }
 
             // Write lock drops here — readers can interleave between chunks
+        }
+
+        // Pass 2: Create all deferred relations (all entity nodes now exist)
+        if !deferred_relations.is_empty() {
+            let mut graph = self.graph.write().map_err(|_| IngestError::Graph("graph write lock poisoned".into()))?;
+            for (provenance, relations) in &deferred_relations {
+                for rel in relations {
+                    match graph.relate(
+                        &rel.from,
+                        &rel.to,
+                        &rel.rel_type,
+                        provenance,
+                    ) {
+                        Ok(_) => result.relations_created += 1,
+                        Err(e) => result.errors.push(format!(
+                            "relation {}-[{}]->{}: {}",
+                            rel.from, rel.rel_type, rel.to, e
+                        )),
+                    }
+                }
+            }
         }
 
         Ok(())

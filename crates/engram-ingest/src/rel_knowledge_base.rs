@@ -219,8 +219,8 @@ impl RelationExtractor for KbRelationExtractor {
 
                 budget -= 1;
                 match self.entity_link(endpoint, &entity.text, &input.language) {
-                    Some(kb_id) => {
-                        entity_kb_ids.insert(idx, kb_id);
+                    Some(ref kb_id) => {
+                        entity_kb_ids.insert(idx, kb_id.clone());
                         stats.entities_linked += 1;
                     }
                     None => {
