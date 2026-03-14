@@ -27,20 +27,26 @@ diplomatic negotiations. One coherent graph, not islands.
 
 This is the organizing principle for everything. Must be accurate.
 
+The area of interest is NOT limited to events. It's the **domain lens** -- the context
+through which all entities are connected. Examples:
+
+- "Russia Ukraine war" (geopolitical event)
+- "semiconductor supply chain" (industry)
+- "protein folding mechanisms" (science)
+- "competitor landscape in fintech" (business)
+- "my family history in Bavaria" (personal)
+
 **Strategy cascade (try in order):**
 
-1. **LLM extraction** (if configured): Ask the local LLM:
-   "What is the primary area of interest in this text? Reply with a short topic phrase."
+1. **LLM extraction** (mandatory): Ask the local LLM:
+   "What is the primary area of interest or domain in this text? Reply with a short topic phrase."
    Input: seed text. Output: "Russia-Ukraine war" or "semiconductor supply chain".
-   Most reliable for complex/ambiguous seeds. Uses Ollama if configured in wizard.
+   Most reliable for any domain. Uses Ollama configured in wizard.
 
-2. **EVENT entity from NER**: GLiNER2 extracts EVENT entities (e.g., "Russia Ukraine war").
-   Use the highest-confidence EVENT as area of interest.
+2. **First sentence analysis** (fallback if LLM unavailable): The first sentence usually states the domain.
+   "I track the Russia Ukraine war..." → extract after "I track" / "I monitor" / "I analyze" / "I research".
 
-3. **First sentence analysis**: The first sentence usually states the domain.
-   "I track the Russia Ukraine war..." → extract after "I track" / "I monitor" / "I analyze".
-
-4. **User confirmation**: Show the detected area of interest in the wizard seed step
+3. **User confirmation** (always): Show the detected area of interest in the wizard seed step
    and let the user confirm or edit. "Detected area of interest: Russia Ukraine war [Edit]"
 
 - Store as graph property: `area_of_interest = "Russia Ukraine war"`
