@@ -18,7 +18,7 @@
 /// (rayon for CPU-bound NER, tokio for async I/O). Writes are batched
 /// and chunked to keep reads alive during large imports.
 
-pub mod anno_backend;
+pub mod gliner_backend;
 pub mod confidence;
 pub mod conflict;
 pub mod dedup;

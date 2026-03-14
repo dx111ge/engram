@@ -1,10 +1,14 @@
 /// engram-ner: GLiNER zero-shot NER via gline-rs (ONNX).
 ///
-/// Reads JSON requests from stdin (one per line), writes JSON responses to stdout.
-/// Designed to be spawned by engram's ingest pipeline as a child process.
+/// Long-running subprocess: loads model once at startup from CLI arg,
+/// then reads JSON extraction requests from stdin, writes JSON responses to stdout.
 ///
-/// Protocol (JSON Lines):
-///   Request:  {"model_dir": "...", "texts": ["..."], "labels": ["person","org"], "threshold": 0.5}
+/// Usage: engram-ner <model_dir>
+///
+/// On startup, prints a ready signal: {"ok": true, "status": "ready"}
+///
+/// Protocol (JSON Lines on stdin/stdout):
+///   Request:  {"texts": ["..."], "labels": ["person","org"], "threshold": 0.5}
 ///   Response: {"ok": true, "results": [[{"text":"...","label":"...","score":0.9,"start":0,"end":5}]]}
 ///   Error:    {"ok": false, "error": "message"}
 
@@ -17,8 +21,6 @@ use std::path::Path;
 
 #[derive(Deserialize)]
 struct Request {
-    /// Path to model directory containing model.onnx and tokenizer.json
-    model_dir: String,
     /// Texts to process (batch)
     texts: Vec<String>,
     /// Entity labels for zero-shot extraction
@@ -48,6 +50,10 @@ enum Response {
         ok: bool,
         results: Vec<Vec<Entity>>,
     },
+    Ready {
+        ok: bool,
+        status: String,
+    },
     Err {
         ok: bool,
         error: String,
@@ -58,22 +64,7 @@ fn respond_err(error: String) -> Response {
     Response::Err { ok: false, error }
 }
 
-fn process_request(req: &Request) -> Response {
-    let model_dir = Path::new(&req.model_dir);
-    let model_path = model_dir.join("model.onnx");
-    let tokenizer_path = model_dir.join("tokenizer.json");
-
-    // Load model (fresh per request for now — can cache later if needed)
-    let model = match GLiNER::<SpanMode>::new(
-        Parameters::default(),
-        RuntimeParameters::default(),
-        tokenizer_path.to_string_lossy().as_ref(),
-        model_path.to_string_lossy().as_ref(),
-    ) {
-        Ok(m) => m,
-        Err(e) => return respond_err(format!("failed to load model: {e}")),
-    };
-
+fn process_request(model: &GLiNER<SpanMode>, req: &Request) -> Response {
     let text_refs: Vec<&str> = req.texts.iter().map(|s| s.as_str()).collect();
     let label_refs: Vec<&str> = req.labels.iter().map(|s| s.as_str()).collect();
 
@@ -111,9 +102,56 @@ fn process_request(req: &Request) -> Response {
 }
 
 fn main() {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: engram-ner <model_dir>");
+        eprintln!("  model_dir: path containing model.onnx + tokenizer.json");
+        std::process::exit(1);
+    }
 
+    let model_dir = Path::new(&args[1]);
+    let model_path = model_dir.join("model.onnx");
+    let tokenizer_path = model_dir.join("tokenizer.json");
+
+    if !model_path.exists() {
+        eprintln!("model.onnx not found in {}", model_dir.display());
+        std::process::exit(1);
+    }
+    if !tokenizer_path.exists() {
+        eprintln!("tokenizer.json not found in {}", model_dir.display());
+        std::process::exit(1);
+    }
+
+    // Load model once at startup
+    let model = match GLiNER::<SpanMode>::new(
+        Parameters::default(),
+        RuntimeParameters::default(),
+        tokenizer_path.to_string_lossy().as_ref(),
+        model_path.to_string_lossy().as_ref(),
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            let mut stdout = io::stdout();
+            let resp = respond_err(format!("failed to load model: {e}"));
+            let _ = serde_json::to_writer(&mut stdout, &resp);
+            let _ = writeln!(stdout);
+            let _ = stdout.flush();
+            std::process::exit(1);
+        }
+    };
+
+    // Signal ready
+    let mut stdout = io::stdout();
+    let ready = Response::Ready {
+        ok: true,
+        status: "ready".to_string(),
+    };
+    let _ = serde_json::to_writer(&mut stdout, &ready);
+    let _ = writeln!(stdout);
+    let _ = stdout.flush();
+
+    // Process requests from stdin
+    let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) if l.trim().is_empty() => continue,
@@ -138,7 +176,7 @@ fn main() {
             }
         };
 
-        let resp = process_request(&req);
+        let resp = process_request(&model, &req);
         let _ = serde_json::to_writer(&mut stdout, &resp);
         let _ = writeln!(stdout);
         let _ = stdout.flush();

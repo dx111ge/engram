@@ -1,6 +1,6 @@
 # Engram Roadmap
 
-**Last updated:** 2026-03-11
+**Last updated:** 2026-03-13
 
 ---
 
@@ -62,7 +62,7 @@ Six new subsystems transform engram from passive storage into an active intellig
 
 **Key decisions:**
 - Single binary (feature-gated, not separate processes)
-- NER via `anno` crate (GLiNER2, coreference, candle backend), feature-gated, BYOM
+- ~~NER via `anno` crate~~ **(superseded)** -- see v1.2.0 GLiNER ONNX migration below
 - Conservative entity resolution (no Rust ER library exists -- competitive advantage)
 - Mesh federated query (search across peers, don't copy facts)
 - Mesh knowledge profiles (auto-derived, broadcast via gossip)
@@ -79,9 +79,37 @@ Six new subsystems transform engram from passive storage into an active intellig
 
 ---
 
-## v1.2.0 -- Integrations & Connectors
+## v1.2.0 -- NER Migration & Integrations
 
-**Status:** Planning
+**Status:** In Progress
+
+### GLiNER ONNX Migration (anno+candle -> gline-rs+ort)
+
+**Design document:** `docs/design-gliner-onnx-migration.md`
+
+The `anno` crate with candle backend proved unreliable for GLiNER NER:
+- 3 bugs hit in one session (config.json fallback, encoder resolution, SentencePiece unsupported)
+- No multilingual GLiNER model works out of the box with anno's candle backend
+- The encoder for all multilingual GLiNER models (`microsoft/mdeberta-v3-base`) ships SentencePiece only, which candle doesn't support
+
+**Solution:** Replace anno+candle with `gline-rs` (Rust GLiNER ONNX inference) as a sidecar binary.
+Default model: `knowledgator/gliner-x-small` (quantized ONNX = 173 MB, 20 languages, ~0.75 F1).
+Alternative: `onnx-community/gliner_multi-v2.1` (INT8 = 349 MB, 6 languages, ~0.66 F1).
+Sidecar pattern avoids ort version conflict (gline-rs pins ort rc.9, engram uses rc.12).
+
+| # | Task | Effort | Status |
+|---|------|--------|--------|
+| NER.1 | Create `engram-ner` sidecar binary (gline-rs + JSON stdin/stdout) | Medium | DONE |
+| NER.2 | Create `gliner_backend.rs` in engram-ingest (subprocess, Extractor trait) | Medium | DONE |
+| NER.3 | NER model download endpoint for ONNX models from onnx-community | Small | DONE |
+| NER.4 | Update wizard for ONNX model download + progress indication | Small | DONE |
+| NER.5 | Remove `anno` dependency, delete `anno_backend.rs` | Small | DONE |
+| NER.6 | End-to-end test: wizard -> download -> analyze -> ingest | Medium | DONE |
+| NLI.1 | Wizard: NLI threshold slider + download progress | Small | DONE |
+| NLI.2 | System: threshold slider + template import/export | Small | DONE |
+| NLI.3 | Backend: rel_threshold merge fix, GET /config fields, template endpoints | Small | DONE |
+
+**NLI relation extraction** (`engram-rel` sidecar) is migrated and working. Wizard + System UI complete.
 
 ### Google Workspace Integration (via `gws` CLI)
 
@@ -123,6 +151,7 @@ dynamically generated from Google's Discovery Service.
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
+| Coreference resolution | Medium | Pronoun/mention -> canonical entity name resolution. Was provided by anno's `MentionRankingCoref` (rule-based, ~5800 lines). **Research completed 2026-03-14:** No Rust coref crate exists outside anno. Viable options ranked: (1) **Rule-based Rust** (~200-300 lines, ~60-70% F1, <1ms, partial multilingual via pronoun lists per lang) -- recommended first step; (2) **coref-onnx sidecar** (`talmago/allennlp-coref-onnx-mMiniLMv2`, ~200 MB ONNX, ~70-73% F1, multilingual via XLM-R, needs ~500-800 lines Rust decoding or thin Python wrapper) -- recommended tier 2; (3) **LLM-based** via Ollama (~65-70% F1, 1-5s/paragraph, zero additional deps, hallucination risk) -- optional enrichment only; (4) **fastcoref Python sidecar** (78.5% F1, English only, heavy PyTorch dep) -- only if English accuracy critical. Extracting anno's MentionRankingCoref (5800 lines) not recommended due to maintenance burden. |
 | SPARQL query adapter | Low | Translate SPARQL subset to engram traversal |
 | Temporal queries | Low | Reconstruct graph state at a point in time (WAL infrastructure exists) |
 | Distributed consensus (Raft) | Low | For deployments needing strong consistency (mesh uses eventual) |

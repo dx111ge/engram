@@ -135,13 +135,13 @@ const NER_PRESETS: &[NerPreset] = &[
     NerPreset {
         id: "gliner", name: "GLiNER (Recommended)",
         quality: "High \u{2014} any entity type, zero-shot", speed: "~50ms/sentence",
-        download: "~220\u{2013}400MB model (candle backend)", license: "Apache-2.0",
-        learning: "Discovers new entities \u{2192} feeds gazetteer for instant future recognition. Coreference resolves pronouns. NLI relation extraction discovers relationships.",
+        download: "~173\u{2013}610MB ONNX model (gline-rs sidecar)", license: "Apache-2.0",
+        learning: "Discovers new entities \u{2192} feeds gazetteer for instant future recognition. NLI relation extraction discovers relationships.",
         models: &[
-            ("urchade/gliner_multi-v2.1", "GLiNER Multi v2.1", "~220MB, 100+ languages (recommended)", "urchade/gliner_multi-v2.1", "Multilingual"),
-            ("urchade/gliner_large-v2.5", "GLiNER Large v2.5", "~400MB, best English accuracy", "urchade/gliner_large-v2.5", "EN"),
-            ("urchade/gliner_multi_pii-v1", "GLiNER Multi PII v1", "~220MB, names/phones/emails/addresses", "urchade/gliner_multi_pii-v1", "Multilingual"),
-            ("urchade/gliner_small-v2.1", "GLiNER Small v2.1", "~100MB, fast, good quality", "urchade/gliner_small-v2.1", "EN"),
+            ("knowledgator/gliner-x-small", "GLiNER-X Small", "173MB quantized, 20 languages (recommended)", "knowledgator/gliner-x-small", "Multilingual"),
+            ("onnx-community/gliner_multi-v2.1", "GLiNER Multi v2.1", "349MB INT8, 6 languages", "onnx-community/gliner_multi-v2.1", "Multilingual"),
+            ("knowledgator/gliner-x-base", "GLiNER-X Base", "303MB quantized, 20 languages", "knowledgator/gliner-x-base", "Multilingual"),
+            ("knowledgator/gliner-x-large", "GLiNER-X Large", "610MB quantized, 20 languages (best accuracy)", "knowledgator/gliner-x-large", "Multilingual"),
         ],
     },
     NerPreset {
@@ -227,10 +227,12 @@ pub fn OnboardingWizard(
     let (embed_model, set_embed_model) = signal(String::new());
     let (embed_endpoint, set_embed_endpoint) = signal(String::new());
     let (ner_choice, set_ner_choice) = signal("gliner".to_string());
-    let (ner_model, set_ner_model) = signal("urchade/gliner_multi-v2.1".to_string());
+    let (ner_model, set_ner_model) = signal("knowledgator/gliner-x-small".to_string());
     let (llm_choice, set_llm_choice) = signal(String::new());
     let (llm_key, set_llm_key) = signal(String::new());
     let (llm_model, set_llm_model) = signal(String::new());
+    let (rel_threshold, set_rel_threshold) = signal(0.9_f64);
+    let (rel_download_progress, set_rel_download_progress) = signal(String::new());
     let (quant_choice, set_quant_choice) = signal("int8".to_string());
     let (kb_wikidata, set_kb_wikidata) = signal(true);
     let (kb_dbpedia, set_kb_dbpedia) = signal(false);
@@ -326,6 +328,7 @@ pub fn OnboardingWizard(
         let embed_ep = embed_endpoint.get_untracked();
         let ner = ner_choice.get_untracked();
         let ner_m = ner_model.get_untracked();
+        let rel_thresh = rel_threshold.get_untracked();
         let llm = llm_choice.get_untracked();
         let llm_k = llm_key.get_untracked();
         let llm_m = llm_model.get_untracked();
@@ -378,23 +381,27 @@ pub fn OnboardingWizard(
                     api.post_text("/config", &config).await
                 }
                 STEP_NER => {
-                    let provider = if ner == "gliner" { "anno" } else { &ner };
+                    let provider = if ner == "gliner" { "gliner" } else { &ner };
                     let mut config = serde_json::json!({
                         "ner_provider": provider,
-                        "coreference_enabled": true,
+                        "rel_threshold": rel_thresh,
                     });
                     if ner == "gliner" && !ner_m.is_empty() {
                         config["ner_model"] = serde_json::json!(&ner_m);
 
-                        // Explicitly download NER model via hf-hub (pre-cache safetensors)
+                        // Download GLiNER ONNX model
+                        set_rel_download_progress.set("Downloading NER model...".into());
+                        let variant = if ner_m.starts_with("onnx-community/") { "int8" } else { "quantized" };
                         let ner_dl = api.post_text("/config/ner-download", &serde_json::json!({
                             "model_id": &ner_m,
+                            "variant": variant,
                         })).await;
                         if let Err(e) = &ner_dl {
                             set_save_error.set(Some(format!("NER model download note: {e}. Model will be downloaded on first use.")));
                         }
 
                         // NLI-based relation extraction model (ONNX, separate download)
+                        set_rel_download_progress.set("Downloading NLI relation extraction model (~100MB)...".into());
                         let rel_model_id = "multilingual-MiniLMv2-L6-mnli-xnli".to_string();
                         let rel_repo = "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli";
                         config["rel_model"] = serde_json::json!(&rel_model_id);
@@ -403,6 +410,7 @@ pub fn OnboardingWizard(
                             "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", rel_repo),
                             "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", rel_repo),
                         })).await;
+                        set_rel_download_progress.set(String::new());
                         if let Err(e) = &rel_dl {
                             set_save_error.set(Some(format!("NLI RE download note: {e}. Relation extraction model can be installed later in System settings.")));
                         }
@@ -919,6 +927,46 @@ pub fn OnboardingWizard(
                                                 </div>
                                             </div>
                                         })
+                                    })
+                                }}
+                                // ── NLI Relation Extraction section (visible when GLiNER selected) ──
+                                {move || {
+                                    let is_gliner = ner_choice.get() == "gliner";
+                                    is_gliner.then(|| view! {
+                                        <div class="wizard-info-box" style="margin-top: 1rem;">
+                                            <h4><i class="fa-solid fa-link"></i>" NLI Relation Extraction"</h4>
+                                            <p style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+                                                "Zero-shot relation extraction via Natural Language Inference. Classifies 21 relation types (works_at, born_in, etc.) using a ~100MB multilingual model. Downloaded automatically with the NER model."
+                                            </p>
+                                            <div style="margin: 0.75rem 0;">
+                                                <label style="font-weight: 500;"><i class="fa-solid fa-sliders"></i>" Confidence Threshold: "
+                                                    <strong>{move || format!("{:.2}", rel_threshold.get())}</strong>
+                                                </label>
+                                                <input type="range"
+                                                    min="0.30" max="0.95" step="0.05"
+                                                    style="width: 100%; margin-top: 0.25rem;"
+                                                    prop:value=move || format!("{:.2}", rel_threshold.get())
+                                                    on:input=move |ev| {
+                                                        if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                                            set_rel_threshold.set(v);
+                                                        }
+                                                    }
+                                                />
+                                                <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: rgba(255,255,255,0.4);">
+                                                    <span>"0.30 (more relations, less precise)"</span>
+                                                    <span>"0.95 (fewer relations, very precise)"</span>
+                                                </div>
+                                            </div>
+                                            // Download progress indicator
+                                            {move || {
+                                                let progress = rel_download_progress.get();
+                                                (!progress.is_empty()).then(|| view! {
+                                                    <div style="margin-top: 0.5rem; padding: 0.35rem 0.5rem; background: rgba(52,152,219,0.1); border: 1px solid rgba(52,152,219,0.3); border-radius: 4px; font-size: 0.8rem;">
+                                                        <i class="fa-solid fa-spinner fa-spin" style="margin-right: 0.25rem;"></i>{progress}
+                                                    </div>
+                                                })
+                                            }}
+                                        </div>
                                     })
                                 }}
                             </div>

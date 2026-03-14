@@ -562,7 +562,9 @@ pub fn SystemPage() -> impl IntoView {
     let (rel_model_status, set_rel_model_status) = signal(String::new());
     let (rel_download_status, set_rel_download_status) = signal(String::new());
     let (coref_enabled, set_coref_enabled) = signal(true);
+    let (rel_threshold, set_rel_threshold) = signal(0.9_f64);
     let (relation_templates_json, set_relation_templates_json) = signal(String::new());
+    let (import_status, set_import_status) = signal(String::new());
 
     // Quantization signal declared early so config Effect can set it
     let (quant_enabled, set_quant_enabled) = signal(true);
@@ -585,6 +587,9 @@ pub fn SystemPage() -> impl IntoView {
             if let Some(v) = cfg.data.get("coreference_enabled").and_then(|v: &serde_json::Value| v.as_bool()) {
                 set_coref_enabled.set(v);
             }
+            if let Some(v) = cfg.data.get("rel_threshold").and_then(|v: &serde_json::Value| v.as_f64()) {
+                set_rel_threshold.set(v);
+            }
             if let Some(v) = cfg.data.get("relation_templates") {
                 if let Ok(json) = serde_json::to_string_pretty(v) {
                     set_relation_templates_json.set(json);
@@ -600,6 +605,7 @@ pub fn SystemPage() -> impl IntoView {
         let endpoint = ner_endpoint.get_untracked();
         let model = ner_model.get_untracked();
         let coref = coref_enabled.get_untracked();
+        let threshold = rel_threshold.get_untracked();
         let templates_json = relation_templates_json.get_untracked();
         async move {
             let mut body = serde_json::json!({
@@ -607,6 +613,7 @@ pub fn SystemPage() -> impl IntoView {
                 "ner_endpoint": endpoint,
                 "ner_model": model,
                 "coreference_enabled": coref,
+                "rel_threshold": threshold,
             });
             // Parse relation templates JSON if provided
             if !templates_json.trim().is_empty() {
@@ -783,7 +790,7 @@ pub fn SystemPage() -> impl IntoView {
     let ner_status: Signal<String> = Signal::derive(move || {
         match ner_provider.get().as_str() {
             "builtin" => "Built-in".into(),
-            "anno" => "GLiNER (ONNX)".into(),
+            "gliner" => "GLiNER (ONNX)".into(),
             other => other.to_string(),
         }
     });
@@ -1392,11 +1399,11 @@ pub fn SystemPage() -> impl IntoView {
                 </div>
                 // GLiNER (ONNX)
                 <div
-                    class=move || if ner_provider.get() == "anno" { "ner-card ner-card-selected" } else { "ner-card" }
-                    on:click=move |_| set_ner_provider.set("anno".into())
+                    class=move || if ner_provider.get() == "gliner" { "ner-card ner-card-selected" } else { "ner-card" }
+                    on:click=move |_| set_ner_provider.set("gliner".into())
                 >
                     <div class="ner-card-header">
-                        <input type="radio" name="ner_provider" prop:checked=move || ner_provider.get() == "anno" />
+                        <input type="radio" name="ner_provider" prop:checked=move || ner_provider.get() == "gliner" />
                         <strong>"GLiNER (ONNX)"</strong>
                         <span class="badge" style="background: var(--success, #2ecc71); color: #000; font-size: 0.65rem; margin-left: auto;">"Excellent"</span>
                     </div>
@@ -1406,15 +1413,15 @@ pub fn SystemPage() -> impl IntoView {
                 </div>
             </div>
 
-            // GLiNER model selector (shown when anno provider selected)
+            // GLiNER model selector (shown when gliner provider selected)
             {
                 let api_ner_panel = api_for_ner.clone();
                 move || {
-                let is_anno = ner_provider.get() == "anno";
+                let is_gliner = ner_provider.get() == "gliner";
                 let api_check_ner = api_ner_panel.clone();
                 let api_dl_ner = api_check_ner.clone();
                 let api_save_after_dl = api_dl_ner.clone();
-                is_anno.then(|| view! {
+                is_gliner.then(|| view! {
                     <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
                         <h4 style="margin-top: 0;"><i class="fa-solid fa-tags"></i>" GLiNER Model"</h4>
                         <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
@@ -1570,7 +1577,7 @@ pub fn SystemPage() -> impl IntoView {
                                                 set_ner_model_status.set(status_msg);
                                                 // Auto-save config with this model
                                                 let cfg_body = serde_json::json!({
-                                                    "ner_provider": "anno",
+                                                    "ner_provider": "gliner",
                                                     "ner_model": model_id,
                                                 });
                                                 let _ = api_save.post_text("/config", &cfg_body).await;
@@ -1644,7 +1651,7 @@ pub fn SystemPage() -> impl IntoView {
                                                         set_ner_model_status.set(status_msg);
                                                         // Auto-save config
                                                         let cfg_body = serde_json::json!({
-                                                            "ner_provider": "anno",
+                                                            "ner_provider": "gliner",
                                                             "ner_model": model_id,
                                                         });
                                                         let _ = api_save.post_text("/config", &cfg_body).await;
@@ -1670,10 +1677,10 @@ pub fn SystemPage() -> impl IntoView {
             {
                 let api_rel = api.clone();
                 move || {
-                let is_anno = ner_provider.get() == "anno";
+                let is_gliner = ner_provider.get() == "gliner";
                 let api_rel_dl = api_rel.clone();
                 let api_rel_custom = api_rel.clone();
-                is_anno.then(|| view! {
+                is_gliner.then(|| view! {
                     <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
                         <h4 style="margin-top: 0;"><i class="fa-solid fa-link"></i>" Relation Extraction (NLI)"</h4>
                         <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
@@ -1866,12 +1873,128 @@ pub fn SystemPage() -> impl IntoView {
                         </div>
                     </div>
 
+                    // ── Confidence Threshold ──
+                    <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
+                        <h4 style="margin-top: 0;"><i class="fa-solid fa-sliders"></i>" NLI Confidence Threshold"</h4>
+                        <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+                            "Minimum confidence for NLI relation extraction. Higher = fewer but more precise relations."
+                        </p>
+                        <div style="display: flex; align-items: center; gap: 0.75rem;">
+                            <input type="range"
+                                min="0.30" max="0.95" step="0.05"
+                                style="flex: 1;"
+                                prop:value=move || format!("{:.2}", rel_threshold.get())
+                                on:input=move |ev| {
+                                    if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                        set_rel_threshold.set(v);
+                                    }
+                                }
+                            />
+                            <strong style="min-width: 3em; text-align: right;">{move || format!("{:.2}", rel_threshold.get())}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: rgba(255,255,255,0.4); margin-top: 0.25rem;">
+                            <span>"0.30 (recall)"</span>
+                            <span>"0.90 (default)"</span>
+                            <span>"0.95 (precision)"</span>
+                        </div>
+                    </div>
+
                     // ── Relation Templates ──
                     <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
                         <h4 style="margin-top: 0;"><i class="fa-solid fa-list-check"></i>" Relation Templates"</h4>
                         <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
                             "NLI hypothesis templates for relation classification. Each maps a relation type to a natural language pattern with {head} and {tail} placeholders."
                         </p>
+
+                        // Import/Export buttons
+                        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+                            <button class="btn btn-sm btn-secondary" on:click={
+                                let api = api.clone();
+                                move |_| {
+                                    let api = api.clone();
+                                    wasm_bindgen_futures::spawn_local(async move {
+                                        match api.get_text("/config/relation-templates/export").await {
+                                            Ok(text) => {
+                                                // Create a downloadable blob
+                                                use wasm_bindgen::JsCast;
+                                                let blob = web_sys::Blob::new_with_str_sequence_and_options(
+                                                    &js_sys::Array::of1(&text.into()),
+                                                    web_sys::BlobPropertyBag::new().type_("application/json"),
+                                                ).ok();
+                                                if let Some(blob) = blob {
+                                                    if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+                                                        let doc = web_sys::window().unwrap().document().unwrap();
+                                                        let a = doc.create_element("a").unwrap();
+                                                        a.set_attribute("href", &url).ok();
+                                                        a.set_attribute("download", "engram-relation-templates.json").ok();
+                                                        a.dyn_ref::<web_sys::HtmlElement>().unwrap().click();
+                                                        web_sys::Url::revoke_object_url(&url).ok();
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => set_import_status.set(format!("Export failed: {e}")),
+                                        }
+                                    });
+                                }
+                            }>
+                                <i class="fa-solid fa-file-export" style="margin-right: 0.25rem;"></i>"Export"
+                            </button>
+                            <button class="btn btn-sm btn-secondary" on:click={
+                                move |_| {
+                                    // Create a hidden file input and click it
+                                    use wasm_bindgen::JsCast;
+                                    let doc = web_sys::window().unwrap().document().unwrap();
+                                    let input = doc.create_element("input").unwrap();
+                                    let input = input.dyn_into::<web_sys::HtmlInputElement>().unwrap();
+                                    input.set_type("file");
+                                    input.set_accept(".json");
+                                    input.set_attribute("style", "display:none").ok();
+                                    input.set_id("_rel_template_import");
+                                    doc.body().unwrap().append_child(&input).ok();
+                                    input.click();
+                                }
+                            }>
+                                <i class="fa-solid fa-file-import" style="margin-right: 0.25rem;"></i>"Import"
+                            </button>
+                            // Hidden file input change handler (imports the file)
+                            <script>"
+                            document.addEventListener('change', function(e) {
+                                if (e.target && e.target.id === '_rel_template_import') {
+                                    var file = e.target.files[0];
+                                    if (!file) return;
+                                    var reader = new FileReader();
+                                    reader.onload = function(ev) {
+                                        try {
+                                            var data = JSON.parse(ev.target.result);
+                                            fetch('/config/relation-templates/import', {
+                                                method: 'POST',
+                                                headers: {'Content-Type': 'application/json'},
+                                                body: JSON.stringify(data)
+                                            }).then(function(r) { return r.json(); })
+                                            .then(function(j) {
+                                                // Reload config to refresh templates textarea
+                                                window.location.reload();
+                                            });
+                                        } catch(ex) {
+                                            alert('Invalid JSON file');
+                                        }
+                                    };
+                                    reader.readAsText(file);
+                                    e.target.remove();
+                                }
+                            });
+                            "</script>
+                        </div>
+
+                        // Import status
+                        {move || {
+                            let st = import_status.get();
+                            (!st.is_empty()).then(|| view! {
+                                <div class="info-box" style="margin-bottom: 0.5rem; font-size: 0.8rem;">
+                                    <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>{st}
+                                </div>
+                            })
+                        }}
 
                         <details>
                             <summary style="cursor: pointer; font-size: 0.85rem;"><i class="fa-solid fa-pen-to-square" style="margin-right: 0.25rem;"></i>"Edit Templates (JSON)"</summary>

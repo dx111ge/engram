@@ -66,7 +66,7 @@ pub struct EngineConfig {
     pub pipeline_batch_size: Option<u32>,
     pub pipeline_workers: Option<u32>,
     pub pipeline_skip_stages: Option<Vec<String>>,
-    /// NER provider: "builtin", "spacy", "anno"
+    /// NER provider: "builtin", "spacy", "gliner"
     pub ner_provider: Option<String>,
     /// NER model name (e.g. "en_core_web_sm" for spaCy)
     pub ner_model: Option<String>,
@@ -76,7 +76,9 @@ pub struct EngineConfig {
     pub rel_model: Option<String>,
     /// Custom relation templates for NLI-based RE: { rel_type: hypothesis_template }
     pub relation_templates: Option<std::collections::HashMap<String, String>>,
-    /// Enable coreference resolution (pronoun → canonical entity). Default: true.
+    /// NLI relation extraction confidence threshold (0.0-1.0). Default: 0.9.
+    pub rel_threshold: Option<f32>,
+    /// Enable coreference resolution (pronoun -> canonical entity). Default: true.
     pub coreference_enabled: Option<bool>,
     /// Mesh enabled flag
     pub mesh_enabled: Option<bool>,
@@ -153,6 +155,9 @@ impl EngineConfig {
         }
         if other.relation_templates.is_some() {
             self.relation_templates = other.relation_templates.clone();
+        }
+        if other.rel_threshold.is_some() {
+            self.rel_threshold = other.rel_threshold;
         }
         if other.coreference_enabled.is_some() {
             self.coreference_enabled = other.coreference_enabled;
@@ -577,9 +582,10 @@ mod tests {
     #[test]
     fn engine_config_serde_round_trip() {
         let mut config = EngineConfig::default();
-        config.ner_provider = Some("anno".into());
-        config.ner_model = Some("urchade/gliner_multi-v2.1".into());
+        config.ner_provider = Some("gliner".into());
+        config.ner_model = Some("knowledgator/gliner-x-small".into());
         config.rel_model = Some("multilingual-MiniLMv2-L6-mnli-xnli".into());
+        config.rel_threshold = Some(0.85);
         config.coreference_enabled = Some(true);
         config.relation_templates = Some({
             let mut m = HashMap::new();
@@ -591,9 +597,10 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let parsed: EngineConfig = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.ner_provider, Some("anno".into()));
-        assert_eq!(parsed.ner_model, Some("urchade/gliner_multi-v2.1".into()));
+        assert_eq!(parsed.ner_provider, Some("gliner".into()));
+        assert_eq!(parsed.ner_model, Some("knowledgator/gliner-x-small".into()));
         assert_eq!(parsed.rel_model, Some("multilingual-MiniLMv2-L6-mnli-xnli".into()));
+        assert_eq!(parsed.rel_threshold, Some(0.85));
         assert_eq!(parsed.coreference_enabled, Some(true));
         assert_eq!(parsed.relation_templates.as_ref().unwrap().len(), 2);
         assert_eq!(
@@ -616,5 +623,29 @@ mod tests {
         base.merge(&overlay);
         assert_eq!(base.relation_templates.as_ref().unwrap().len(), 1);
         assert_eq!(base.coreference_enabled, Some(false));
+    }
+
+    #[test]
+    fn engine_config_merge_rel_threshold() {
+        let mut base = EngineConfig::default();
+        assert!(base.rel_threshold.is_none());
+
+        let mut overlay = EngineConfig::default();
+        overlay.rel_threshold = Some(0.85);
+        base.merge(&overlay);
+        assert_eq!(base.rel_threshold, Some(0.85));
+
+        // Merge without rel_threshold should not overwrite
+        let empty_overlay = EngineConfig::default();
+        base.merge(&empty_overlay);
+        assert_eq!(base.rel_threshold, Some(0.85));
+    }
+
+    #[test]
+    fn engine_config_rel_threshold_default() {
+        let config = EngineConfig::default();
+        // Default is None; callers should use unwrap_or(0.9)
+        assert!(config.rel_threshold.is_none());
+        assert_eq!(config.rel_threshold.unwrap_or(0.9), 0.9);
     }
 }

@@ -125,6 +125,8 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/ner-model", get(handlers::check_ner_model))
         .route("/config/rel-download", post(handlers::download_rel_model))
         .route("/config/rel-model", get(handlers::check_rel_model))
+        .route("/config/relation-templates/export", get(handlers::export_relation_templates))
+        .route("/config/relation-templates/import", post(handlers::import_relation_templates))
         // Admin
         .route("/admin/reset", post(handlers::admin_reset))
         // Config status & KB management

@@ -712,13 +712,21 @@ fn language_detection_defaults_to_english() {
 // Test 18: GLiNER backend — zero-shot NER on CoNLL-style sentences
 // ============================================================================
 
-#[cfg(feature = "anno")]
+#[cfg(feature = "gliner")]
 #[test]
 fn gliner_extracts_persons_orgs_locations() {
-    use engram_ingest::anno_backend::{AnnoBackend, find_ner_model};
+    use engram_ingest::gliner_backend::{GlinerBackend, find_ner_model, list_installed_models};
 
-    // Use installed gliner_small-v2.1 model
-    let config = match find_ner_model("gliner_small-v2.1") {
+    // Use first installed ONNX model
+    let model_name = match list_installed_models().into_iter().next() {
+        Some(name) => name,
+        None => {
+            eprintln!("SKIP: no GLiNER ONNX model installed in ~/.engram/models/ner/");
+            return;
+        }
+    };
+
+    let config = match find_ner_model(&model_name) {
         Some(mut cfg) => {
             cfg.entity_types = vec![
                 "person".into(), "organization".into(), "location".into(),
@@ -727,15 +735,15 @@ fn gliner_extracts_persons_orgs_locations() {
             cfg
         }
         None => {
-            eprintln!("SKIP: gliner_small-v2.1 model not installed");
+            eprintln!("SKIP: model {} not found", model_name);
             return;
         }
     };
 
-    let backend = match AnnoBackend::new(config) {
+    let backend = match GlinerBackend::new(config) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("SKIP: cannot create AnnoBackend: {e}");
+            eprintln!("SKIP: cannot create GlinerBackend: {e}");
             return;
         }
     };
@@ -814,12 +822,20 @@ fn gliner_extracts_persons_orgs_locations() {
 //    and resolved node IDs — proving the system learned from prior extraction.
 // ============================================================================
 
-#[cfg(feature = "anno")]
+#[cfg(feature = "gliner")]
 #[test]
 fn gliner_learning_loop_gazetteer_improves_with_graph() {
-    use engram_ingest::anno_backend::{AnnoBackend, find_ner_model};
+    use engram_ingest::gliner_backend::{GlinerBackend, find_ner_model, list_installed_models};
 
-    let config = match find_ner_model("gliner_small-v2.1") {
+    let model_name = match list_installed_models().into_iter().next() {
+        Some(name) => name,
+        None => {
+            eprintln!("SKIP: no GLiNER ONNX model installed in ~/.engram/models/ner/");
+            return;
+        }
+    };
+
+    let config = match find_ner_model(&model_name) {
         Some(mut cfg) => {
             cfg.entity_types = vec![
                 "person".into(), "organization".into(), "location".into(),
@@ -828,15 +844,15 @@ fn gliner_learning_loop_gazetteer_improves_with_graph() {
             cfg
         }
         None => {
-            eprintln!("SKIP: gliner_small-v2.1 model not installed");
+            eprintln!("SKIP: model {} not found", model_name);
             return;
         }
     };
 
-    let backend = match AnnoBackend::new(config) {
+    let backend = match GlinerBackend::new(config) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("SKIP: cannot create AnnoBackend: {e}");
+            eprintln!("SKIP: cannot create GlinerBackend: {e}");
             return;
         }
     };
@@ -939,7 +955,7 @@ fn gliner_learning_loop_gazetteer_improves_with_graph() {
     // ── Phase 5: MergeAll chain (gazetteer + GLiNER) should find MORE than either alone ──
 
     // Clone the backend config for a new chain
-    let config2 = match find_ner_model("gliner_small-v2.1") {
+    let config2 = match find_ner_model(&model_name) {
         Some(mut cfg) => {
             cfg.entity_types = vec![
                 "person".into(), "organization".into(), "location".into(),
@@ -949,7 +965,7 @@ fn gliner_learning_loop_gazetteer_improves_with_graph() {
         }
         None => return,
     };
-    let backend2 = AnnoBackend::new(config2).unwrap();
+    let backend2 = GlinerBackend::new(config2).unwrap();
 
     // Rebuild gazetteer for the chain
     let mut gaz2 = GraphGazetteer::new(&brain_path, 0.3);

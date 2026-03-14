@@ -3,7 +3,7 @@
 /// **DEPRECATED**: Use `rel_nli` (NLI-based RE) instead. GLiREL is English-only,
 /// 1.7GB FP32, and CC BY-NC-SA licensed. NLI RE is multilingual, ~100MB, MIT.
 ///
-/// Mirrors the `anno_backend.rs` pattern: communicates with an external binary
+/// Mirrors the `gliner_backend.rs` pattern: communicates with an external binary
 /// via JSON Lines over stdin/stdout. The model weights are user-downloaded
 /// (CC BY-NC-SA 4.0), never bundled.
 ///

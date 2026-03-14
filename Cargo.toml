@@ -32,7 +32,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-all = ["mesh", "llm", "grpc", "ingest", "actions", "reason", "assess", "onnx", "anno", "nli-rel", "https"]
+all = ["mesh", "llm", "grpc", "ingest", "actions", "reason", "assess", "onnx", "gliner", "nli-rel", "https"]
 https = ["engram-core/https"]
 mesh = ["engram-api/mesh", "engram-mesh"]
 llm = ["engram-api/llm"]
@@ -42,7 +42,7 @@ ingest = ["engram-api/ingest", "engram-ingest"]
 actions = ["engram-api/actions", "engram-action"]
 reason = ["engram-api/reason", "engram-reason"]
 assess = ["engram-api/assess", "engram-assess"]
-anno = ["engram-ingest/anno", "engram-api/anno"]
+gliner = ["engram-ingest/gliner", "engram-api/gliner"]
 nli-rel = ["engram-ingest/nli-rel", "engram-api/nli-rel"]
 glirel = ["engram-ingest/glirel", "engram-api/glirel"]
 

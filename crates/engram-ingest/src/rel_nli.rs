@@ -64,7 +64,7 @@ impl Default for NliRelConfig {
         Self {
             model_dir: std::path::PathBuf::new(),
             relation_templates: default_templates(),
-            min_confidence: 0.5,
+            min_confidence: 0.9,
         }
     }
 }
@@ -372,7 +372,7 @@ mod tests {
     fn test_nli_config_defaults() {
         let config = NliRelConfig::default();
         assert_eq!(config.relation_templates.len(), 21);
-        assert!((config.min_confidence - 0.5).abs() < f32::EPSILON);
+        assert!((config.min_confidence - 0.9).abs() < f32::EPSILON);
     }
 
     #[test]

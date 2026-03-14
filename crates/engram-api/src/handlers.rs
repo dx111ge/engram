@@ -1755,7 +1755,7 @@ pub fn build_pipeline_mcp(
     // MCP / A2A callers don't have access to AppState caches — pass empty caches.
     let no_ner_cache = std::sync::Arc::new(std::sync::RwLock::new(None));
     let no_rel_cache = std::sync::Arc::new(std::sync::RwLock::new(None));
-    build_pipeline(graph, config, kb_endpoints, ner_model, rel_model, None, None,
+    build_pipeline(graph, config, kb_endpoints, ner_model, rel_model, None, None, None,
         no_ner_cache, no_rel_cache)
 }
 
@@ -1771,6 +1771,7 @@ fn build_pipeline(
     ner_model: Option<String>,
     rel_model: Option<String>,
     relation_templates: Option<std::collections::HashMap<String, String>>,
+    rel_threshold: Option<f32>,
     _coreference_enabled: Option<bool>,
     ner_cache: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn engram_ingest::Extractor>>>>,
     rel_cache: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn engram_ingest::RelationExtractor>>>>,
@@ -1802,17 +1803,17 @@ fn build_pipeline(
         chain.add_backend(Box::new(engram_ingest::GazetteerExtractor::new(gaz)));
     }
 
-    // 3. GLiNER/anno backend (zero-shot NER for new entities)
-    //    Uses cached backend if available, otherwise loads and caches.
-    #[cfg(feature = "anno")]
+    // 3. GLiNER ONNX backend (zero-shot NER via engram-ner sidecar)
+    //    Uses cached backend if available, otherwise spawns subprocess and caches.
+    #[cfg(feature = "gliner")]
     {
-        use engram_ingest::anno_backend::{AnnoBackend, find_ner_model, list_installed_models};
+        use engram_ingest::gliner_backend::{GlinerBackend, find_ner_model, list_installed_models};
 
         // Check cache first
         let cached = ner_cache.read().ok().and_then(|c| c.clone());
 
         if let Some(cached_backend) = cached {
-            tracing::debug!("using cached NER backend");
+            tracing::debug!("using cached GLiNER ONNX NER backend");
             chain.add_backend(Box::new(engram_ingest::ArcExtractor(cached_backend)));
         } else {
             // Determine which model to load: config > first installed > none
@@ -1821,6 +1822,7 @@ fn build_pipeline(
                 .map(String::from)
                 .or_else(|| list_installed_models().into_iter().next());
 
+            eprintln!("[build_pipeline] gliner: model_name={:?}", model_name);
             if let Some(ref name) = model_name {
                 if let Some(mut cfg) = find_ner_model(name) {
                     cfg.entity_types = vec![
@@ -1828,27 +1830,30 @@ fn build_pipeline(
                         "date".into(), "event".into(), "product".into(),
                     ];
                     cfg.min_confidence = 0.3;
-                    match AnnoBackend::new(cfg) {
+                    match GlinerBackend::new(cfg) {
                         Ok(backend) => {
-                            tracing::info!(model = %name, "GLiNER NER backend loaded from config");
+                            eprintln!("[build_pipeline] gliner: ONNX NER loaded OK");
+                            tracing::info!(model = %name, "GLiNER ONNX NER backend loaded");
                             let arc_backend: std::sync::Arc<dyn engram_ingest::Extractor> = std::sync::Arc::new(backend);
-                            // Cache for next time
                             if let Ok(mut cache) = ner_cache.write() {
                                 *cache = Some(arc_backend.clone());
                             }
                             chain.add_backend(Box::new(engram_ingest::ArcExtractor(arc_backend)));
                         }
                         Err(e) => {
-                            tracing::warn!(model = %name, "GLiNER NER backend failed: {e}");
+                            eprintln!("[build_pipeline] gliner: ONNX NER FAILED: {e}");
+                            tracing::warn!(model = %name, "GLiNER ONNX NER backend failed: {e}");
                         }
                     }
                 } else {
-                    tracing::warn!(model = %name, "GLiNER model not found on disk");
+                    tracing::warn!(model = %name, "GLiNER ONNX model not found on disk");
                 }
             }
         }
     }
 
+
+    eprintln!("[build_pipeline] NER chain: {} backends", chain.backend_count());
     tracing::info!("NER chain: MergeAll with {} backends", chain.backend_count());
     pipeline.add_extractor(Box::new(chain));
 
@@ -1969,7 +1974,7 @@ fn build_pipeline(
         let cached = rel_cache.read().ok().and_then(|c| c.clone());
 
         if let Some(cached_backend) = cached {
-            tracing::debug!("using cached REL backend");
+            eprintln!("[build_pipeline] nli-rel: using cached backend");
             rel_chain.add_backend(Box::new(engram_ingest::ArcRelationExtractor(cached_backend)));
         } else {
             let model_name = rel_model
@@ -1977,6 +1982,7 @@ fn build_pipeline(
                 .map(String::from)
                 .or_else(|| list_installed_nli_models().into_iter().next());
 
+            eprintln!("[build_pipeline] nli-rel: model_name={:?}", model_name);
             if let Some(ref name) = model_name {
                 if let Some(mut cfg) = find_nli_model(name) {
                     // Apply custom relation templates from config if provided
@@ -1985,15 +1991,11 @@ fn build_pipeline(
                             cfg.relation_templates = templates.clone();
                         }
                     }
-                    cfg.min_confidence = 0.5;
+                    cfg.min_confidence = rel_threshold.unwrap_or(0.9);
 
                     match NliRelBackend::new(cfg) {
                         Ok(backend) => {
-                            tracing::info!(
-                                model = %name,
-                                templates = backend.template_count(),
-                                "NLI relation extraction backend loaded"
-                            );
+                            eprintln!("[build_pipeline] nli-rel: loaded OK, {} templates", backend.template_count());
                             let arc_backend: std::sync::Arc<dyn engram_ingest::RelationExtractor> = std::sync::Arc::new(backend);
                             // Cache for next time
                             if let Ok(mut cache) = rel_cache.write() {
@@ -2002,11 +2004,11 @@ fn build_pipeline(
                             rel_chain.add_backend(Box::new(engram_ingest::ArcRelationExtractor(arc_backend)));
                         }
                         Err(e) => {
-                            tracing::warn!(model = %name, "NLI-rel backend failed: {e}");
+                            eprintln!("[build_pipeline] nli-rel: FAILED: {e}");
                         }
                     }
                 } else {
-                    tracing::debug!(model = %name, "NLI-rel model not found");
+                    eprintln!("[build_pipeline] nli-rel: model not found for '{name}'");
                 }
             }
         }
@@ -2047,14 +2049,14 @@ pub async fn ingest(
         ..Default::default()
     };
 
-    let (kb_endpoints, ner_model, rel_model, relation_templates, coreference_enabled) = {
+    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled) = {
         let c = state.config.read().unwrap();
         (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
-         c.relation_templates.clone(), c.coreference_enabled)
+         c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled)
     };
-    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints, ner_model, rel_model,
-        relation_templates, coreference_enabled,
-        state.cached_ner.clone(), state.cached_rel.clone());
+    let graph = state.graph.clone();
+    let ner_cache = state.cached_ner.clone();
+    let rel_cache = state.cached_rel.clone();
 
     // Convert IngestItems to RawItems
     let items: Vec<engram_ingest::types::RawItem> = req.items
@@ -2084,9 +2086,12 @@ pub async fn ingest(
         })
         .collect();
 
-    // Execute pipeline in spawn_blocking (gazetteer uses blocking_read)
+    // Run build_pipeline + execute in spawn_blocking to avoid tokio runtime panic
+    // from reqwest::blocking (KbRelationExtractor)
     let parallel = req.parallel.unwrap_or(false);
     let result = tokio::task::spawn_blocking(move || {
+        let pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
+            relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
         if parallel {
             pipeline.execute_parallel(items)
         } else {
@@ -2135,29 +2140,33 @@ pub async fn ingest_analyze(
     use engram_ingest::PipelineConfig;
 
     let config = PipelineConfig::default();
-    let (kb_endpoints, ner_model, rel_model, relation_templates, coreference_enabled) = {
+    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled) = {
         let c = state.config.read().unwrap();
         (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
-         c.relation_templates.clone(), c.coreference_enabled)
+         c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled)
     };
-    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints, ner_model, rel_model,
-        relation_templates, coreference_enabled,
-        state.cached_ner.clone(), state.cached_rel.clone());
+    let graph = state.graph.clone();
+    let ner_cache = state.cached_ner.clone();
+    let rel_cache = state.cached_rel.clone();
+    let text = req.text;
 
-    let items = vec![engram_ingest::types::RawItem {
-        content: engram_ingest::types::Content::Text(req.text),
-        source_url: None,
-        source_name: "analyze".into(),
-        fetched_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64,
-        metadata: Default::default(),
-    }];
-
-    // Run pipeline in spawn_blocking to avoid tokio runtime panic
-    // from gazetteer's blocking_read()
-    let result = tokio::task::spawn_blocking(move || pipeline.analyze(items))
+    // Run build_pipeline + analyze in spawn_blocking to avoid tokio runtime panic
+    // from reqwest::blocking (KbRelationExtractor)
+    let result = tokio::task::spawn_blocking(move || {
+        let pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
+            relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+        let items = vec![engram_ingest::types::RawItem {
+            content: engram_ingest::types::Content::Text(text),
+            source_url: None,
+            source_name: "analyze".into(),
+            fetched_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+            metadata: Default::default(),
+        }];
+        pipeline.analyze(items)
+    })
         .await
         .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2232,14 +2241,14 @@ pub async fn ingest_file(
         ..Default::default()
     };
 
-    let (kb_endpoints, ner_model, rel_model, relation_templates, coreference_enabled) = {
+    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled) = {
         let c = state.config.read().unwrap();
         (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
-         c.relation_templates.clone(), c.coreference_enabled)
+         c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled)
     };
-    let pipeline = build_pipeline(state.graph.clone(), config, kb_endpoints, ner_model, rel_model,
-        relation_templates, coreference_enabled,
-        state.cached_ner.clone(), state.cached_rel.clone());
+    let graph = state.graph.clone();
+    let ner_cache = state.cached_ner.clone();
+    let rel_cache = state.cached_rel.clone();
 
     // Try to parse body as UTF-8 text
     let text = String::from_utf8(body.to_vec())
@@ -2258,8 +2267,11 @@ pub async fn ingest_file(
         metadata: Default::default(),
     }];
 
+    // Run build_pipeline + execute in spawn_blocking to avoid tokio runtime panic
     let parallel = params.get("parallel").is_some_and(|v| v == "true" || v == "1");
     let result = tokio::task::spawn_blocking(move || {
+        let pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
+            relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
         if parallel {
             pipeline.execute_parallel(items)
         } else {
@@ -3085,6 +3097,10 @@ pub async fn get_config(
         "ner_provider": cfg.ner_provider,
         "ner_model": cfg.ner_model,
         "ner_endpoint": cfg.ner_endpoint,
+        "rel_model": cfg.rel_model,
+        "rel_threshold": cfg.rel_threshold.unwrap_or(0.9),
+        "relation_templates": cfg.relation_templates,
+        "coreference_enabled": cfg.coreference_enabled.unwrap_or(true),
         "mesh_enabled": cfg.mesh_enabled,
         "mesh_topology": cfg.mesh_topology,
         "quantization_enabled": cfg.quantization_enabled.unwrap_or(true),
@@ -3533,90 +3549,131 @@ pub async fn ollama_pull(
     })))
 }
 
-// ── POST /config/ner-download — Download NER model via hf-hub (safetensors/candle) ──
+// ── POST /config/ner-download — Download GLiNER ONNX NER model from HuggingFace ──
 
-/// Download a GLiNER NER model by pre-populating the hf-hub cache.
-/// The `anno` crate's `GLiNER2Candle::from_pretrained()` will find
-/// the cached files on next pipeline build — no re-download needed.
+/// Download a GLiNER ONNX NER model from HuggingFace to `~/.engram/models/ner/`.
+///
+/// Downloads `tokenizer.json` + `onnx/model_{variant}.onnx` (saved as `model.onnx`).
+/// Default model: `knowledgator/gliner-x-small`, default variant: `quantized` (173 MB).
+///
+/// Request: `{"model_id": "knowledgator/gliner-x-small", "variant": "quantized", "force": false}`
 ///
 /// For air-gapped systems, use `/config/model-upload` instead.
-#[cfg(feature = "anno")]
+#[cfg(feature = "gliner")]
 pub async fn download_ner_model(
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<serde_json::Value> {
-    let model_id = body["model_id"].as_str()
-        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "model_id required (e.g. \"urchade/gliner_multi-v2.1\")"))?
-        .to_string();
+    use tokio::io::AsyncWriteExt;
+
+    let model_id = body["model_id"].as_str().unwrap_or("knowledgator/gliner-x-small").to_string();
+    let variant = body["variant"].as_str().unwrap_or("quantized").to_string();
     let force = body["force"].as_bool().unwrap_or(false);
 
-    // Run hf-hub download in spawn_blocking (it does synchronous HTTP)
-    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
-        let api = hf_hub::api::sync::ApiBuilder::new()
-            .build()
-            .map_err(|e| format!("hf-hub init failed: {e}"))?;
+    // Validate model_id format: must contain exactly one "/"
+    if model_id.matches('/').count() != 1 || model_id.contains("..") || model_id.contains('\\') {
+        return Err(api_err(StatusCode::BAD_REQUEST, "invalid model_id format (expected 'org/model')"));
+    }
 
-        let repo = api.model(model_id.clone());
+    // Derive safe local directory name (replace / with _)
+    let safe_name = model_id.replace('/', "_");
 
-        // Check if already cached (try to resolve main weight file)
-        if !force {
-            if let Ok(path) = repo.get("model.safetensors")
-                .or_else(|_| repo.get("gliner_model.safetensors"))
-            {
-                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                if size > 1_000_000 {
-                    return Ok(serde_json::json!({
-                        "status": "ok",
-                        "skipped": true,
-                        "message": "model already cached in hf-hub",
-                        "model_id": model_id,
-                        "model_size_mb": size / 1_048_576,
-                        "cache_path": path.to_string_lossy(),
-                    }));
-                }
-            }
+    let home = engram_home()
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "cannot determine home directory"))?;
+    let model_dir = home.join("models").join("ner").join(&safe_name);
+
+    let model_path = model_dir.join("model.onnx");
+    let tokenizer_path = model_dir.join("tokenizer.json");
+
+    // Skip if already installed
+    if !force && model_path.exists() && tokenizer_path.exists() {
+        let size = tokio::fs::metadata(&model_path).await.map(|m| m.len()).unwrap_or(0);
+        if size > 1_000_000 {
+            return Ok(Json(serde_json::json!({
+                "status": "ok",
+                "skipped": true,
+                "message": "model already installed",
+                "model_id": model_id,
+                "model_size_mb": size / 1_048_576,
+                "model_dir": model_dir.to_string_lossy(),
+            })));
         }
+    }
 
-        tracing::info!(model = %model_id, "downloading NER model via hf-hub");
+    tokio::fs::create_dir_all(&model_dir).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create dir failed: {e}")))?;
 
-        // Download auxiliary files (best-effort)
-        for f in ["config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"] {
-            let _ = repo.get(f);
-        }
+    // Construct HuggingFace download URLs
+    let base_url = format!("https://huggingface.co/{}/resolve/main", model_id);
+    let onnx_filename = if variant == "full" || variant == "fp32" {
+        "onnx/model.onnx".to_string()
+    } else {
+        format!("onnx/model_{variant}.onnx")
+    };
+    let model_url = format!("{}/{}", base_url, onnx_filename);
+    let tokenizer_url = format!("{}/tokenizer.json", base_url);
 
-        // Download main model weight (required)
-        let weight_path = repo.get("model.safetensors")
-            .or_else(|_| repo.get("gliner_model.safetensors"))
-            .map_err(|e| format!("failed to download model weights for '{}': {e}", model_id))?;
+    let client = reqwest::Client::new();
 
-        let size = std::fs::metadata(&weight_path).map(|m| m.len()).unwrap_or(0);
-        tracing::info!(
-            model = %model_id,
-            size_mb = size / 1_048_576,
-            path = %weight_path.display(),
-            "NER model downloaded via hf-hub"
-        );
+    // Download tokenizer first (small, ~16 MB)
+    tracing::info!(model = %model_id, "downloading tokenizer.json");
+    let resp = client.get(&tokenizer_url).send().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("tokenizer download failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(api_err(StatusCode::BAD_GATEWAY,
+            format!("tokenizer download returned {} for {}", resp.status(), tokenizer_url)));
+    }
+    let tokenizer_bytes = resp.bytes().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("tokenizer read failed: {e}")))?;
+    tokio::fs::write(&tokenizer_path, &tokenizer_bytes).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write tokenizer failed: {e}")))?;
 
-        Ok(serde_json::json!({
-            "status": "ok",
-            "model_id": model_id,
-            "model_size_mb": size / 1_048_576,
-            "cache_path": weight_path.to_string_lossy(),
-        }))
-    })
-    .await
-    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| api_err(StatusCode::BAD_GATEWAY, e))?;
+    // Download ONNX model (large, stream to disk)
+    tracing::info!(model = %model_id, variant = %variant, "downloading ONNX model");
+    let resp = client.get(&model_url).send().await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("model download failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(api_err(StatusCode::BAD_GATEWAY,
+            format!("model download returned {} for {}", resp.status(), model_url)));
+    }
 
-    Ok(Json(result))
+    // Stream response body to file to avoid holding entire model in memory
+    let mut file = tokio::fs::File::create(&model_path).await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create model file failed: {e}")))?;
+    let mut stream = resp.bytes_stream();
+    use futures::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("model download stream error: {e}")))?;
+        file.write_all(&chunk).await
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("write model failed: {e}")))?;
+    }
+    file.flush().await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("flush model failed: {e}")))?;
+
+    let size = tokio::fs::metadata(&model_path).await.map(|m| m.len()).unwrap_or(0);
+    tracing::info!(
+        model = %model_id,
+        variant = %variant,
+        size_mb = size / 1_048_576,
+        dir = %model_dir.display(),
+        "NER ONNX model downloaded"
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "model_id": model_id,
+        "variant": variant,
+        "model_size_mb": size / 1_048_576,
+        "model_dir": model_dir.to_string_lossy(),
+    })))
 }
 
-/// Fallback when anno feature is not enabled — returns an error.
-#[cfg(not(feature = "anno"))]
+/// Fallback when gliner feature is not enabled.
+#[cfg(not(feature = "gliner"))]
 pub async fn download_ner_model(
     Json(_body): Json<serde_json::Value>,
 ) -> ApiResult<serde_json::Value> {
     Err(api_err(StatusCode::NOT_IMPLEMENTED,
-        "anno feature not enabled — rebuild with --features anno for GLiNER NER support"))
+        "gliner feature not enabled — rebuild with --features gliner for GLiNER NER support"))
 }
 
 // ── POST /config/ner-download-onnx — Download legacy ONNX NER model ──
@@ -4514,6 +4571,104 @@ pub async fn check_rel_model(
         "has_tokenizer": has_tokenizer,
         "model_size_mb": model_size,
         "model_dir": model_dir.to_string_lossy(),
+    })))
+}
+
+// ── GET /config/relation-templates/export — Export configured + learned relation templates ──
+
+pub async fn export_relation_templates(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let cfg = state.config.read().map_err(|_| {
+        api_err(StatusCode::INTERNAL_SERVER_ERROR, "config lock poisoned")
+    })?;
+
+    // Start with configured templates (or defaults)
+    let configured: std::collections::HashMap<String, String> = cfg.relation_templates.clone()
+        .unwrap_or_else(|| engram_ingest::rel_nli::default_templates());
+    let threshold = cfg.rel_threshold.unwrap_or(0.9);
+    drop(cfg);
+
+    // Collect learned relation types from the graph's relation gazetteer sidecar
+    let mut learned_types: Vec<String> = Vec::new();
+    if let Some(ref config_path) = state.config_path {
+        // Derive brain path from config path (config is .brain.config, brain is .brain)
+        let brain_path = config_path.with_extension("");
+        let relgaz_path = brain_path.with_extension("relgaz");
+        if relgaz_path.exists() {
+            if let Ok(gaz) = engram_ingest::RelationGazetteer::load(&brain_path) {
+                for rt in gaz.known_relation_types() {
+                    if !configured.contains_key(rt) {
+                        learned_types.push(rt.clone());
+                    }
+                }
+                learned_types.sort();
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "templates": configured,
+        "threshold": threshold,
+        "learned_relation_types": learned_types,
+    })))
+}
+
+// ── POST /config/relation-templates/import — Import relation templates ──
+
+pub async fn import_relation_templates(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let templates = body.get("templates")
+        .and_then(|v| serde_json::from_value::<std::collections::HashMap<String, String>>(v.clone()).ok())
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "\"templates\" field required: {\"rel_type\": \"{head} verb {tail}\", ...}"))?;
+
+    // Validate templates contain {head} and {tail}
+    for (rel_type, template) in &templates {
+        if !template.contains("{head}") || !template.contains("{tail}") {
+            return Err(api_err(StatusCode::BAD_REQUEST,
+                format!("template '{}' must contain {{head}} and {{tail}} placeholders", rel_type)));
+        }
+    }
+
+    let threshold = body.get("threshold")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+
+    // Merge into config
+    {
+        let mut cfg = state.config.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "config lock poisoned")
+        })?;
+        // Merge: existing templates + imported (imported wins on conflict)
+        let mut merged = cfg.relation_templates.clone()
+            .unwrap_or_else(|| engram_ingest::rel_nli::default_templates());
+        merged.extend(templates.clone());
+        cfg.relation_templates = Some(merged.clone());
+        if let Some(t) = threshold {
+            cfg.rel_threshold = Some(t);
+        }
+    }
+    state.save_config().ok();
+
+    // Invalidate cached rel backend so next ingest picks up new templates
+    #[cfg(feature = "ingest")]
+    {
+        if let Ok(mut cached) = state.cached_rel.write() {
+            *cached = None;
+        }
+    }
+
+    let cfg = state.config.read().map_err(|_| {
+        api_err(StatusCode::INTERNAL_SERVER_ERROR, "config lock poisoned")
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "templates_count": cfg.relation_templates.as_ref().map(|t| t.len()).unwrap_or(0),
+        "threshold": cfg.rel_threshold.unwrap_or(0.9),
+        "imported": templates.len(),
     })))
 }
 
