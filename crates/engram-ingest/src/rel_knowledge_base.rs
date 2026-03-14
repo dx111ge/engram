@@ -106,13 +106,14 @@ impl KbRelationExtractor {
     /// finds Vladimir Putin, not the 2024 film.
     ///
     /// For non-Wikidata endpoints, falls back to configured SPARQL template.
+    /// Returns (QID_URI, canonical_name) -- canonical_name is the Wikipedia page title.
     fn entity_link(
         &self,
         endpoint: &KbEndpoint,
         entity_label: &str,
         entity_type: &str,
         language: &str,
-    ) -> Option<String> {
+    ) -> Option<(String, String)> {
         // Custom endpoint: use configured template or SPARQL
         if endpoint.entity_link_template.is_some() || !endpoint.url.contains("wikidata") {
             let query = if let Some(ref template) = endpoint.entity_link_template {
@@ -130,7 +131,7 @@ impl KbRelationExtractor {
                 )
             };
             return match self.sparql_query(endpoint, &query) {
-                Ok(json) => extract_first_uri(&json),
+                Ok(json) => extract_first_uri(&json).map(|uri| (uri, entity_label.to_string())),
                 Err(_) => None,
             };
         }
@@ -142,18 +143,19 @@ impl KbRelationExtractor {
             _ => "en",
         };
 
-        // Search with entity_type as context for disambiguation
-        let search_term = format!("{} {}", entity_label, entity_type);
-        if let Some(qid) = self.wikipedia_search_qid(wiki_lang, &search_term) {
-            return Some(qid);
+        // Search entity label alone first (Wikipedia ranking usually returns most famous)
+        if let Some(result) = self.wikipedia_search_qid(wiki_lang, entity_label) {
+            return Some(result);
         }
 
-        // Fallback: search without type context
-        self.wikipedia_search_qid(wiki_lang, entity_label)
+        // Fallback: add entity type as context for disambiguation
+        let search_term = format!("{} {}", entity_label, entity_type);
+        self.wikipedia_search_qid(wiki_lang, &search_term)
     }
 
-    /// Search Wikipedia and extract the Wikidata QID from the top result.
-    fn wikipedia_search_qid(&self, wiki_lang: &str, search_term: &str) -> Option<String> {
+    /// Search Wikipedia and extract the Wikidata QID + canonical title from the top result.
+    /// Returns (QID_URI, canonical_page_title).
+    fn wikipedia_search_qid(&self, wiki_lang: &str, search_term: &str) -> Option<(String, String)> {
         // Step 1: Wikipedia search
         let resp = self.client
             .get(&format!("https://{}.wikipedia.org/w/api.php", wiki_lang))
@@ -169,14 +171,14 @@ impl KbRelationExtractor {
             .ok()?;
 
         let json: serde_json::Value = resp.json().ok()?;
-        let title = json.pointer("/query/search/0/title")?.as_str()?;
+        let title = json.pointer("/query/search/0/title")?.as_str()?.to_string();
 
         // Step 2: Get Wikidata QID from page props
         let resp2 = self.client
             .get(&format!("https://{}.wikipedia.org/w/api.php", wiki_lang))
             .query(&[
                 ("action", "query"),
-                ("titles", title),
+                ("titles", &title),
                 ("prop", "pageprops"),
                 ("format", "json"),
             ])
@@ -189,7 +191,7 @@ impl KbRelationExtractor {
 
         for page in pages.values() {
             if let Some(qid) = page.pointer("/pageprops/wikibase_item").and_then(|v| v.as_str()) {
-                return Some(format!("http://www.wikidata.org/entity/{}", qid));
+                return Some((format!("http://www.wikidata.org/entity/{}", qid), title));
             }
         }
 
@@ -501,7 +503,10 @@ impl RelationExtractor for KbRelationExtractor {
                 }
             }
 
-            // Query endpoint for entities not yet linked (uses wbsearchentities for Wikidata)
+            // Query endpoint for entities not yet linked.
+            // Also collects canonical names (Wikipedia page titles) for node renaming.
+            let mut canonical_names: HashMap<usize, String> = HashMap::new();
+
             for (idx, entity) in input.entities.iter().enumerate() {
                 if entity_kb_ids.contains_key(&idx) || budget == 0 {
                     continue;
@@ -509,8 +514,9 @@ impl RelationExtractor for KbRelationExtractor {
 
                 budget -= 1;
                 match self.entity_link(endpoint, &entity.text, &entity.entity_type, &input.language) {
-                    Some(ref kb_id) => {
+                    Some((ref kb_id, ref canonical)) => {
                         entity_kb_ids.insert(idx, kb_id.clone());
+                        canonical_names.insert(idx, canonical.clone());
                         stats.entities_linked += 1;
                     }
                     None => {
@@ -519,17 +525,37 @@ impl RelationExtractor for KbRelationExtractor {
                 }
             }
 
-            // Cache newly discovered KB IDs back to graph properties
-            {
-                let labels_to_cache: Vec<(String, String)> = entity_kb_ids
-                    .iter()
-                    .map(|(idx, kb_id)| (input.entities[*idx].text.clone(), kb_id.clone()))
-                    .collect();
+            // Create canonical name nodes and alias edges.
+            // "Putin" (NER) → also create "Vladimir Putin" (canonical) with same_as edge.
+            // Use canonical names for all subsequent SPARQL operations.
+            let mut label_map: HashMap<usize, String> = HashMap::new(); // idx → effective label for edges
 
-                if !labels_to_cache.is_empty() {
-                    if let Ok(mut g) = self.graph.write() {
-                        for (label, kb_id) in labels_to_cache {
-                            let _ = g.set_property(&label, &prop_key, &kb_id);
+            {
+                let provenance = engram_core::graph::Provenance {
+                    source_type: engram_core::graph::SourceType::Api,
+                    source_id: format!("kb:{}", endpoint.name),
+                };
+
+                if let Ok(mut g) = self.graph.write() {
+                    for (idx, kb_id) in &entity_kb_ids {
+                        let ner_label = &input.entities[*idx].text;
+
+                        // Cache KB ID on the NER node
+                        let _ = g.set_property(ner_label, &prop_key, kb_id);
+
+                        // If canonical name differs, create canonical node + same_as edge
+                        if let Some(canonical) = canonical_names.get(idx) {
+                            if canonical != ner_label && canonical.len() > ner_label.len() {
+                                let _ = g.store_with_confidence(canonical, 0.80, &provenance);
+                                let _ = g.set_node_type(canonical, &input.entities[*idx].entity_type);
+                                let _ = g.set_property(canonical, &prop_key, kb_id);
+                                let _ = g.relate(ner_label, canonical, "same_as", &provenance);
+                                label_map.insert(*idx, canonical.clone());
+                            }
+                        }
+
+                        if !label_map.contains_key(idx) {
+                            label_map.insert(*idx, ner_label.clone());
                         }
                     }
                 }
@@ -590,7 +616,10 @@ impl RelationExtractor for KbRelationExtractor {
             // Phase 4: Property expansion — discover NEW entities from Wikidata properties.
             // E.g., Putin → position_held → "President of Russia", HIMARS → manufacturer → "Lockheed Martin"
             // Creates new nodes directly in the graph and returns relations to them.
-            let entity_labels: Vec<String> = input.entities.iter().map(|e| e.text.clone()).collect();
+            // Use canonical names (from label_map) for all subsequent operations
+            let entity_labels: Vec<String> = input.entities.iter().enumerate()
+                .map(|(idx, e)| label_map.get(&idx).cloned().unwrap_or_else(|| e.text.clone()))
+                .collect();
             {
                 let expansion = self.property_expansion(endpoint, &qids, &entity_labels, &input.language);
 
