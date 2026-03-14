@@ -525,37 +525,19 @@ impl RelationExtractor for KbRelationExtractor {
                 }
             }
 
-            // Create canonical name nodes and alias edges.
-            // "Putin" (NER) → also create "Vladimir Putin" (canonical) with same_as edge.
-            // Use canonical names for all subsequent SPARQL operations.
-            let mut label_map: HashMap<usize, String> = HashMap::new(); // idx → effective label for edges
-
+            // Cache KB IDs and canonical names as properties on NER nodes.
+            // ALL edges use NER labels (the node labels that exist in the graph).
+            // Canonical names stored as properties for display/search.
             {
-                let provenance = engram_core::graph::Provenance {
-                    source_type: engram_core::graph::SourceType::Api,
-                    source_id: format!("kb:{}", endpoint.name),
-                };
-
                 if let Ok(mut g) = self.graph.write() {
                     for (idx, kb_id) in &entity_kb_ids {
                         let ner_label = &input.entities[*idx].text;
-
-                        // Cache KB ID on the NER node
                         let _ = g.set_property(ner_label, &prop_key, kb_id);
 
-                        // If canonical name differs, create canonical node + same_as edge
                         if let Some(canonical) = canonical_names.get(idx) {
-                            if canonical != ner_label && canonical.len() > ner_label.len() {
-                                let _ = g.store_with_confidence(canonical, 0.80, &provenance);
-                                let _ = g.set_node_type(canonical, &input.entities[*idx].entity_type);
-                                let _ = g.set_property(canonical, &prop_key, kb_id);
-                                let _ = g.relate(ner_label, canonical, "same_as", &provenance);
-                                label_map.insert(*idx, canonical.clone());
+                            if canonical != ner_label {
+                                let _ = g.set_property(ner_label, "canonical_name", canonical);
                             }
-                        }
-
-                        if !label_map.contains_key(idx) {
-                            label_map.insert(*idx, ner_label.clone());
                         }
                     }
                 }
@@ -616,9 +598,9 @@ impl RelationExtractor for KbRelationExtractor {
             // Phase 4: Property expansion — discover NEW entities from Wikidata properties.
             // E.g., Putin → position_held → "President of Russia", HIMARS → manufacturer → "Lockheed Martin"
             // Creates new nodes directly in the graph and returns relations to them.
-            // Use canonical names (from label_map) for all subsequent operations
-            let entity_labels: Vec<String> = input.entities.iter().enumerate()
-                .map(|(idx, e)| label_map.get(&idx).cloned().unwrap_or_else(|| e.text.clone()))
+            // Use NER labels for all edges (these are the actual graph node labels)
+            let entity_labels: Vec<String> = input.entities.iter()
+                .map(|e| e.text.clone())
                 .collect();
             {
                 let expansion = self.property_expansion(endpoint, &qids, &entity_labels, &input.language);

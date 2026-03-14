@@ -159,6 +159,18 @@ dynamically generated from Google's Discovery Service.
 | 12.7 | Action engine rule templates for Workspace triggers | Small | E.g., "new email from X about Y -> ingest" |
 | 12.8 | Workspace-aware entity resolution (match contacts to graph entities) | Medium | Google contact IDs as stable identifiers |
 
+### Seed Enrichment Improvements (HIGH PRIORITY)
+
+| # | Task | Effort | Priority | Notes |
+|---|------|--------|----------|-------|
+| SE.1 | **Interactive entity disambiguation** | Medium | HIGH | When Wikipedia search returns ambiguous results, show candidates to user in the wizard: "Did you mean: Emmanuel Macron (President of France) or Brigitte Macron (First Lady)?" Turns waiting time into engagement. Use SSE to stream candidates as they're discovered. |
+| SE.2 | Skip KB enrichment for private/internal domains | Small | HIGH | Add wizard option "Skip Wikidata enrichment" for non-public knowledge graphs (e.g., internal network graphs, private research). Seed should still extract entities via GLiNER2 but not query Wikidata. |
+| SE.3 | Seed progress indicator with SSE | Medium | HIGH | Show live progress during seed: "Linking entities... (12/20)", "Discovering connections... (45 found)", "Expanding properties...". Currently silent for ~25s. |
+| SE.4 | Connect seed entities to domain events | Medium | MEDIUM | When seed text mentions an event ("Russia Ukraine war"), connect ALL seed persons to the event via Wikidata's "participant in" / "conflict" properties. Currently only Putin gets connected. |
+| SE.5 | 2-hop shortest path SPARQL for remaining disconnected pairs | Medium | MEDIUM | Current batch shortest path does 1-hop. For entity pairs still disconnected after 1-hop, try 2-hop batch query. More connections at cost of ~5s more. |
+| SE.6 | Web search fallback for entities not in Wikidata | Medium | LOW | For entities with no Wikipedia/Wikidata match, use web search to find factual text, then run GLiNER2 RE on discovered text to extract relations. |
+| SE.7 | LLM seed expansion | Medium | LOW | If LLM configured, ask it to generate factual statements from entity list. Run GLiNER2 RE on output. Store with `method: LlmFallback` and lower confidence. |
+
 ### Other Planned Integrations
 
 | Integration | Priority | Notes |
