@@ -96,41 +96,169 @@ impl KbRelationExtractor {
             .map_err(|e| format!("SPARQL JSON parse failed: {e}"))
     }
 
-    /// Search for an entity in a SPARQL endpoint, returning the KB ID if found.
+    /// Link an entity to a Wikidata QID using Wikipedia search for disambiguation.
+    ///
+    /// Two-step approach:
+    /// 1. Wikipedia search: "{entity_text} {entity_type}" → finds Wikipedia page title
+    /// 2. Wikipedia page props → extracts wikibase_item (QID)
+    ///
+    /// Wikipedia's search naturally disambiguates using context -- "Putin person"
+    /// finds Vladimir Putin, not the 2024 film.
+    ///
+    /// For non-Wikidata endpoints, falls back to configured SPARQL template.
     fn entity_link(
         &self,
         endpoint: &KbEndpoint,
         entity_label: &str,
+        entity_type: &str,
         language: &str,
     ) -> Option<String> {
-        let query = if let Some(ref template) = endpoint.entity_link_template {
-            template
-                .replace("{entity_label}", &sparql_escape(entity_label))
-                .replace("{language}", language)
-        } else {
-            // Default Wikidata entity search
-            format!(
-                r#"SELECT ?item ?itemLabel WHERE {{
-                    ?item rdfs:label "{label}"@{lang} .
-                    SERVICE wikibase:label {{ bd:serviceParam wikibase:language "{lang},en" }}
-                }} LIMIT 5"#,
-                label = sparql_escape(entity_label),
-                lang = language,
-            )
+        // Custom endpoint: use configured template or SPARQL
+        if endpoint.entity_link_template.is_some() || !endpoint.url.contains("wikidata") {
+            let query = if let Some(ref template) = endpoint.entity_link_template {
+                template
+                    .replace("{entity_label}", &sparql_escape(entity_label))
+                    .replace("{language}", language)
+            } else {
+                format!(
+                    r#"SELECT ?item ?itemLabel WHERE {{
+                        ?item rdfs:label "{label}"@{lang} .
+                        SERVICE wikibase:label {{ bd:serviceParam wikibase:language "{lang},en" }}
+                    }} LIMIT 5"#,
+                    label = sparql_escape(entity_label),
+                    lang = language,
+                )
+            };
+            return match self.sparql_query(endpoint, &query) {
+                Ok(json) => extract_first_uri(&json),
+                Err(_) => None,
+            };
+        }
+
+        // Wikidata: use Wikipedia search API for robust disambiguation
+        let wiki_lang = match language {
+            "de" => "de", "fr" => "fr", "es" => "es", "it" => "it",
+            "pt" => "pt", "nl" => "nl", "ru" => "ru", "zh" => "zh",
+            _ => "en",
         };
 
-        match self.sparql_query(endpoint, &query) {
-            Ok(json) => extract_first_uri(&json),
-            Err(e) => {
-                tracing::debug!(
-                    endpoint = %endpoint.name,
-                    entity = entity_label,
-                    error = %e,
-                    "entity linking failed"
-                );
-                None
+        // Search with entity_type as context for disambiguation
+        let search_term = format!("{} {}", entity_label, entity_type);
+        if let Some(qid) = self.wikipedia_search_qid(wiki_lang, &search_term) {
+            return Some(qid);
+        }
+
+        // Fallback: search without type context
+        self.wikipedia_search_qid(wiki_lang, entity_label)
+    }
+
+    /// Search Wikipedia and extract the Wikidata QID from the top result.
+    fn wikipedia_search_qid(&self, wiki_lang: &str, search_term: &str) -> Option<String> {
+        // Step 1: Wikipedia search
+        let resp = self.client
+            .get(&format!("https://{}.wikipedia.org/w/api.php", wiki_lang))
+            .query(&[
+                ("action", "query"),
+                ("list", "search"),
+                ("srsearch", search_term),
+                ("srlimit", "1"),
+                ("format", "json"),
+            ])
+            .header("User-Agent", "engram/1.1")
+            .send()
+            .ok()?;
+
+        let json: serde_json::Value = resp.json().ok()?;
+        let title = json.pointer("/query/search/0/title")?.as_str()?;
+
+        // Step 2: Get Wikidata QID from page props
+        let resp2 = self.client
+            .get(&format!("https://{}.wikipedia.org/w/api.php", wiki_lang))
+            .query(&[
+                ("action", "query"),
+                ("titles", title),
+                ("prop", "pageprops"),
+                ("format", "json"),
+            ])
+            .header("User-Agent", "engram/1.1")
+            .send()
+            .ok()?;
+
+        let json2: serde_json::Value = resp2.json().ok()?;
+        let pages = json2.pointer("/query/pages")?.as_object()?;
+
+        for page in pages.values() {
+            if let Some(qid) = page.pointer("/pageprops/wikibase_item").and_then(|v| v.as_str()) {
+                return Some(format!("http://www.wikidata.org/entity/{}", qid));
             }
         }
+
+        None
+    }
+
+    /// Batch relation discovery: find ALL direct connections between a set of QIDs
+    /// in a single SPARQL query.
+    fn batch_relation_lookup(
+        &self,
+        endpoint: &KbEndpoint,
+        qids: &[(&str, usize)], // (QID, entity_index)
+        language: &str,
+    ) -> Vec<(usize, usize, String, String)> {
+        if qids.len() < 2 {
+            return Vec::new();
+        }
+
+        // Build VALUES clause: wd:Q7747 wd:Q159 wd:Q212 ...
+        let values: String = qids.iter()
+            .map(|(qid, _)| format!("wd:{}", extract_qid(qid)))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let query = format!(
+            r#"SELECT ?s ?sLabel ?p ?pLabel ?o ?oLabel WHERE {{
+                VALUES ?s {{ {values} }}
+                VALUES ?o {{ {values} }}
+                ?s ?prop ?o .
+                ?p wikibase:directClaim ?prop .
+                FILTER(?s != ?o)
+                SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,{lang}" }}
+            }} LIMIT 500"#,
+            values = values,
+            lang = language,
+        );
+
+        let json = match self.sparql_query(endpoint, &query) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("batch SPARQL failed: {e}");
+                return Vec::new();
+            }
+        };
+
+        // Build QID → entity_index map
+        let qid_to_idx: HashMap<String, usize> = qids.iter()
+            .map(|(qid, idx)| (extract_qid(qid).to_string(), *idx))
+            .collect();
+
+        let mut results = Vec::new();
+        if let Some(bindings) = json.pointer("/results/bindings").and_then(|b| b.as_array()) {
+            for binding in bindings {
+                let s_uri = binding.pointer("/s/value").and_then(|v| v.as_str()).unwrap_or("");
+                let o_uri = binding.pointer("/o/value").and_then(|v| v.as_str()).unwrap_or("");
+                let p_label = binding.pointer("/pLabel/value").and_then(|v| v.as_str()).unwrap_or("");
+                let p_uri = binding.pointer("/p/value").and_then(|v| v.as_str()).unwrap_or("");
+
+                let s_qid = extract_qid(s_uri);
+                let o_qid = extract_qid(o_uri);
+
+                if let (Some(&s_idx), Some(&o_idx)) = (qid_to_idx.get(s_qid), qid_to_idx.get(o_qid)) {
+                    let rel_type = if p_label.is_empty() { uri_to_label(p_uri) } else { p_label.to_string() };
+                    results.push((s_idx, o_idx, rel_type, p_uri.to_string()));
+                }
+            }
+        }
+
+        results
     }
 
     /// Look up relations between two KB entity IDs.
@@ -211,14 +339,14 @@ impl RelationExtractor for KbRelationExtractor {
                 }
             }
 
-            // Query endpoint for entities not yet linked
+            // Query endpoint for entities not yet linked (uses wbsearchentities for Wikidata)
             for (idx, entity) in input.entities.iter().enumerate() {
                 if entity_kb_ids.contains_key(&idx) || budget == 0 {
                     continue;
                 }
 
                 budget -= 1;
-                match self.entity_link(endpoint, &entity.text, &input.language) {
+                match self.entity_link(endpoint, &entity.text, &entity.entity_type, &input.language) {
                     Some(ref kb_id) => {
                         entity_kb_ids.insert(idx, kb_id.clone());
                         stats.entities_linked += 1;
@@ -245,37 +373,54 @@ impl RelationExtractor for KbRelationExtractor {
                 }
             }
 
-            // Phase 2: Relation lookup — for each entity pair with KB IDs
-            for i in 0..input.entities.len() {
-                for j in (i + 1)..input.entities.len() {
-                    if budget == 0 {
-                        break;
-                    }
+            // Phase 2: Batch relation discovery (single SPARQL query for ALL entity pairs)
+            let qids: Vec<(&str, usize)> = entity_kb_ids.iter()
+                .map(|(idx, qid)| (qid.as_str(), *idx))
+                .collect();
 
-                    let (id_a, id_b) = match (entity_kb_ids.get(&i), entity_kb_ids.get(&j)) {
-                        (Some(a), Some(b)) => (a.clone(), b.clone()),
-                        _ => continue,
-                    };
+            if qids.len() >= 2 {
+                let batch_results = self.batch_relation_lookup(endpoint, &qids, &input.language);
+                for (s_idx, o_idx, rel_type, _rel_uri) in &batch_results {
+                    all_relations.push(CandidateRelation {
+                        head_idx: *s_idx,
+                        tail_idx: *o_idx,
+                        rel_type: rel_type.clone(),
+                        confidence: 0.80,
+                        method: ExtractionMethod::KnowledgeBase,
+                    });
+                    stats.relations_found += 1;
+                }
 
-                    budget -= 1;
-                    let relations =
-                        self.relation_lookup(endpoint, &id_a, &id_b, &input.language);
+                // Phase 3: Pairwise deep lookup for linked pairs with no batch results
+                let connected: std::collections::HashSet<(usize, usize)> = batch_results.iter()
+                    .map(|(s, o, _, _)| (*s.min(o), *s.max(o)))
+                    .collect();
 
-                    for (rel_uri, rel_label) in &relations {
-                        let rel_type = if rel_label.is_empty() {
-                            uri_to_label(rel_uri)
-                        } else {
-                            rel_label.clone()
-                        };
+                for i in 0..qids.len() {
+                    for j in (i + 1)..qids.len() {
+                        if budget == 0 { break; }
+                        let (qi, idx_i) = qids[i];
+                        let (qj, idx_j) = qids[j];
+                        let pair = (idx_i.min(idx_j), idx_i.max(idx_j));
+                        if connected.contains(&pair) { continue; }
 
-                        all_relations.push(CandidateRelation {
-                            head_idx: i,
-                            tail_idx: j,
-                            rel_type,
-                            confidence: 0.75,
-                            method: ExtractionMethod::KnowledgeBase,
-                        });
-                        stats.relations_found += 1;
+                        budget -= 1;
+                        let relations = self.relation_lookup(endpoint, qi, qj, &input.language);
+                        for (rel_uri, rel_label) in &relations {
+                            let rel_type = if rel_label.is_empty() {
+                                uri_to_label(rel_uri)
+                            } else {
+                                rel_label.clone()
+                            };
+                            all_relations.push(CandidateRelation {
+                                head_idx: idx_i,
+                                tail_idx: idx_j,
+                                rel_type,
+                                confidence: 0.75,
+                                method: ExtractionMethod::KnowledgeBase,
+                            });
+                            stats.relations_found += 1;
+                        }
                     }
                 }
             }
