@@ -627,10 +627,17 @@ impl RelationExtractor for KbRelationExtractor {
                             };
                             let _ = g.set_node_type(to_label, node_type);
 
+                            // Ensure from_label node exists too (might be NER label not yet stored)
+                            if g.find_node_id(from_label).ok().flatten().is_none() {
+                                let _ = g.store_with_confidence(from_label, 0.70, &provenance);
+                            }
+
                             // Create the edge
                             match g.relate(from_label, to_label, rel_type, &provenance) {
                                 Ok(_) => stats.relations_found += 1,
-                                Err(_) => {}
+                                Err(e) => {
+                                    eprintln!("[KB] relate FAILED: {} -[{}]-> {}: {}", from_label, rel_type, to_label, e);
+                                }
                             }
                         }
                     }
