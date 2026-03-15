@@ -88,6 +88,12 @@ pub struct EngineConfig {
     pub quantization_enabled: Option<bool>,
     /// Knowledge base endpoints (SPARQL, etc.).
     pub kb_endpoints: Option<Vec<KbEndpointConfig>>,
+    /// Web search provider: "duckduckgo", "brave", "searxng"
+    pub web_search_provider: Option<String>,
+    /// Web search API key (for Brave Search)
+    pub web_search_api_key: Option<String>,
+    /// Web search URL (for SearXNG self-hosted)
+    pub web_search_url: Option<String>,
     /// Whether the onboarding wizard has been dismissed.
     #[serde(default)]
     pub wizard_dismissed: Option<bool>,
@@ -174,6 +180,15 @@ impl EngineConfig {
         if other.kb_endpoints.is_some() {
             self.kb_endpoints = other.kb_endpoints.clone();
         }
+        if other.web_search_provider.is_some() {
+            self.web_search_provider = other.web_search_provider.clone();
+        }
+        if other.web_search_api_key.is_some() {
+            self.web_search_api_key = other.web_search_api_key.clone();
+        }
+        if other.web_search_url.is_some() {
+            self.web_search_url = other.web_search_url.clone();
+        }
         if other.wizard_dismissed.is_some() {
             self.wizard_dismissed = other.wizard_dismissed;
         }
@@ -194,6 +209,44 @@ pub struct MeshState {
     pub peers_path: Option<PathBuf>,
     /// Path to `.brain.audit` sidecar file.
     pub audit_path: Option<PathBuf>,
+}
+
+/// A seed enrichment session: tracks state across multi-phase interactive seed flow.
+#[derive(Clone, Debug)]
+pub struct SeedSession {
+    pub session_id: String,
+    pub seed_text: String,
+    pub area_of_interest: Option<String>,
+    /// Entities extracted by NER (label, type, confidence).
+    pub entities: Vec<SeedEntity>,
+    /// Entity links to Wikidata (label, canonical, description, qid).
+    pub entity_links: Vec<SeedEntityLink>,
+    /// Candidate connections discovered in Steps 2+3.
+    pub connections: Vec<SeedConnection>,
+    pub confirmed: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SeedEntity {
+    pub label: String,
+    pub entity_type: String,
+    pub confidence: f32,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SeedEntityLink {
+    pub label: String,
+    pub canonical: String,
+    pub description: String,
+    pub qid: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SeedConnection {
+    pub from: String,
+    pub to: String,
+    pub rel_type: String,
+    pub source: String,
 }
 
 /// Thread-safe shared graph state for the HTTP server.
@@ -248,6 +301,8 @@ pub struct AppState {
     /// Cached REL backend (loaded once, invalidated on config change).
     #[cfg(feature = "ingest")]
     pub cached_rel: Arc<RwLock<Option<Arc<dyn engram_ingest::RelationExtractor>>>>,
+    /// Active seed enrichment sessions (interactive multi-phase flow).
+    pub seed_sessions: Arc<RwLock<HashMap<String, SeedSession>>>,
 }
 
 impl AppState {
@@ -297,6 +352,7 @@ impl AppState {
             cached_ner: Arc::new(RwLock::new(None)),
             #[cfg(feature = "ingest")]
             cached_rel: Arc::new(RwLock::new(None)),
+            seed_sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

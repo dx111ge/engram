@@ -358,6 +358,7 @@ mod tests {
                 },
             ],
             language: "en".into(),
+            area_of_interest: None,
         };
 
         let relations = extractor.extract_relations(&input);

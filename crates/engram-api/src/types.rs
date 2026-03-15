@@ -442,6 +442,68 @@ pub struct AnalyzeResponse {
     pub warnings: Vec<String>,
 }
 
+// ── Seed enrichment types ──
+
+/// Request body for `POST /ingest/seed/start`.
+#[derive(Deserialize)]
+pub struct SeedStartRequest {
+    pub text: String,
+}
+
+/// Response for `POST /ingest/seed/start`.
+#[derive(Serialize)]
+pub struct SeedStartResponse {
+    pub session_id: String,
+    pub entities: Vec<SeedEntityResponse>,
+    pub area_of_interest: Option<String>,
+}
+
+/// A seed entity in a response.
+#[derive(Serialize)]
+pub struct SeedEntityResponse {
+    pub label: String,
+    pub entity_type: String,
+    pub confidence: f32,
+}
+
+/// Request body for `POST /ingest/seed/confirm-aoi`.
+#[derive(Deserialize)]
+pub struct SeedConfirmAoiRequest {
+    pub session_id: String,
+    pub area_of_interest: String,
+}
+
+/// Request body for `POST /ingest/seed/confirm-entities`.
+#[derive(Deserialize)]
+pub struct SeedConfirmEntitiesRequest {
+    pub session_id: String,
+    pub entities: Vec<SeedConfirmEntity>,
+}
+
+/// A confirmed entity in the seed flow.
+#[derive(Deserialize)]
+pub struct SeedConfirmEntity {
+    pub label: String,
+    #[serde(default)]
+    pub skip: bool,
+    pub canonical: Option<String>,
+    pub qid: Option<String>,
+}
+
+/// Request body for `POST /ingest/seed/commit`.
+#[derive(Deserialize)]
+pub struct SeedCommitRequest {
+    pub session_id: String,
+}
+
+/// Response for `POST /ingest/seed/commit`.
+#[derive(Serialize)]
+pub struct SeedCommitResponse {
+    pub facts_stored: u32,
+    pub relations_created: u32,
+    pub duration_ms: u64,
+}
+
 /// Response for ingest endpoints.
 #[derive(Serialize)]
 pub struct IngestResponse {

@@ -14,6 +14,8 @@ pub struct RelationExtractionInput {
     pub entities: Vec<ExtractedEntity>,
     /// Detected language code.
     pub language: String,
+    /// Detected area of interest (domain lens for contextual enrichment).
+    pub area_of_interest: Option<String>,
 }
 
 /// A candidate relation produced by a relation extraction backend.

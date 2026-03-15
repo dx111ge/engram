@@ -72,6 +72,12 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/actions/rules/{id}", get(handlers::get_action_rule))
         .route("/actions/rules/{id}", delete(handlers::delete_action_rule))
         .route("/actions/dry-run", post(handlers::dry_run_action))
+        // Seed enrichment (interactive multi-phase flow)
+        .route("/ingest/seed/start", post(handlers::seed_start))
+        .route("/ingest/seed/confirm-aoi", post(handlers::seed_confirm_aoi))
+        .route("/ingest/seed/confirm-entities", post(handlers::seed_confirm_entities))
+        .route("/ingest/seed/commit", post(handlers::seed_commit))
+        .route("/ingest/seed/stream", get(handlers::seed_stream))
         // Streaming
         .route("/events/stream", get(handlers::event_stream))
         .route("/ingest/webhook/{pipeline_id}", post(handlers::webhook_receive))

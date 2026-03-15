@@ -99,6 +99,55 @@ pub enum GraphEvent {
         demoted: u32,
         archived: u32,
     },
+    // ── Seed enrichment events (interactive multi-phase flow) ──
+
+    /// Area of interest detected from seed text.
+    SeedAoiDetected {
+        session_id: Arc<str>,
+        area_of_interest: Arc<str>,
+    },
+    /// Entity successfully linked to a KB entry.
+    SeedEntityLinked {
+        session_id: Arc<str>,
+        label: Arc<str>,
+        canonical: Arc<str>,
+        description: Arc<str>,
+        qid: Arc<str>,
+    },
+    /// Entity has multiple candidate matches — user must disambiguate.
+    SeedEntityAmbiguous {
+        session_id: Arc<str>,
+        label: Arc<str>,
+        candidates: Vec<(Arc<str>, Arc<str>, Arc<str>)>, // (canonical, description, qid)
+    },
+    /// A contextual connection found (area-of-interest article co-occurrence).
+    SeedConnectionFound {
+        session_id: Arc<str>,
+        from: Arc<str>,
+        to: Arc<str>,
+        rel_type: Arc<str>,
+        source: Arc<str>,
+    },
+    /// A SPARQL-derived structured relation.
+    SeedSparqlRelation {
+        session_id: Arc<str>,
+        from: Arc<str>,
+        to: Arc<str>,
+        rel_type: Arc<str>,
+    },
+    /// A phase of seed enrichment completed.
+    SeedPhaseComplete {
+        session_id: Arc<str>,
+        phase: u32,
+        entities_processed: u32,
+        relations_found: u32,
+    },
+    /// Seed enrichment fully committed to graph.
+    SeedComplete {
+        session_id: Arc<str>,
+        facts_stored: u32,
+        relations_created: u32,
+    },
 }
 
 /// Direction of a confidence threshold crossing.

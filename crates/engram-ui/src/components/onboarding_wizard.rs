@@ -9,12 +9,13 @@ const STEP_WELCOME: u32 = 1;
 const STEP_EMBEDDER: u32 = 2;
 const STEP_NER: u32 = 3;
 const STEP_NLI: u32 = 4;
-const STEP_LLM: u32 = 5;
+const STEP_LLM: u32 = 5;       // Mandatory — required for AoI detection + entity disambiguation
 const STEP_QUANTIZATION: u32 = 6;
 const STEP_KB_SOURCES: u32 = 7;
-const STEP_SEED: u32 = 8;
-const STEP_READY: u32 = 9;
-const TOTAL_STEPS: u32 = 9;
+const STEP_WEB_SEARCH: u32 = 8; // NEW: web search provider config
+const STEP_SEED: u32 = 9;
+const STEP_READY: u32 = 10;
+const TOTAL_STEPS: u32 = 10;
 
 // ── Quality score weights ──
 
@@ -27,10 +28,10 @@ fn quality_score(
     has_seed: bool,
 ) -> u32 {
     let mut score = 0u32;
-    if has_embedder { score += 25; }
+    if has_embedder { score += 20; }
     if has_ner { score += 20; }
-    if has_kb { score += 25; }
-    if has_llm { score += 10; }
+    if has_kb { score += 20; }
+    if has_llm { score += 20; }    // Mandatory: area-of-interest detection + entity disambiguation
     if has_quantization { score += 5; }
     if has_seed { score += 15; }
     score
@@ -239,6 +240,21 @@ pub fn OnboardingWizard(
     let (kb_wikidata, set_kb_wikidata) = signal(true);
     let (kb_dbpedia, set_kb_dbpedia) = signal(false);
     let (seed_text, set_seed_text) = signal(String::new());
+    // Web search step
+    let (web_search_provider, set_web_search_provider) = signal("duckduckgo".to_string());
+    let (web_search_api_key, set_web_search_api_key) = signal(String::new());
+    let (web_search_url, set_web_search_url) = signal(String::new());
+    let (web_search_test_result, set_web_search_test_result) = signal(Option::<String>::None);
+    let (web_search_testing, set_web_search_testing) = signal(false);
+    // Seed enrichment interactive state
+    let (seed_phase, set_seed_phase) = signal(0u32);  // 0=input, 1=aoi+entities
+    let (seed_aoi, set_seed_aoi) = signal(String::new());
+    let (seed_session_id, set_seed_session_id) = signal(String::new());
+    // Entity list: Vec<(label, type, confidence, skipped)>
+    let (seed_entities, set_seed_entities) = signal(Vec::<(String, String, f32, bool)>::new());
+    // New entity input
+    let (new_entity_label, set_new_entity_label) = signal(String::new());
+    let (new_entity_type, set_new_entity_type) = signal("entity".to_string());
 
     // Ollama model fetching
     let (ollama_embed_models, set_ollama_embed_models) = signal(Vec::<String>::new());
@@ -294,6 +310,68 @@ pub fn OnboardingWizard(
                 }
                 set_ollama_fetching.set(false);
             });
+        }
+    });
+
+    // Web search test — saves config then hits the proxy to verify results come back
+    let api_ws_test = api.clone();
+    let do_web_search_test = Action::new_local(move |_: &()| {
+        let api = api_ws_test.clone();
+        let provider = web_search_provider.get_untracked();
+        let url = web_search_url.get_untracked();
+        let api_key = web_search_api_key.get_untracked();
+        async move {
+            set_web_search_testing.set(true);
+            set_web_search_test_result.set(None);
+
+            // Validate inputs first
+            let validation: Result<(), String> = match provider.as_str() {
+                "brave" if api_key.is_empty() => Err("API key is required for Brave Search".into()),
+                "brave" if api_key.len() < 20 => Err("API key looks too short".into()),
+                "searxng" if url.is_empty() => Err("SearXNG URL is required".into()),
+                "searxng" if !url.starts_with("http://") && !url.starts_with("https://") => Err("URL must start with http:// or https://".into()),
+                _ => Ok(()),
+            };
+
+            let test_result = match validation {
+                Err(e) => Err(e),
+                Ok(()) => {
+                    // Save config so proxy routes correctly
+                    let config = serde_json::json!({
+                        "web_search_provider": &provider,
+                        "web_search_api_key": if api_key.is_empty() { None } else { Some(&api_key) },
+                        "web_search_url": if url.is_empty() { None } else { Some(&url) },
+                    });
+                    let _ = api.post_text("/config", &config).await;
+
+                    if provider == "duckduckgo" {
+                        Ok("DuckDuckGo requires no configuration".to_string())
+                    } else {
+                        // Test via proxy which now routes by provider
+                        match api.get_text("/proxy/search?q=test&limit=3").await {
+                            Ok(resp) => {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
+                                    let count = json.get("results").and_then(|r| r.as_array()).map(|a| a.len()).unwrap_or(0);
+                                    if count > 0 {
+                                        Ok(format!("Connected ({count} results)"))
+                                    } else {
+                                        Err(format!("No results from {} -- check configuration", provider))
+                                    }
+                                } else {
+                                    Err("Invalid response from search proxy".into())
+                                }
+                            }
+                            Err(e) => Err(format!("Connection failed: {e}"))
+                        }
+                    }
+                }
+            };
+
+            match test_result {
+                Ok(msg) => set_web_search_test_result.set(Some(msg)),
+                Err(msg) => set_web_search_test_result.set(Some(format!("FAIL: {msg}"))),
+            }
+            set_web_search_testing.set(false);
         }
     });
 
@@ -426,9 +504,9 @@ pub fn OnboardingWizard(
                 }
                 STEP_LLM => {
                     if llm.is_empty() {
-                        // Skip is OK for LLM
+                        set_save_error.set(Some("LLM is required for area-of-interest detection and entity disambiguation. Please select a provider.".into()));
                         set_saving.set(false);
-                        return true;
+                        return false;
                     }
                     let preset = LLM_PRESETS.iter().find(|p| p.id == llm);
                     let endpoint = preset.map(|p| p.endpoint).unwrap_or("");
@@ -479,6 +557,19 @@ pub fn OnboardingWizard(
                     }
                     if ok { Ok("ok".into()) } else { Err(crate::api::ApiError::Network("KB config failed".into())) }
                 }
+                STEP_WEB_SEARCH => {
+                    let provider = web_search_provider.get_untracked();
+                    let mut config = serde_json::json!({ "web_search_provider": provider });
+                    let api_key = web_search_api_key.get_untracked();
+                    let url = web_search_url.get_untracked();
+                    if provider == "brave" && !api_key.is_empty() {
+                        config["web_search_api_key"] = serde_json::json!(api_key);
+                    }
+                    if provider == "searxng" && !url.is_empty() {
+                        config["web_search_url"] = serde_json::json!(url);
+                    }
+                    api.post_text("/config", &config).await
+                }
                 _ => Ok("ok".into()),
             };
 
@@ -503,7 +594,7 @@ pub fn OnboardingWizard(
         }
     });
 
-    // Analyze seed text
+    // Analyze seed text — uses seed/start for AoI detection + NER
     let api_analyze = api.clone();
     let do_analyze = Action::new_local(move |_: &()| {
         let api = api_analyze.clone();
@@ -512,46 +603,91 @@ pub fn OnboardingWizard(
             if text.trim().is_empty() { return; }
             set_analyzing.set(true);
             set_seed_result.set(None);
-            let body = AnalyzeRequest { text };
-            match api.post::<_, AnalyzeResponse>("/ingest/analyze", &body).await {
-                Ok(resp) => {
-                    let summary = format!(
-                        "{} entities, {} relations ({}ms)\n{}",
-                        resp.entities.len(),
-                        resp.relations.len(),
-                        resp.duration_ms,
-                        serde_json::to_string_pretty(&resp).unwrap_or_default(),
-                    );
-                    set_seed_result.set(Some(summary));
+            set_seed_entities.set(Vec::new());
+            set_seed_phase.set(0);
+
+            // Try the new seed/start endpoint first
+            let body = serde_json::json!({ "text": text });
+            match api.post_text("/ingest/seed/start", &body).await {
+                Ok(resp_text) => {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp_text) {
+                        let session_id = json.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let aoi = json.get("area_of_interest").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+                        // Parse entities into reactive list
+                        let mut ents = Vec::new();
+                        if let Some(arr) = json.get("entities").and_then(|v| v.as_array()) {
+                            for e in arr {
+                                let label = e.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let etype = e.get("entity_type").and_then(|v| v.as_str()).unwrap_or("entity").to_string();
+                                let conf = e.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                                if !label.is_empty() {
+                                    ents.push((label, etype, conf, false));
+                                }
+                            }
+                        }
+                        set_seed_entities.set(ents);
+                        set_seed_session_id.set(session_id);
+                        set_seed_aoi.set(aoi.clone());
+                        set_seed_phase.set(1);
+
+                        // Auto-trigger enrichment (confirm AoI and start entity linking)
+                        let confirm_body = serde_json::json!({
+                            "session_id": json.get("session_id").and_then(|v| v.as_str()).unwrap_or(""),
+                            "area_of_interest": aoi
+                        });
+                        let _ = api.post_text("/ingest/seed/confirm-aoi", &confirm_body).await;
+                    }
                 }
-                Err(e) => {
-                    set_seed_result.set(Some(format!("Analysis failed: {e}")));
+                Err(_) => {
+                    // Fallback to old analyze endpoint
+                    let body = AnalyzeRequest { text };
+                    match api.post::<_, AnalyzeResponse>("/ingest/analyze", &body).await {
+                        Ok(resp) => {
+                            let ents: Vec<(String, String, f32, bool)> = resp.entities.iter()
+                                .map(|e| (e.text.clone(), e.entity_type.clone(), e.confidence, false))
+                                .collect();
+                            set_seed_entities.set(ents);
+                            set_seed_phase.set(1);
+                        }
+                        Err(e) => {
+                            set_seed_result.set(Some(format!("Analysis failed: {e}")));
+                        }
+                    }
                 }
             }
             set_analyzing.set(false);
         }
     });
 
-    // Ingest seed text
+    // Ingest seed text — commit via seed session or fall back to regular ingest
     let api_ingest = api.clone();
     let do_ingest = Action::new_local(move |_: &()| {
         let api = api_ingest.clone();
         let text = seed_text.get_untracked();
+        let session = seed_session_id.get_untracked();
         async move {
             if text.trim().is_empty() { return; }
             set_analyzing.set(true);
+
+            // Use regular ingest — the confirm-aoi already triggered enrichment
+            // which writes directly to the graph. We ingest the seed text to ensure
+            // all NER entities are stored with proper provenance.
             let body = IngestRequest {
                 items: vec![IngestItem { content: text, source_url: None }],
-                source: Some("onboarding".into()),
+                source: Some("seed-enrichment".into()),
                 skip: None,
             };
             match api.post::<_, IngestResponse>("/ingest", &body).await {
                 Ok(resp) => {
                     set_seed_result.set(Some(format!(
-                        "Seeded! {} facts, {} relations ({}ms). Advancing to summary...",
+                        "Seeded! {} facts, {} relations ({}ms)",
                         resp.facts_stored, resp.relations_created, resp.duration_ms,
                     )));
-                    // Auto-advance to summary step after successful seed
+                    // Clean up seed session if we had one
+                    if !session.is_empty() {
+                        let _ = api.post_text("/ingest/seed/commit", &serde_json::json!({ "session_id": session })).await;
+                    }
                     set_step.set(TOTAL_STEPS);
                 }
                 Err(e) => {
@@ -569,6 +705,10 @@ pub fn OnboardingWizard(
         async move {
             let _ = api.post_text("/config/wizard-complete", &serde_json::json!({})).await;
             on_complete.run(());
+            // Force page reload so dashboard stats refresh
+            if let Some(window) = web_sys::window() {
+                let _ = window.location().reload();
+            }
         }
     });
 
@@ -576,7 +716,7 @@ pub fn OnboardingWizard(
     let go_next = move |_| {
         let current = step.get_untracked();
         // For steps that need saving, dispatch save and advance on success
-        if matches!(current, STEP_EMBEDDER | STEP_NER | STEP_NLI | STEP_LLM | STEP_QUANTIZATION | STEP_KB_SOURCES) {
+        if matches!(current, STEP_EMBEDDER | STEP_NER | STEP_NLI | STEP_LLM | STEP_QUANTIZATION | STEP_KB_SOURCES | STEP_WEB_SEARCH) {
             save_step_config.dispatch(current);
         } else {
             set_step.set((current + 1).min(TOTAL_STEPS));
@@ -1021,7 +1161,8 @@ pub fn OnboardingWizard(
                         STEP_LLM => view! {
                             <div class="wizard-step">
                                 <h2><i class="fa-solid fa-comments"></i>" Language Model"</h2>
-                                <p class="wizard-desc">"A language model gives engram conversational intelligence \u{2014} ask questions, get reasoning, run what-if scenarios. Not required for core knowledge storage and search."</p>
+                                <p class="wizard-desc">"A language model is required for area-of-interest detection, entity disambiguation, and intelligent seed enrichment."</p>
+                                <p class="wizard-required"><i class="fa-solid fa-asterisk"></i>" Required \u{2014} LLM powers the seed enrichment pipeline."</p>
                                 <div class="wizard-cards">
                                     {LLM_PRESETS.iter().map(|p| {
                                         let id = p.id.to_string();
@@ -1125,9 +1266,7 @@ pub fn OnboardingWizard(
                                         }
                                     })
                                 }}
-                                <button class="btn btn-secondary mt-1" on:click=move |_| { set_llm_choice.set(String::new()); }>
-                                    <i class="fa-solid fa-forward"></i>" Skip LLM for now"
-                                </button>
+                                // LLM is mandatory — no skip button
                             </div>
                         }.into_any(),
 
@@ -1210,48 +1349,295 @@ pub fn OnboardingWizard(
                             </div>
                         }.into_any(),
 
+                        STEP_WEB_SEARCH => view! {
+                            <div class="wizard-step">
+                                <h2><i class="fa-solid fa-magnifying-glass"></i>" Web Search"</h2>
+                                <p class="wizard-desc">"Configure a web search provider for enriching seed entities with contextual information from the web."</p>
+                                <div class="wizard-cards">
+                                    <div
+                                        class=move || if web_search_provider.get() == "duckduckgo" { "wizard-card wizard-card-selected" } else { "wizard-card" }
+                                        on:click=move |_| set_web_search_provider.set("duckduckgo".into())
+                                    >
+                                        <h4>"DuckDuckGo (Default)"</h4>
+                                        <div class="wizard-card-grid">
+                                            <span class="wc-label">"Auth"</span><span>"None needed"</span>
+                                            <span class="wc-label">"Privacy"</span><span>"No tracking"</span>
+                                            <span class="wc-label">"Cost"</span><span>"Free"</span>
+                                        </div>
+                                    </div>
+                                    <div
+                                        class=move || if web_search_provider.get() == "brave" { "wizard-card wizard-card-selected" } else { "wizard-card" }
+                                        on:click=move |_| set_web_search_provider.set("brave".into())
+                                    >
+                                        <h4>"Brave Search"</h4>
+                                        <div class="wizard-card-grid">
+                                            <span class="wc-label">"Auth"</span><span>"API key required"</span>
+                                            <span class="wc-label">"Quality"</span><span>"High, independent index"</span>
+                                            <span class="wc-label">"Cost"</span><span>"Free tier: 2000/month"</span>
+                                        </div>
+                                    </div>
+                                    <div
+                                        class=move || if web_search_provider.get() == "searxng" { "wizard-card wizard-card-selected" } else { "wizard-card" }
+                                        on:click=move |_| set_web_search_provider.set("searxng".into())
+                                    >
+                                        <h4>"SearXNG (Self-hosted)"</h4>
+                                        <div class="wizard-card-grid">
+                                            <span class="wc-label">"Auth"</span><span>"Self-hosted URL"</span>
+                                            <span class="wc-label">"Privacy"</span><span>"Full control"</span>
+                                            <span class="wc-label">"Cost"</span><span>"Free (self-hosted)"</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                // Brave API key field
+                                {move || (web_search_provider.get() == "brave").then(|| view! {
+                                    <div class="form-group mt-1">
+                                        <label><i class="fa-solid fa-key"></i>" Brave API Key"</label>
+                                        <input type="password" class="form-control" placeholder="BSA..."
+                                            prop:value=web_search_api_key
+                                            on:input=move |ev| set_web_search_api_key.set(event_target_value(&ev))
+                                        />
+                                    </div>
+                                })}
+                                // SearXNG URL field
+                                {move || (web_search_provider.get() == "searxng").then(|| view! {
+                                    <div class="form-group mt-1">
+                                        <label><i class="fa-solid fa-link"></i>" SearXNG URL"</label>
+                                        <input type="text" class="form-control" placeholder="http://localhost:8080/search"
+                                            prop:value=web_search_url
+                                            on:input=move |ev| set_web_search_url.set(event_target_value(&ev))
+                                        />
+                                    </div>
+                                })}
+                                // Brave API key hint
+                                {move || (web_search_provider.get() == "brave" && web_search_api_key.get().is_empty()).then(|| view! {
+                                    <p class="text-secondary" style="font-size: 0.85rem; margin-top: 0.5rem;">
+                                        <i class="fa-solid fa-info-circle"></i>" Get a free API key at search.brave.com/api"
+                                    </p>
+                                })}
+                                // SearXNG URL hint
+                                {move || (web_search_provider.get() == "searxng" && web_search_url.get().is_empty()).then(|| view! {
+                                    <p class="text-secondary" style="font-size: 0.85rem; margin-top: 0.5rem;">
+                                        <i class="fa-solid fa-info-circle"></i>" Enter your SearXNG instance URL (e.g. http://192.168.1.100:8080/search)"
+                                    </p>
+                                })}
+                                // Test connection button (for Brave and SearXNG)
+                                {move || (web_search_provider.get() != "duckduckgo").then(|| view! {
+                                    <div class="flex gap-sm mt-1" style="align-items: center;">
+                                        <button class="btn btn-sm btn-secondary"
+                                            disabled=move || web_search_testing.get()
+                                            on:click=move |_| { do_web_search_test.dispatch(()); }
+                                        >
+                                            {move || if web_search_testing.get() {
+                                                view! { <span class="spinner"></span>" Testing..." }.into_any()
+                                            } else {
+                                                view! { <><i class="fa-solid fa-plug"></i>" Test Connection"</> }.into_any()
+                                            }}
+                                        </button>
+                                        {move || web_search_test_result.get().map(|r| {
+                                            let is_ok = !r.starts_with("FAIL");
+                                            let cls = if is_ok { "text-success" } else { "text-danger" };
+                                            let icon = if is_ok { "fa-solid fa-circle-check" } else { "fa-solid fa-circle-xmark" };
+                                            view! {
+                                                <span class=cls style="font-size: 0.85rem;">
+                                                    <i class=icon></i>" "{r}
+                                                </span>
+                                            }
+                                        })}
+                                    </div>
+                                })}
+                            </div>
+                        }.into_any(),
+
                         STEP_SEED => view! {
                             <div class="wizard-step">
                                 <h2><i class="fa-solid fa-seedling"></i>" Seed Your Knowledge Graph"</h2>
-                                <p class="wizard-desc">"Describe your area of interest in a few sentences. Be specific \u{2014} mention names, places, organizations, events. engram will extract every entity, look them up in your configured knowledge sources, and build an initial knowledge graph with verified facts and relationships."</p>
+                                <p class="wizard-desc">"Describe your area of interest in a few sentences. Be specific \u{2014} mention names, places, organizations, events. engram will detect your area of interest, extract entities, link them to knowledge bases, and discover connections."</p>
+                                <div class="wizard-info-box" style="font-size: 0.85rem; padding: 8px 12px; margin-bottom: 0.75rem;">
+                                    <p style="margin: 0 0 4px 0;"><i class="fa-solid fa-circle-info"></i><strong>" This wizard seeds world knowledge "</strong>"(people, places, events, organizations). For other knowledge types, use the dedicated ingest tools after setup:"</p>
+                                    <ul style="margin: 4px 0 0 16px; padding: 0; list-style: none;">
+                                        <li><i class="fa-solid fa-code" style="width: 16px;"></i>" Codebases \u{2014} AST parser for module/class/function graphs"</li>
+                                        <li><i class="fa-solid fa-file-lines" style="width: 16px;"></i>" Documents \u{2014} PDF/Markdown import with NER extraction"</li>
+                                        <li><i class="fa-solid fa-rss" style="width: 16px;"></i>" Live feeds \u{2014} RSS, webhooks, streaming ingest"</li>
+                                        <li><i class="fa-solid fa-network-wired" style="width: 16px;"></i>" Internal systems \u{2014} structured data via API or batch import"</li>
+                                    </ul>
+                                </div>
 
-                                <div class="wizard-seed-examples">
-                                    <span class="text-secondary">"Templates: "</span>
-                                    {SEED_EXAMPLES.iter().map(|(label, text)| {
-                                        let t = text.to_string();
-                                        view! {
-                                            <button class="btn btn-sm btn-secondary" on:click=move |_| set_seed_text.set(t.clone())>
-                                                {*label}
+                                // Phase 0: Input + templates
+                                {move || (seed_phase.get() == 0).then(|| view! {
+                                    <div>
+                                        <div class="wizard-seed-examples">
+                                            <span class="text-secondary">"Templates: "</span>
+                                            {SEED_EXAMPLES.iter().map(|(label, text)| {
+                                                let t = text.to_string();
+                                                view! {
+                                                    <button class="btn btn-sm btn-secondary" on:click=move |_| set_seed_text.set(t.clone())>
+                                                        {*label}
+                                                    </button>
+                                                }
+                                            }).collect::<Vec<_>>()}
+                                        </div>
+
+                                        <textarea
+                                            class="wizard-seed-input"
+                                            rows="6"
+                                            placeholder="Describe your domain of interest..."
+                                            prop:value=seed_text
+                                            on:input=move |ev| set_seed_text.set(event_target_value(&ev))
+                                        ></textarea>
+
+                                        <div class="flex gap-sm mt-1">
+                                            <button class="btn btn-primary" on:click=move |_| { do_analyze.dispatch(()); }
+                                                disabled=move || analyzing.get() || seed_text.get().trim().is_empty()>
+                                                {move || if analyzing.get() {
+                                                    view! { <span class="spinner"></span>" Detecting area of interest..." }.into_any()
+                                                } else {
+                                                    view! { <><i class="fa-solid fa-magnifying-glass-chart"></i>" Analyze"</> }.into_any()
+                                                }}
                                             </button>
-                                        }
-                                    }).collect::<Vec<_>>()}
-                                </div>
+                                        </div>
+                                    </div>
+                                })}
 
-                                <textarea
-                                    class="wizard-seed-input"
-                                    rows="6"
-                                    placeholder="Describe your domain of interest..."
-                                    prop:value=seed_text
-                                    on:input=move |ev| set_seed_text.set(event_target_value(&ev))
-                                ></textarea>
+                                // Phase 1: AoI + interactive entity table
+                                {move || (seed_phase.get() >= 1).then(|| {
+                                    let entities = seed_entities.get();
+                                    let active_count = entities.iter().filter(|(_, _, _, skipped)| !skipped).count();
+                                    view! {
+                                        <div class="wizard-info-box mt-1">
+                                            <h4><i class="fa-solid fa-crosshairs"></i>" Area of Interest"</h4>
+                                            <div class="flex gap-sm" style="align-items: center;">
+                                                <input type="text" class="form-control" style="flex: 1;"
+                                                    prop:value=seed_aoi
+                                                    on:input=move |ev| set_seed_aoi.set(event_target_value(&ev))
+                                                />
+                                            </div>
+                                        </div>
 
-                                <div class="flex gap-sm mt-1">
-                                    <button class="btn btn-secondary" on:click=move |_| { do_analyze.dispatch(()); }
-                                        disabled=move || analyzing.get() || seed_text.get().trim().is_empty()>
-                                        {move || if analyzing.get() {
-                                            view! { <span class="spinner"></span>" Analyzing..." }.into_any()
-                                        } else {
-                                            view! { <><i class="fa-solid fa-magnifying-glass-chart"></i>" Analyze"</> }.into_any()
-                                        }}
-                                    </button>
-                                    <button class="btn btn-primary" on:click=move |_| { do_ingest.dispatch(()); }
-                                        disabled=move || analyzing.get() || seed_text.get().trim().is_empty()>
-                                        <i class="fa-solid fa-seedling"></i>" Seed Knowledge Graph"
-                                    </button>
-                                </div>
+                                        <div class="mt-1">
+                                            <h4><i class="fa-solid fa-tags"></i>{format!(" Entities ({} active, {} total)", active_count, entities.len())}</h4>
+                                            <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem;">
+                                                <thead>
+                                                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.1);">
+                                                        <th style="text-align: left; padding: 6px;">"Entity"</th>
+                                                        <th style="text-align: left; padding: 6px;">"Type"</th>
+                                                        <th style="text-align: right; padding: 6px;">"Conf."</th>
+                                                        <th style="text-align: center; padding: 6px; width: 80px;">"Action"</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {entities.into_iter().enumerate().map(|(idx, (label, etype, conf, skipped))| {
+                                                        let type_icon = match etype.as_str() {
+                                                            "person" => "fa-solid fa-user",
+                                                            "organization" => "fa-solid fa-building",
+                                                            "location" => "fa-solid fa-location-dot",
+                                                            "event" => "fa-solid fa-calendar",
+                                                            "product" => "fa-solid fa-cube",
+                                                            _ => "fa-solid fa-tag",
+                                                        };
+                                                        let row_style = if skipped {
+                                                            "border-bottom: 1px solid rgba(255,255,255,0.05); opacity: 0.4; text-decoration: line-through;"
+                                                        } else {
+                                                            "border-bottom: 1px solid rgba(255,255,255,0.05);"
+                                                        };
+                                                        view! {
+                                                            <tr style=row_style>
+                                                                <td style="padding: 5px 6px;"><strong>{label}</strong></td>
+                                                                <td style="padding: 5px 6px;"><i class={type_icon}></i>" "{etype}</td>
+                                                                <td style="padding: 5px 6px; text-align: right;">{format!("{:.0}%", conf * 100.0)}</td>
+                                                                <td style="padding: 5px 6px; text-align: center;">
+                                                                    <button
+                                                                        class=move || if skipped { "btn btn-xs btn-secondary" } else { "btn btn-xs btn-primary" }
+                                                                        style="font-size: 0.75rem; padding: 2px 8px;"
+                                                                        on:click=move |_| {
+                                                                            let mut ents = seed_entities.get_untracked();
+                                                                            if idx < ents.len() {
+                                                                                ents[idx].3 = !ents[idx].3;
+                                                                                set_seed_entities.set(ents);
+                                                                            }
+                                                                        }
+                                                                    >
+                                                                        {if skipped { "Restore" } else { "Skip" }}
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        }
+                                                    }).collect::<Vec<_>>()}
+                                                </tbody>
+                                            </table>
 
-                                {move || seed_result.get().map(|r| view! {
-                                    <pre class="wizard-seed-result">{r}</pre>
+                                            // Add entity row
+                                            <div class="flex gap-sm mt-1" style="align-items: center;">
+                                                <input type="text" class="form-control" style="flex: 1;"
+                                                    placeholder="Add entity..."
+                                                    prop:value=new_entity_label
+                                                    on:input=move |ev| set_new_entity_label.set(event_target_value(&ev))
+                                                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                                        if ev.key() == "Enter" {
+                                                            let label = new_entity_label.get_untracked();
+                                                            if !label.trim().is_empty() {
+                                                                let etype = new_entity_type.get_untracked();
+                                                                let mut ents = seed_entities.get_untracked();
+                                                                ents.push((label.trim().to_string(), etype, 1.0, false));
+                                                                set_seed_entities.set(ents);
+                                                                set_new_entity_label.set(String::new());
+                                                            }
+                                                        }
+                                                    }
+                                                />
+                                                <select class="form-control" style="width: 130px;"
+                                                    prop:value=new_entity_type
+                                                    on:change=move |ev| set_new_entity_type.set(event_target_value(&ev))
+                                                >
+                                                    <option value="entity">"entity"</option>
+                                                    <option value="person">"person"</option>
+                                                    <option value="organization">"org"</option>
+                                                    <option value="location">"location"</option>
+                                                    <option value="event">"event"</option>
+                                                    <option value="product">"product"</option>
+                                                </select>
+                                                <button class="btn btn-sm btn-secondary"
+                                                    on:click=move |_| {
+                                                        let label = new_entity_label.get_untracked();
+                                                        if !label.trim().is_empty() {
+                                                            let etype = new_entity_type.get_untracked();
+                                                            let mut ents = seed_entities.get_untracked();
+                                                            ents.push((label.trim().to_string(), etype, 1.0, false));
+                                                            set_seed_entities.set(ents);
+                                                            set_new_entity_label.set(String::new());
+                                                        }
+                                                    }
+                                                >
+                                                    <i class="fa-solid fa-plus"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    }
+                                })}
+
+                                // Enrichment status
+                                {move || (seed_phase.get() >= 1 && analyzing.get()).then(|| view! {
+                                    <div class="wizard-info-box mt-1">
+                                        <p><span class="spinner"></span>" Enriching entities via Wikipedia + SPARQL..."</p>
+                                    </div>
+                                })}
+
+                                // Commit / Start Over buttons
+                                {move || (seed_phase.get() >= 1 && !analyzing.get()).then(|| view! {
+                                    <div class="flex gap-sm mt-1">
+                                        <button class="btn btn-primary" on:click=move |_| { do_ingest.dispatch(()); }
+                                            disabled=move || analyzing.get()>
+                                            <i class="fa-solid fa-seedling"></i>" Commit to Graph"
+                                        </button>
+                                        <button class="btn btn-secondary" on:click=move |_| {
+                                            set_seed_phase.set(0);
+                                            set_seed_result.set(None);
+                                            set_seed_aoi.set(String::new());
+                                            set_seed_session_id.set(String::new());
+                                            set_seed_entities.set(Vec::new());
+                                        }>
+                                            <i class="fa-solid fa-rotate-left"></i>" Start Over"
+                                        </button>
+                                    </div>
                                 })}
 
                                 <button class="btn btn-secondary mt-1" on:click=move |_| set_step.set(STEP_READY)>

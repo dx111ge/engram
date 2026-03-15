@@ -673,6 +673,7 @@ impl Pipeline {
                 .first()
                 .map(|e| e.language.clone())
                 .unwrap_or_else(|| "en".into()),
+            area_of_interest: None,
         };
 
         let mut all_relations = Vec::new();

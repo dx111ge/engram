@@ -135,6 +135,7 @@ mod tests {
                 },
             ],
             language: "en".into(),
+            area_of_interest: None,
         }
     }
 
@@ -187,6 +188,7 @@ mod tests {
                 resolved_to: None,
             }],
             language: "en".into(),
+            area_of_interest: None,
         };
         assert!(chain.extract_relations(&input).is_empty());
     }

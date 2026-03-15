@@ -809,6 +809,38 @@ pub struct ToolCallFunction {
     pub arguments: String,
 }
 
+// ── Seed Enrichment ──
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SeedStartRequest {
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SeedStartResponse {
+    pub session_id: String,
+    #[serde(default)]
+    pub entities: Vec<SeedEntityItem>,
+    #[serde(default)]
+    pub area_of_interest: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SeedEntityItem {
+    pub label: String,
+    #[serde(default)]
+    pub entity_type: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SeedCommitResponse {
+    pub facts_stored: u32,
+    pub relations_created: u32,
+    pub duration_ms: u64,
+}
+
 // ── Delete ──
 
 #[derive(Clone, Debug, Deserialize)]

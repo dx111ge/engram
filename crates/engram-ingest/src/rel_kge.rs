@@ -750,6 +750,7 @@ mod tests {
                 },
             ],
             language: "en".into(),
+            area_of_interest: None,
         };
 
         assert!(extractor.extract_relations(&input).is_empty());

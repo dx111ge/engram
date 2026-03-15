@@ -40,6 +40,18 @@ pub struct KbRelationExtractor {
     graph: Arc<RwLock<Graph>>,
     /// Stats from the last extraction run.
     last_stats: Mutex<Option<KbStats>>,
+    /// LLM endpoint for area-of-interest detection.
+    llm_endpoint: Option<String>,
+    /// LLM model name.
+    llm_model: Option<String>,
+    /// Event bus for streaming seed enrichment events via SSE.
+    event_bus: Option<Arc<engram_core::events::EventBus>>,
+    /// Web search provider: "searxng", "brave", "duckduckgo"
+    web_search_provider: Option<String>,
+    /// Web search API key (for Brave Search)
+    web_search_api_key: Option<String>,
+    /// Web search URL (for SearXNG self-hosted)
+    web_search_url: Option<String>,
 }
 
 impl KbRelationExtractor {
@@ -54,7 +66,118 @@ impl KbRelationExtractor {
             client,
             graph,
             last_stats: Mutex::new(None),
+            llm_endpoint: None,
+            llm_model: None,
+            event_bus: None,
+            web_search_provider: None,
+            web_search_api_key: None,
+            web_search_url: None,
         }
+    }
+
+    /// Create with LLM, event bus, and web search configuration (for interactive seed flow).
+    pub fn with_config(
+        endpoints: Vec<KbEndpoint>,
+        graph: Arc<RwLock<Graph>>,
+        llm_endpoint: Option<String>,
+        llm_model: Option<String>,
+        event_bus: Option<Arc<engram_core::events::EventBus>>,
+        web_search_provider: Option<String>,
+        web_search_api_key: Option<String>,
+        web_search_url: Option<String>,
+    ) -> Self {
+        let mut ext = Self::new(endpoints, graph);
+        ext.llm_endpoint = llm_endpoint;
+        ext.llm_model = llm_model;
+        ext.event_bus = event_bus;
+        ext.web_search_provider = web_search_provider;
+        ext.web_search_api_key = web_search_api_key;
+        ext.web_search_url = web_search_url;
+        ext
+    }
+
+    /// Search the web using the configured search provider.
+    /// Returns a list of (title, snippet) pairs from search results.
+    fn web_search(&self, query: &str) -> Vec<(String, String)> {
+        let provider = self.web_search_provider.as_deref().unwrap_or("duckduckgo");
+        let mut results = Vec::new();
+
+        match provider {
+            "searxng" => {
+                let base = self.web_search_url.as_deref()
+                    .unwrap_or("http://localhost:8090");
+                let url = format!("{}/search", base);
+                if let Ok(resp) = self.client.get(&url)
+                    .query(&[("q", query), ("format", "json"), ("categories", "general")])
+                    .header("Accept", "application/json")
+                    .send()
+                {
+                    if let Ok(data) = resp.json::<serde_json::Value>() {
+                        if let Some(arr) = data.get("results").and_then(|r| r.as_array()) {
+                            for r in arr.iter().take(10) {
+                                let title = r.get("title").and_then(|t| t.as_str()).unwrap_or_default();
+                                let snippet = r.get("content").and_then(|c| c.as_str()).unwrap_or_default();
+                                if !title.is_empty() || !snippet.is_empty() {
+                                    results.push((title.to_string(), snippet.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "brave" => {
+                let api_key = self.web_search_api_key.as_deref().unwrap_or_default();
+                let url = "https://api.search.brave.com/res/v1/web/search";
+                if let Ok(resp) = self.client.get(url)
+                    .query(&[("q", query)])
+                    .header("Accept", "application/json")
+                    .header("X-Subscription-Token", api_key)
+                    .send()
+                {
+                    if let Ok(data) = resp.json::<serde_json::Value>() {
+                        if let Some(arr) = data.pointer("/web/results").and_then(|r| r.as_array()) {
+                            for r in arr.iter().take(10) {
+                                let title = r.get("title").and_then(|t| t.as_str()).unwrap_or_default();
+                                let snippet = r.get("description").and_then(|d| d.as_str()).unwrap_or_default();
+                                if !title.is_empty() || !snippet.is_empty() {
+                                    results.push((title.to_string(), snippet.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // DuckDuckGo Instant Answer API (default)
+                if let Ok(resp) = self.client.get("https://api.duckduckgo.com/")
+                    .query(&[("q", query), ("format", "json"), ("no_html", "1"), ("skip_disambig", "1")])
+                    .header("User-Agent", "engram/1.1")
+                    .send()
+                {
+                    if let Ok(data) = resp.json::<serde_json::Value>() {
+                        // Abstract
+                        if let Some(abs) = data.get("AbstractText").and_then(|a| a.as_str()) {
+                            if !abs.is_empty() {
+                                let heading = data.get("Heading").and_then(|h| h.as_str()).unwrap_or_default();
+                                results.push((heading.to_string(), abs.to_string()));
+                            }
+                        }
+                        // Related topics
+                        if let Some(topics) = data.get("RelatedTopics").and_then(|r| r.as_array()) {
+                            for t in topics.iter().take(5) {
+                                let text = t.get("Text").and_then(|x| x.as_str()).unwrap_or_default();
+                                if !text.is_empty() {
+                                    let title = text.split(" - ").next().unwrap_or(text);
+                                    results.push((title.to_string(), text.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        results
     }
 
     /// Execute a SPARQL query against an endpoint, returning parsed JSON results.
@@ -196,6 +319,241 @@ impl KbRelationExtractor {
         }
 
         None
+    }
+
+    /// Detect area of interest from seed text using LLM or heuristic fallback.
+    pub fn detect_area_of_interest(&self, text: &str, entities: &[String]) -> String {
+        // Try LLM first
+        if let (Some(endpoint), Some(model)) = (&self.llm_endpoint, &self.llm_model) {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [{
+                    "role": "user",
+                    "content": format!(
+                        "What is the primary area of interest or domain topic in this text? Reply with ONLY a short topic phrase (2-6 words), nothing else.\n\nText: {text}"
+                    )
+                }],
+                "temperature": 0.1,
+                "max_tokens": 50
+            });
+
+            if let Ok(resp) = self.client
+                .post(endpoint)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(15))
+                .send()
+            {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    if let Some(content) = json
+                        .pointer("/choices/0/message/content")
+                        .and_then(|v| v.as_str())
+                    {
+                        let topic = content.trim().trim_matches('"').trim();
+                        if !topic.is_empty() && topic.len() < 100 {
+                            return topic.to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Heuristic fallback: parse "I track/monitor/analyze/study {topic}"
+        let lower = text.to_lowercase();
+        for prefix in &["i track ", "i monitor ", "i analyze ", "i study ", "i'm researching ", "i'm focused on ", "focused on "] {
+            if let Some(idx) = lower.find(prefix) {
+                let rest = &text[idx + prefix.len()..];
+                let end = rest.find('.').unwrap_or_else(|| rest.len().min(80));
+                let topic = rest[..end].trim();
+                if !topic.is_empty() {
+                    return topic.to_string();
+                }
+            }
+        }
+
+        // Last resort: first 3 entity labels
+        entities.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+    }
+
+    /// Fetch the Wikipedia article extract for the area of interest.
+    /// Returns up to 5000 chars of article text.
+    pub fn fetch_area_of_interest_article(&self, area: &str, lang: &str) -> Option<String> {
+        let wiki_lang = match lang {
+            "de" => "de", "fr" => "fr", "es" => "es", "it" => "it",
+            "pt" => "pt", "nl" => "nl", "ru" => "ru", "zh" => "zh",
+            _ => "en",
+        };
+
+        // Search Wikipedia for the area of interest
+        let resp = self.client
+            .get(&format!("https://{}.wikipedia.org/w/api.php", wiki_lang))
+            .query(&[
+                ("action", "query"),
+                ("list", "search"),
+                ("srsearch", area),
+                ("srlimit", "1"),
+                ("format", "json"),
+            ])
+            .header("User-Agent", "engram/1.1")
+            .send()
+            .ok()?;
+
+        let json: serde_json::Value = resp.json().ok()?;
+        let title = json.pointer("/query/search/0/title")?.as_str()?.to_string();
+
+        // Fetch full article extract
+        let resp2 = self.client
+            .get(&format!("https://{}.wikipedia.org/w/api.php", wiki_lang))
+            .query(&[
+                ("action", "query"),
+                ("titles", &title),
+                ("prop", "extracts"),
+                ("explaintext", "true"),
+                ("exchars", "5000"),
+                ("format", "json"),
+            ])
+            .header("User-Agent", "engram/1.1")
+            .send()
+            .ok()?;
+
+        let json2: serde_json::Value = resp2.json().ok()?;
+        let pages = json2.pointer("/query/pages")?.as_object()?;
+
+        for page in pages.values() {
+            if let Some(extract) = page.get("extract").and_then(|v| v.as_str()) {
+                if !extract.is_empty() && extract.len() > 50 {
+                    return Some(extract.to_string());
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Find co-occurrences of seed entities within paragraphs of an article.
+    /// Returns pairs of entity indices that appear in the same paragraph.
+    pub fn find_cooccurrences(&self, article: &str, entity_labels: &[String]) -> Vec<(usize, usize)> {
+        let paragraphs: Vec<&str> = article.split("\n\n").collect();
+        let mut pairs = std::collections::HashSet::new();
+
+        for paragraph in &paragraphs {
+            let para_lower = paragraph.to_lowercase();
+            let mut found: Vec<usize> = Vec::new();
+
+            for (idx, label) in entity_labels.iter().enumerate() {
+                if para_lower.contains(&label.to_lowercase()) {
+                    found.push(idx);
+                }
+            }
+
+            // Generate all pairs from entities found in this paragraph
+            for i in 0..found.len() {
+                for j in (i + 1)..found.len() {
+                    let a = found[i].min(found[j]);
+                    let b = found[i].max(found[j]);
+                    pairs.insert((a, b));
+                }
+            }
+        }
+
+        pairs.into_iter().collect()
+    }
+
+    /// For entities not mentioned in the main AoI article, search Wikipedia
+    /// for "{entity} {area}" and check for co-occurrences with other seed entities.
+    pub fn search_unmentioned_entities(
+        &self,
+        unmentioned: &[usize],
+        all_labels: &[String],
+        area: &str,
+        lang: &str,
+    ) -> Vec<(usize, usize)> {
+        let wiki_lang = match lang {
+            "de" => "de", "fr" => "fr", "es" => "es", "it" => "it",
+            "pt" => "pt", "nl" => "nl", "ru" => "ru", "zh" => "zh",
+            _ => "en",
+        };
+
+        let mut pairs = Vec::new();
+
+        for &entity_idx in unmentioned {
+            let search_term = format!("{} {}", all_labels[entity_idx], area);
+
+            // Fetch article about this entity in context
+            let resp = match self.client
+                .get(&format!("https://{}.wikipedia.org/w/api.php", wiki_lang))
+                .query(&[
+                    ("action", "query"),
+                    ("list", "search"),
+                    ("srsearch", &search_term),
+                    ("srlimit", "1"),
+                    ("format", "json"),
+                ])
+                .header("User-Agent", "engram/1.1")
+                .send()
+            {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            let json: serde_json::Value = match resp.json() {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+
+            let title = match json.pointer("/query/search/0/title").and_then(|v| v.as_str()) {
+                Some(t) => t.to_string(),
+                None => continue,
+            };
+
+            // Fetch article extract
+            let resp2 = match self.client
+                .get(&format!("https://{}.wikipedia.org/w/api.php", wiki_lang))
+                .query(&[
+                    ("action", "query"),
+                    ("titles", &title),
+                    ("prop", "extracts"),
+                    ("explaintext", "true"),
+                    ("exchars", "3000"),
+                    ("format", "json"),
+                ])
+                .header("User-Agent", "engram/1.1")
+                .send()
+            {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            let json2: serde_json::Value = match resp2.json() {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+
+            if let Some(pages) = json2.pointer("/query/pages").and_then(|v| v.as_object()) {
+                for page in pages.values() {
+                    if let Some(extract) = page.get("extract").and_then(|v| v.as_str()) {
+                        let extract_lower = extract.to_lowercase();
+                        // Check which OTHER seed entities appear in this article
+                        for (other_idx, other_label) in all_labels.iter().enumerate() {
+                            if other_idx == entity_idx { continue; }
+                            if extract_lower.contains(&other_label.to_lowercase()) {
+                                let a = entity_idx.min(other_idx);
+                                let b = entity_idx.max(other_idx);
+                                pairs.push((a, b));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        pairs
+    }
+
+    /// Publish a seed enrichment event if event_bus is configured.
+    fn emit(&self, event: engram_core::events::GraphEvent) {
+        if let Some(ref bus) = self.event_bus {
+            bus.publish(event);
+        }
     }
 
     /// Batch relation discovery: find ALL direct connections between a set of QIDs
@@ -425,51 +783,6 @@ impl KbRelationExtractor {
         results
     }
 
-    /// Look up relations between two KB entity IDs.
-    fn relation_lookup(
-        &self,
-        endpoint: &KbEndpoint,
-        id_a: &str,
-        id_b: &str,
-        language: &str,
-    ) -> Vec<(String, String)> {
-        let query = if let Some(ref template) = endpoint.relation_query_template {
-            template
-                .replace("{id_a}", &sparql_escape(id_a))
-                .replace("{id_b}", &sparql_escape(id_b))
-                .replace("{language}", language)
-        } else {
-            // Default Wikidata relation lookup
-            // Extract just the QID from full URIs for wd: prefix
-            let qa = extract_qid(id_a);
-            let qb = extract_qid(id_b);
-            format!(
-                r#"SELECT ?prop ?propLabel WHERE {{
-                    {{ wd:{qa} ?p wd:{qb} . ?prop wikibase:directClaim ?p . }}
-                    UNION
-                    {{ wd:{qb} ?p wd:{qa} . ?prop wikibase:directClaim ?p . }}
-                    SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,{lang}" }}
-                }}"#,
-                qa = qa,
-                qb = qb,
-                lang = language,
-            )
-        };
-
-        match self.sparql_query(endpoint, &query) {
-            Ok(json) => extract_relations_from_sparql(&json),
-            Err(e) => {
-                tracing::debug!(
-                    endpoint = %endpoint.name,
-                    id_a = id_a,
-                    id_b = id_b,
-                    error = %e,
-                    "relation lookup failed"
-                );
-                Vec::new()
-            }
-        }
-    }
 }
 
 impl RelationExtractor for KbRelationExtractor {
@@ -481,6 +794,19 @@ impl RelationExtractor for KbRelationExtractor {
         let start = Instant::now();
         let mut all_relations = Vec::new();
         let mut total_stats = KbStats::default();
+        let entity_labels: Vec<String> = input.entities.iter().map(|e| e.text.clone()).collect();
+        let session_id: Arc<str> = Arc::from("pipeline");
+
+        // ─── Step 0: Detect area of interest ───
+        let area_of_interest = input.area_of_interest.clone().unwrap_or_else(|| {
+            self.detect_area_of_interest(&input.text, &entity_labels)
+        });
+
+        tracing::info!(area = %area_of_interest, "Step 0: area of interest detected");
+        self.emit(engram_core::events::GraphEvent::SeedAoiDetected {
+            session_id: session_id.clone(),
+            area_of_interest: Arc::from(area_of_interest.as_str()),
+        });
 
         for endpoint in &self.endpoints {
             let mut budget = endpoint.max_lookups;
@@ -490,8 +816,7 @@ impl RelationExtractor for KbRelationExtractor {
                 ..Default::default()
             };
 
-            // Phase 1: Entity linking — try to find KB IDs for each entity
-            // First check graph properties for cached IDs
+            // ─── Step 1: Entity linking via Wikipedia ───
             let prop_key = format!("kb_id:{}", endpoint.name);
             {
                 let g = self.graph.read().unwrap();
@@ -503,8 +828,6 @@ impl RelationExtractor for KbRelationExtractor {
                 }
             }
 
-            // Query endpoint for entities not yet linked.
-            // Also collects canonical names (Wikipedia page titles) for node renaming.
             let mut canonical_names: HashMap<usize, String> = HashMap::new();
 
             for (idx, entity) in input.entities.iter().enumerate() {
@@ -518,6 +841,15 @@ impl RelationExtractor for KbRelationExtractor {
                         entity_kb_ids.insert(idx, kb_id.clone());
                         canonical_names.insert(idx, canonical.clone());
                         stats.entities_linked += 1;
+
+                        let qid_str = extract_qid(kb_id);
+                        self.emit(engram_core::events::GraphEvent::SeedEntityLinked {
+                            session_id: session_id.clone(),
+                            label: Arc::from(entity.text.as_str()),
+                            canonical: Arc::from(canonical.as_str()),
+                            description: Arc::from(""),
+                            qid: Arc::from(qid_str),
+                        });
                     }
                     None => {
                         stats.entities_not_found += 1;
@@ -525,9 +857,7 @@ impl RelationExtractor for KbRelationExtractor {
                 }
             }
 
-            // Cache KB IDs and canonical names as properties on NER nodes.
-            // ALL edges use NER labels (the node labels that exist in the graph).
-            // Canonical names stored as properties for display/search.
+            // Cache KB IDs and canonical names as graph properties
             {
                 if let Ok(mut g) = self.graph.write() {
                     for (idx, kb_id) in &entity_kb_ids {
@@ -543,12 +873,142 @@ impl RelationExtractor for KbRelationExtractor {
                 }
             }
 
-            // Phase 2: Batch relation discovery (single SPARQL query for ALL entity pairs)
+            self.emit(engram_core::events::GraphEvent::SeedPhaseComplete {
+                session_id: session_id.clone(),
+                phase: 1,
+                entities_processed: stats.entities_linked,
+                relations_found: 0,
+            });
+
+            // ─── Step 2: Area-of-interest article co-occurrence ───
+            // Fetch the AoI article and find which seed entities co-occur in paragraphs
+            let mut cooccurrence_relations = 0u32;
+
+            if let Some(article) = self.fetch_area_of_interest_article(&area_of_interest, &input.language) {
+                let cooccurrences = self.find_cooccurrences(&article, &entity_labels);
+                for (a, b) in &cooccurrences {
+                    all_relations.push(CandidateRelation {
+                        head_idx: *a,
+                        tail_idx: *b,
+                        rel_type: "related_to".to_string(),
+                        confidence: 0.60,
+                        method: ExtractionMethod::KnowledgeBase,
+                    });
+                    cooccurrence_relations += 1;
+
+                    self.emit(engram_core::events::GraphEvent::SeedConnectionFound {
+                        session_id: session_id.clone(),
+                        from: Arc::from(entity_labels[*a].as_str()),
+                        to: Arc::from(entity_labels[*b].as_str()),
+                        rel_type: Arc::from("related_to"),
+                        source: Arc::from("area_of_interest_article"),
+                    });
+                }
+
+                // Step 2b: Search for entities not mentioned in the main article
+                let mentioned: std::collections::HashSet<usize> = cooccurrences.iter()
+                    .flat_map(|(a, b)| vec![*a, *b])
+                    .collect();
+                let unmentioned: Vec<usize> = (0..entity_labels.len())
+                    .filter(|i| !mentioned.contains(i))
+                    .collect();
+
+                if !unmentioned.is_empty() {
+                    let extra_pairs = self.search_unmentioned_entities(
+                        &unmentioned, &entity_labels, &area_of_interest, &input.language,
+                    );
+                    for (a, b) in &extra_pairs {
+                        all_relations.push(CandidateRelation {
+                            head_idx: *a,
+                            tail_idx: *b,
+                            rel_type: "related_to".to_string(),
+                            confidence: 0.55,
+                            method: ExtractionMethod::KnowledgeBase,
+                        });
+                        cooccurrence_relations += 1;
+
+                        self.emit(engram_core::events::GraphEvent::SeedConnectionFound {
+                            session_id: session_id.clone(),
+                            from: Arc::from(entity_labels[*a].as_str()),
+                            to: Arc::from(entity_labels[*b].as_str()),
+                            rel_type: Arc::from("related_to"),
+                            source: Arc::from("entity_context_search"),
+                        });
+                    }
+                }
+            }
+
+            // ─── Step 2c: Web search fallback for still-unconnected entities ───
+            if self.web_search_provider.is_some() {
+                let connected_so_far: std::collections::HashSet<usize> = all_relations.iter()
+                    .flat_map(|r| vec![r.head_idx, r.tail_idx])
+                    .collect();
+                let still_unconnected: Vec<usize> = (0..entity_labels.len())
+                    .filter(|i| !connected_so_far.contains(i))
+                    .collect();
+
+                let threshold = (entity_labels.len() as f32 * 0.30).ceil() as usize;
+                if still_unconnected.len() >= threshold {
+                    tracing::info!(
+                        unconnected = still_unconnected.len(),
+                        total = entity_labels.len(),
+                        "Step 2c: web search fallback for unconnected entities"
+                    );
+
+                    for &uidx in &still_unconnected {
+                        let search_query = format!("{} {}", &entity_labels[uidx], &area_of_interest);
+                        let web_results = self.web_search(&search_query);
+
+                        // Scan snippets for mentions of other seed entities
+                        for (_title, snippet) in &web_results {
+                            let snippet_lower = snippet.to_lowercase();
+                            for (oidx, other_label) in entity_labels.iter().enumerate() {
+                                if oidx == uidx { continue; }
+                                if snippet_lower.contains(&other_label.to_lowercase()) {
+                                    // Avoid duplicate relations
+                                    let already = all_relations.iter().any(|r|
+                                        (r.head_idx == uidx && r.tail_idx == oidx) ||
+                                        (r.head_idx == oidx && r.tail_idx == uidx)
+                                    );
+                                    if !already {
+                                        all_relations.push(CandidateRelation {
+                                            head_idx: uidx,
+                                            tail_idx: oidx,
+                                            rel_type: "related_to".to_string(),
+                                            confidence: 0.50,
+                                            method: ExtractionMethod::KnowledgeBase,
+                                        });
+                                        cooccurrence_relations += 1;
+
+                                        self.emit(engram_core::events::GraphEvent::SeedConnectionFound {
+                                            session_id: session_id.clone(),
+                                            from: Arc::from(entity_labels[uidx].as_str()),
+                                            to: Arc::from(entity_labels[oidx].as_str()),
+                                            rel_type: Arc::from("related_to"),
+                                            source: Arc::from("web_search"),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.emit(engram_core::events::GraphEvent::SeedPhaseComplete {
+                session_id: session_id.clone(),
+                phase: 2,
+                entities_processed: entity_labels.len() as u32,
+                relations_found: cooccurrence_relations,
+            });
+
+            // ─── Step 3: Batch SPARQL + property expansion + shortest path ───
             let qids: Vec<(&str, usize)> = entity_kb_ids.iter()
                 .map(|(idx, qid)| (qid.as_str(), *idx))
                 .collect();
 
             if qids.len() >= 2 {
+                // 3a: Batch direct relation lookup
                 let batch_results = self.batch_relation_lookup(endpoint, &qids, &input.language);
                 for (s_idx, o_idx, rel_type, _rel_uri) in &batch_results {
                     all_relations.push(CandidateRelation {
@@ -559,118 +1019,86 @@ impl RelationExtractor for KbRelationExtractor {
                         method: ExtractionMethod::KnowledgeBase,
                     });
                     stats.relations_found += 1;
+
+                    self.emit(engram_core::events::GraphEvent::SeedSparqlRelation {
+                        session_id: session_id.clone(),
+                        from: Arc::from(entity_labels[*s_idx].as_str()),
+                        to: Arc::from(entity_labels[*o_idx].as_str()),
+                        rel_type: Arc::from(rel_type.as_str()),
+                    });
                 }
 
-                // Phase 3: Pairwise deep lookup for linked pairs with no batch results
-                let connected: std::collections::HashSet<(usize, usize)> = batch_results.iter()
-                    .map(|(s, o, _, _)| (*s.min(o), *s.max(o)))
-                    .collect();
+                // 3b: Property expansion — discover NEW entities
+                {
+                    let expansion = self.property_expansion(endpoint, &qids, &entity_labels, &input.language);
 
-                for i in 0..qids.len() {
-                    for j in (i + 1)..qids.len() {
-                        if budget == 0 { break; }
-                        let (qi, idx_i) = qids[i];
-                        let (qj, idx_j) = qids[j];
-                        let pair = (idx_i.min(idx_j), idx_i.max(idx_j));
-                        if connected.contains(&pair) { continue; }
+                    if !expansion.is_empty() {
+                        let provenance = engram_core::graph::Provenance {
+                            source_type: engram_core::graph::SourceType::Api,
+                            source_id: format!("kb:{}", endpoint.name),
+                        };
 
-                        budget -= 1;
-                        let relations = self.relation_lookup(endpoint, qi, qj, &input.language);
-                        for (rel_uri, rel_label) in &relations {
-                            let rel_type = if rel_label.is_empty() {
-                                uri_to_label(rel_uri)
-                            } else {
-                                rel_label.clone()
-                            };
-                            all_relations.push(CandidateRelation {
-                                head_idx: idx_i,
-                                tail_idx: idx_j,
-                                rel_type,
-                                confidence: 0.75,
-                                method: ExtractionMethod::KnowledgeBase,
-                            });
-                            stats.relations_found += 1;
-                        }
-                    }
-                }
-            }
+                        if let Ok(mut g) = self.graph.write() {
+                            for (from_label, rel_type, to_label) in &expansion {
+                                let _ = g.store_with_confidence(to_label, 0.70, &provenance);
 
-            // Phase 4: Property expansion — discover NEW entities from Wikidata properties.
-            // E.g., Putin → position_held → "President of Russia", HIMARS → manufacturer → "Lockheed Martin"
-            // Creates new nodes directly in the graph and returns relations to them.
-            // Use NER labels for all edges (these are the actual graph node labels)
-            let entity_labels: Vec<String> = input.entities.iter()
-                .map(|e| e.text.clone())
-                .collect();
-            {
-                let expansion = self.property_expansion(endpoint, &qids, &entity_labels, &input.language);
+                                let node_type = match rel_type.as_str() {
+                                    "citizen_of" | "located_in" | "origin_country" | "capital_of" => "location",
+                                    "headquartered_in" => "location",
+                                    "manufactured_by" => "organization",
+                                    "holds_position" => "position",
+                                    "governed_by" => "person",
+                                    _ => "entity",
+                                };
+                                let _ = g.set_node_type(to_label, node_type);
 
-                if !expansion.is_empty() {
-                    let provenance = engram_core::graph::Provenance {
-                        source_type: engram_core::graph::SourceType::Api,
-                        source_id: format!("kb:{}", endpoint.name),
-                    };
-
-                    if let Ok(mut g) = self.graph.write() {
-                        for (from_label, rel_type, to_label) in &expansion {
-                            // Create new node for the discovered entity (with type from property)
-                            let _ = g.store_with_confidence(to_label, 0.70, &provenance);
-
-                            // Set entity type based on the Wikidata property that discovered it
-                            let node_type = match rel_type.as_str() {
-                                "citizen_of" | "located_in" | "origin_country" | "capital_of" => "location",
-                                "headquartered_in" => "location",
-                                "manufactured_by" => "organization",
-                                "holds_position" => "position",
-                                "governed_by" => "person",
-                                _ => "entity",
-                            };
-                            let _ = g.set_node_type(to_label, node_type);
-
-                            // Ensure from_label node exists too (might be NER label not yet stored)
-                            if g.find_node_id(from_label).ok().flatten().is_none() {
-                                let _ = g.store_with_confidence(from_label, 0.70, &provenance);
-                            }
-
-                            // Create the edge
-                            match g.relate(from_label, to_label, rel_type, &provenance) {
-                                Ok(_) => stats.relations_found += 1,
-                                Err(e) => {
-                                    eprintln!("[KB] relate FAILED: {} -[{}]-> {}: {}", from_label, rel_type, to_label, e);
+                                if g.find_node_id(from_label).ok().flatten().is_none() {
+                                    let _ = g.store_with_confidence(from_label, 0.70, &provenance);
                                 }
+
+                                match g.relate(from_label, to_label, rel_type, &provenance) {
+                                    Ok(_) => stats.relations_found += 1,
+                                    Err(e) => {
+                                        eprintln!("[KB] relate FAILED: {} -[{}]-> {}: {}", from_label, rel_type, to_label, e);
+                                    }
+                                }
+
+                                self.emit(engram_core::events::GraphEvent::SeedSparqlRelation {
+                                    session_id: session_id.clone(),
+                                    from: Arc::from(from_label.as_str()),
+                                    to: Arc::from(to_label.as_str()),
+                                    rel_type: Arc::from(rel_type.as_str()),
+                                });
                             }
                         }
                     }
                 }
-            }
 
-            // Phase 5: Shortest path discovery — for entity pairs still not connected,
-            // find 1-hop intermediate entities via batch SPARQL. Creates new connecting nodes.
-            {
-                // Collect all connected pairs so far
-                let connected: std::collections::HashSet<(usize, usize)> = all_relations.iter()
-                    .map(|r| (r.head_idx.min(r.tail_idx), r.head_idx.max(r.tail_idx)))
-                    .collect();
+                // 3c: Shortest path discovery — 1-hop intermediate entities
+                {
+                    let connected: std::collections::HashSet<(usize, usize)> = all_relations.iter()
+                        .map(|r| (r.head_idx.min(r.tail_idx), r.head_idx.max(r.tail_idx)))
+                        .collect();
 
-                let path_results = self.batch_shortest_paths(
-                    endpoint, &qids, &entity_labels, &connected, &input.language,
-                );
+                    let path_results = self.batch_shortest_paths(
+                        endpoint, &qids, &entity_labels, &connected, &input.language,
+                    );
 
-                if !path_results.is_empty() {
-                    let provenance = engram_core::graph::Provenance {
-                        source_type: engram_core::graph::SourceType::Api,
-                        source_id: format!("kb:{}", endpoint.name),
-                    };
+                    if !path_results.is_empty() {
+                        let provenance = engram_core::graph::Provenance {
+                            source_type: engram_core::graph::SourceType::Api,
+                            source_id: format!("kb:{}", endpoint.name),
+                        };
 
-                    if let Ok(mut g) = self.graph.write() {
-                        for (from_label, rel_type, to_label) in &path_results {
-                            // Auto-create intermediate nodes
-                            let _ = g.store_with_confidence(to_label, 0.65, &provenance);
-                            let _ = g.store_with_confidence(from_label, 0.65, &provenance);
+                        if let Ok(mut g) = self.graph.write() {
+                            for (from_label, rel_type, to_label) in &path_results {
+                                let _ = g.store_with_confidence(to_label, 0.65, &provenance);
+                                let _ = g.store_with_confidence(from_label, 0.65, &provenance);
 
-                            match g.relate(from_label, to_label, &rel_type, &provenance) {
-                                Ok(_) => stats.relations_found += 1,
-                                Err(_) => {}
+                                match g.relate(from_label, to_label, rel_type, &provenance) {
+                                    Ok(_) => stats.relations_found += 1,
+                                    Err(_) => {}
+                                }
                             }
                         }
                     }
@@ -690,14 +1118,74 @@ impl RelationExtractor for KbRelationExtractor {
             total_stats.relations_found += stats.relations_found;
             total_stats.errors += stats.errors;
 
+            self.emit(engram_core::events::GraphEvent::SeedPhaseComplete {
+                session_id: session_id.clone(),
+                phase: 3,
+                entities_processed: stats.entities_linked,
+                relations_found: stats.relations_found,
+            });
+
             tracing::info!(
                 endpoint = %endpoint.name,
+                area = %area_of_interest,
                 linked = stats.entities_linked,
                 not_found = stats.entities_not_found,
                 relations = stats.relations_found,
                 ms = stats.lookup_ms,
-                "KB relation extraction complete"
+                "KB relation extraction complete (4-step)"
             );
+        }
+
+        // ─── Step 4: Fix disconnected islands ───
+        // Any seed entity with NO edge to any other seed entity gets a
+        // "related_to" edge back to the area_of_interest context. This ensures
+        // the graph has no orphaned subgraphs from the same seed text.
+        {
+            let connected_entities: std::collections::HashSet<usize> = all_relations.iter()
+                .flat_map(|r| vec![r.head_idx, r.tail_idx])
+                .collect();
+
+            let disconnected: Vec<usize> = (0..entity_labels.len())
+                .filter(|i| !connected_entities.contains(i))
+                .collect();
+
+            if !disconnected.is_empty() {
+                // Find the most-connected seed entity to anchor disconnected ones
+                let mut connection_counts = vec![0usize; entity_labels.len()];
+                for r in &all_relations {
+                    connection_counts[r.head_idx] += 1;
+                    connection_counts[r.tail_idx] += 1;
+                }
+                let anchor_idx = connection_counts.iter().enumerate()
+                    .max_by_key(|(_, c)| *c)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+
+                tracing::info!(
+                    disconnected = disconnected.len(),
+                    anchor = %entity_labels[anchor_idx],
+                    "fixing disconnected seed entities"
+                );
+
+                for &idx in &disconnected {
+                    if idx == anchor_idx { continue; }
+                    all_relations.push(CandidateRelation {
+                        head_idx: idx,
+                        tail_idx: anchor_idx,
+                        rel_type: "related_to".to_string(),
+                        confidence: 0.45,
+                        method: ExtractionMethod::KnowledgeBase,
+                    });
+
+                    self.emit(engram_core::events::GraphEvent::SeedConnectionFound {
+                        session_id: session_id.clone(),
+                        from: Arc::from(entity_labels[idx].as_str()),
+                        to: Arc::from(entity_labels[anchor_idx].as_str()),
+                        rel_type: Arc::from("related_to"),
+                        source: Arc::from("co-extracted_seed_text"),
+                    });
+                }
+            }
         }
 
         total_stats.lookup_ms = start.elapsed().as_millis() as u64;
