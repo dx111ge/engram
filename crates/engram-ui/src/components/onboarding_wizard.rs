@@ -8,7 +8,7 @@ use crate::api::types::{AnalyzeRequest, AnalyzeResponse, IngestRequest, IngestIt
 const STEP_WELCOME: u32 = 1;
 const STEP_EMBEDDER: u32 = 2;
 const STEP_NER: u32 = 3;
-const STEP_NLI: u32 = 4;
+const STEP_REL: u32 = 4;
 const STEP_LLM: u32 = 5;       // Mandatory — required for AoI detection + entity disambiguation
 const STEP_QUANTIZATION: u32 = 6;
 const STEP_KB_SOURCES: u32 = 7;
@@ -483,7 +483,7 @@ pub fn OnboardingWizard(
                     }
                     api.post_text("/config", &config).await
                 }
-                STEP_NLI => {
+                STEP_REL => {
                     // GLiNER2 handles both NER and RE -- NLI step just saves threshold config
                     let config = serde_json::json!({
                         "rel_threshold": rel_thresh,
@@ -716,7 +716,7 @@ pub fn OnboardingWizard(
     let go_next = move |_| {
         let current = step.get_untracked();
         // For steps that need saving, dispatch save and advance on success
-        if matches!(current, STEP_EMBEDDER | STEP_NER | STEP_NLI | STEP_LLM | STEP_QUANTIZATION | STEP_KB_SOURCES | STEP_WEB_SEARCH) {
+        if matches!(current, STEP_EMBEDDER | STEP_NER | STEP_REL | STEP_LLM | STEP_QUANTIZATION | STEP_KB_SOURCES | STEP_WEB_SEARCH) {
             save_step_config.dispatch(current);
         } else {
             set_step.set((current + 1).min(TOTAL_STEPS));
@@ -1081,7 +1081,7 @@ pub fn OnboardingWizard(
                             </div>
                         }.into_any(),
 
-                        STEP_NLI => view! {
+                        STEP_REL => view! {
                             <div class="wizard-step">
                                 <h2><i class="fa-solid fa-link"></i>" Relation Extraction"</h2>
                                 <p class="wizard-desc">"GLiNER2 extracts both entities and relations in a single model pass. Configure which relation types to detect and the confidence threshold."</p>
@@ -1352,7 +1352,21 @@ pub fn OnboardingWizard(
                         STEP_WEB_SEARCH => view! {
                             <div class="wizard-step">
                                 <h2><i class="fa-solid fa-magnifying-glass"></i>" Web Search"</h2>
-                                <p class="wizard-desc">"Configure a web search provider for enriching seed entities with contextual information from the web."</p>
+                                <p class="wizard-desc">"Configure a web search provider for enriching seed entities with contextual information from the web. Used as fallback when Wikipedia coverage is thin."</p>
+                                {move || {
+                                    let p = web_search_provider.get();
+                                    let name = match p.as_str() {
+                                        "brave" => "Brave Search",
+                                        "searxng" => "SearXNG (Self-hosted)",
+                                        _ => "DuckDuckGo",
+                                    };
+                                    view! {
+                                        <p style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+                                            <i class="fa-solid fa-circle-check" style="color: var(--accent);"></i>
+                                            " Selected: "<strong>{name}</strong>
+                                        </p>
+                                    }
+                                }}
                                 <div class="wizard-cards">
                                     <div
                                         class=move || if web_search_provider.get() == "duckduckgo" { "wizard-card wizard-card-selected" } else { "wizard-card" }
@@ -1726,7 +1740,7 @@ pub fn OnboardingWizard(
                                             if n == "gliner" { " Downloading GLiNER model..." }
                                             else { " Saving configuration..." }
                                         }
-                                        STEP_NLI => " Saving relation config...",
+                                        STEP_REL => " Saving relation config...",
                                         STEP_LLM => {
                                             let l = llm_choice.get();
                                             if l == "ollama" { " Pulling model from Ollama..." }

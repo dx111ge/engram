@@ -947,8 +947,7 @@ impl RelationExtractor for KbRelationExtractor {
                     .filter(|i| !connected_so_far.contains(i))
                     .collect();
 
-                let threshold = (entity_labels.len() as f32 * 0.30).ceil() as usize;
-                if still_unconnected.len() >= threshold {
+                if !still_unconnected.is_empty() {
                     tracing::info!(
                         unconnected = still_unconnected.len(),
                         total = entity_labels.len(),

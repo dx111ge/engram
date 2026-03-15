@@ -1,7 +1,7 @@
 # Seed Enrichment Pipeline Design
 
-**Date**: 2026-03-14
-**Status**: DESIGN (replaces current over-engineered 6-phase approach)
+**Date**: 2026-03-14 (updated 2026-03-15)
+**Status**: IMPLEMENTED (v1.1.0) -- replaces old 6-phase approach
 **Goal**: From a descriptive seed text, produce a richly connected knowledge graph in <30s
 
 ---

@@ -51,6 +51,14 @@ pub fn Dashboard() -> impl IntoView {
         }
     });
 
+    let api_cfg = api.clone();
+    let config = LocalResource::new(move || {
+        let api = api_cfg.clone();
+        async move {
+            api.get::<serde_json::Value>("/config").await.ok()
+        }
+    });
+
     // 3 stat cards: Facts stored, Connections, Status
     let fact_count = Signal::derive(move || {
         stats.get().flatten().map(|s| s.nodes.to_string()).unwrap_or_else(|| "--".into())
@@ -239,11 +247,19 @@ pub fn Dashboard() -> impl IntoView {
                 let src_list = sources.get().flatten().unwrap_or_default();
                 let kb_list = kb_endpoints.get().flatten().unwrap_or_default();
                 let kb_enabled: Vec<_> = kb_list.iter().filter(|k| k.enabled).collect();
-                if src_list.is_empty() && kb_enabled.is_empty() {
+                let web_search = config.get().flatten()
+                    .and_then(|c| c.get("web_search_provider").and_then(|v| v.as_str()).map(|s| s.to_string()));
+                let has_any = !src_list.is_empty() || !kb_enabled.is_empty() || web_search.is_some();
+                if !has_any {
                     view! {
                         <p class="text-secondary mt-1" style="font-size: 0.9rem;">"No sources configured yet."</p>
                     }.into_any()
                 } else {
+                    let ws_name = web_search.clone().map(|p| match p.as_str() {
+                        "brave" => "Brave Search".to_string(),
+                        "searxng" => "SearXNG".to_string(),
+                        _ => "DuckDuckGo".to_string(),
+                    });
                     view! {
                         <table class="mt-1">
                             <thead><tr><th>"Name"</th><th>"Type"</th><th>"Status"</th></tr></thead>
@@ -262,6 +278,13 @@ pub fn Dashboard() -> impl IntoView {
                                         <td><span style="color: #66bb6a;"><i class="fa-solid fa-circle" style="font-size: 0.5rem; margin-right: 0.3rem;"></i>"Active"</span></td>
                                     </tr>
                                 }).collect::<Vec<_>>()}
+                                {ws_name.map(|name| view! {
+                                    <tr>
+                                        <td><i class="fa-solid fa-magnifying-glass" style="margin-right: 0.3rem; color: var(--accent);"></i>{name}</td>
+                                        <td class="text-secondary">"Web search"</td>
+                                        <td><span style="color: #66bb6a;"><i class="fa-solid fa-circle" style="font-size: 0.5rem; margin-right: 0.3rem;"></i>"Active"</span></td>
+                                    </tr>
+                                })}
                             </tbody>
                         </table>
                     }.into_any()
