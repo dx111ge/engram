@@ -480,13 +480,13 @@ fn render_investigate_tab(detail: NodeResponse, api: ApiClient) -> leptos::prelu
         <div>
             // Step indicator
             <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1.25rem;">
-                <span class=move || if step.get() >= 1 { "badge badge-core" } else { "badge badge-archival" }
+                <span class={move || if step.get() >= 1 { "badge badge-core" } else { "badge badge-archival" }}
                     style="font-size: 0.75rem;">"1. Gather"</span>
                 <i class="fa-solid fa-chevron-right" style="font-size: 0.6rem; opacity: 0.4;"></i>
-                <span class=move || if step.get() >= 2 { "badge badge-core" } else { "badge badge-archival" }
+                <span class={move || if step.get() >= 2 { "badge badge-core" } else { "badge badge-archival" }}
                     style="font-size: 0.75rem;">"2. Review"</span>
                 <i class="fa-solid fa-chevron-right" style="font-size: 0.6rem; opacity: 0.4;"></i>
-                <span class=move || if step.get() >= 3 { "badge badge-core" } else { "badge badge-archival" }
+                <span class={move || if step.get() >= 3 { "badge badge-core" } else { "badge badge-archival" }}
                     style="font-size: 0.75rem;">"3. Commit"</span>
             </div>
 
@@ -596,6 +596,8 @@ fn render_investigate_tab(detail: NodeResponse, api: ApiClient) -> leptos::prelu
                                     {ents.iter().enumerate().map(|(idx, e)| {
                                         let label = e.label.clone();
                                         let etype = e.entity_type.clone();
+                                        let etype2 = etype.clone();
+                                        let source = e.source.clone();
                                         let is_sel = e.selected;
                                         view! {
                                             <button
@@ -607,9 +609,9 @@ fn render_investigate_tab(detail: NodeResponse, api: ApiClient) -> leptos::prelu
                                                         }
                                                     });
                                                 }
-                                                title=format!("{} ({})", etype, e.source)
+                                                title=format!("{} ({})", etype, source)
                                             >
-                                                {label} <span class="chip-count">{etype}</span>
+                                                {label} <span class="chip-count">{etype2}</span>
                                             </button>
                                         }
                                     }).collect::<Vec<_>>()}
