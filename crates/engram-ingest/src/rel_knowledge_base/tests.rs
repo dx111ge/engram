@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::rel_knowledge_base::{sparql_escape, extract_qid, uri_to_label, extract_first_uri, extract_relations_from_sparql};
 
     #[test]
     fn sparql_escape_handles_special_chars() {
