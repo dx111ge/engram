@@ -1,0 +1,288 @@
+//! SPARQL queries: direct lookups, batch relation discovery, property expansion,
+//! and shortest-path intermediate entity discovery.
+
+use super::*;
+
+impl KbRelationExtractor {
+    /// Execute a SPARQL query against an endpoint, returning parsed JSON results.
+    pub(super) fn sparql_query(
+        &self,
+        endpoint: &KbEndpoint,
+        query: &str,
+    ) -> Result<serde_json::Value, String> {
+        let mut req = self
+            .client
+            .get(&endpoint.url)
+            .query(&[("query", query), ("format", "json")])
+            .header("Accept", "application/sparql-results+json")
+            .header("User-Agent", "engram/1.1");
+
+        // Add auth header if configured
+        if let Some(ref header_val) = endpoint.auth_header {
+            match endpoint.auth_type.as_str() {
+                "bearer" => {
+                    req = req.header("Authorization", format!("Bearer {header_val}"));
+                }
+                "basic" => {
+                    req = req.header("Authorization", format!("Basic {header_val}"));
+                }
+                "api_key" => {
+                    req = req.header("X-API-Key", header_val.as_str());
+                }
+                _ => {}
+            }
+        }
+
+        let resp = req.send().map_err(|e| format!("SPARQL request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("SPARQL query returned {}", resp.status()));
+        }
+
+        resp.json::<serde_json::Value>()
+            .map_err(|e| format!("SPARQL JSON parse failed: {e}"))
+    }
+
+    /// Batch relation discovery: find ALL direct connections between a set of QIDs
+    /// in a single SPARQL query.
+    pub(super) fn batch_relation_lookup(
+        &self,
+        endpoint: &KbEndpoint,
+        qids: &[(&str, usize)], // (QID, entity_index)
+        language: &str,
+    ) -> Vec<(usize, usize, String, String)> {
+        if qids.len() < 2 {
+            return Vec::new();
+        }
+
+        // Build VALUES clause: wd:Q7747 wd:Q159 wd:Q212 ...
+        let values: String = qids.iter()
+            .map(|(qid, _)| format!("wd:{}", extract_qid(qid)))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let query = format!(
+            r#"SELECT ?s ?sLabel ?p ?pLabel ?o ?oLabel WHERE {{
+                VALUES ?s {{ {values} }}
+                VALUES ?o {{ {values} }}
+                ?s ?prop ?o .
+                ?p wikibase:directClaim ?prop .
+                FILTER(?s != ?o)
+                SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,{lang}" }}
+            }} LIMIT 500"#,
+            values = values,
+            lang = language,
+        );
+
+        let json = match self.sparql_query(endpoint, &query) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("batch SPARQL failed: {e}");
+                return Vec::new();
+            }
+        };
+
+        // Build QID -> entity_index map
+        let qid_to_idx: HashMap<String, usize> = qids.iter()
+            .map(|(qid, idx)| (extract_qid(qid).to_string(), *idx))
+            .collect();
+
+        let mut results = Vec::new();
+        if let Some(bindings) = json.pointer("/results/bindings").and_then(|b| b.as_array()) {
+            for binding in bindings {
+                let s_uri = binding.pointer("/s/value").and_then(|v| v.as_str()).unwrap_or("");
+                let o_uri = binding.pointer("/o/value").and_then(|v| v.as_str()).unwrap_or("");
+                let p_label = binding.pointer("/pLabel/value").and_then(|v| v.as_str()).unwrap_or("");
+                let p_uri = binding.pointer("/p/value").and_then(|v| v.as_str()).unwrap_or("");
+
+                let s_qid = extract_qid(s_uri);
+                let o_qid = extract_qid(o_uri);
+
+                if let (Some(&s_idx), Some(&o_idx)) = (qid_to_idx.get(s_qid), qid_to_idx.get(o_qid)) {
+                    let rel_type = if p_label.is_empty() { uri_to_label(p_uri) } else { p_label.to_string() };
+                    results.push((s_idx, o_idx, rel_type, p_uri.to_string()));
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Property expansion: fetch key Wikidata properties for all linked entities.
+    /// Discovers NEW entities (e.g., "Lockheed Martin" as manufacturer of HIMARS)
+    /// and returns them as (entity_label, property_label, new_entity_label) triples.
+    /// Returns (from_label, rel_type, to_label, valid_from, valid_to) tuples.
+    pub(super) fn property_expansion(
+        &self,
+        endpoint: &KbEndpoint,
+        qids: &[(&str, usize)], // (QID URI, entity_index)
+        entity_labels: &[String],
+        language: &str,
+    ) -> Vec<(String, String, String, Option<String>, Option<String>)> {
+        if qids.is_empty() {
+            return Vec::new();
+        }
+
+        let values: String = qids.iter()
+            .map(|(qid, _)| format!("wd:{}", extract_qid(qid)))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // Key Wikidata properties that discover interesting connected entities.
+        // Also fetches P580 (start time) and P582 (end time) temporal qualifiers
+        // via statement nodes when available.
+        let query = format!(
+            r#"SELECT ?entity ?entityLabel ?propLabel ?value ?valueLabel ?startTime ?endTime WHERE {{
+                VALUES ?entity {{ {values} }}
+                VALUES ?propNode {{ wd:P39 wd:P27 wd:P17 wd:P159 wd:P176 wd:P495 wd:P36 }}
+                ?propNode wikibase:claim ?propclaim .
+                ?propNode wikibase:statementProperty ?stmtprop .
+                ?entity ?propclaim ?stmt .
+                ?stmt ?stmtprop ?value .
+                FILTER(isIRI(?value))
+                OPTIONAL {{ ?stmt pq:P580 ?startTime . }}
+                OPTIONAL {{ ?stmt pq:P582 ?endTime . }}
+                SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,{lang}" }}
+            }} LIMIT 300"#,
+            values = values,
+            lang = language,
+        );
+
+        let json = match self.sparql_query(endpoint, &query) {
+            Ok(j) => j,
+            Err(_) => return Vec::new(),
+        };
+
+        // Build QID -> entity label map
+        let qid_to_label: HashMap<String, String> = qids.iter()
+            .map(|(qid, idx)| (extract_qid(qid).to_string(), entity_labels[*idx].clone()))
+            .collect();
+
+        let mut results = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        if let Some(bindings) = json.pointer("/results/bindings").and_then(|b| b.as_array()) {
+            for binding in bindings {
+                let entity_qid = binding.pointer("/entity/value").and_then(|v| v.as_str()).unwrap_or("");
+                let prop_label = binding.pointer("/propLabel/value").and_then(|v| v.as_str()).unwrap_or("");
+                let value_label = binding.pointer("/valueLabel/value").and_then(|v| v.as_str()).unwrap_or("");
+
+                // Skip self-references and empty values
+                if value_label.is_empty() || value_label.starts_with("http://") {
+                    continue;
+                }
+
+                let entity_label = match qid_to_label.get(extract_qid(entity_qid)) {
+                    Some(l) => l.clone(),
+                    None => continue,
+                };
+
+                // Deduplicate
+                let key = (entity_label.clone(), value_label.to_string());
+                if seen.contains(&key) { continue; }
+                seen.insert(key);
+
+                // Extract temporal qualifiers
+                let start_time = binding.pointer("/startTime/value")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().take(10).collect::<String>()); // YYYY-MM-DD
+                let end_time = binding.pointer("/endTime/value")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().take(10).collect::<String>()); // YYYY-MM-DD
+
+                // Map Wikidata property URIs to readable relation types
+                let rel_type = wikidata_prop_to_rel_type(prop_label);
+
+                results.push((entity_label, rel_type, value_label.to_string(), start_time, end_time));
+            }
+        }
+
+        results
+    }
+
+    /// Batch shortest path: find 1-hop intermediate entities between ALL entity pairs
+    /// in a single SPARQL query. Returns (from_label, rel_type, to_label) triples
+    /// including the intermediate node.
+    pub(super) fn batch_shortest_paths(
+        &self,
+        endpoint: &KbEndpoint,
+        qids: &[(&str, usize)],
+        entity_labels: &[String],
+        connected_pairs: &std::collections::HashSet<(usize, usize)>,
+        language: &str,
+    ) -> Vec<(String, String, String)> {
+        if qids.len() < 2 {
+            return Vec::new();
+        }
+
+        let values: String = qids.iter()
+            .map(|(qid, _)| format!("wd:{}", extract_qid(qid)))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let qid_to_idx: HashMap<String, usize> = qids.iter()
+            .map(|(qid, idx)| (extract_qid(qid).to_string(), *idx))
+            .collect();
+
+        // 1-hop: A -> ?mid -> B (single SPARQL for ALL pairs)
+        let query = format!(
+            r#"SELECT ?s ?o ?mid ?midLabel ?p1Label ?p2Label WHERE {{
+                VALUES ?s {{ {values} }}
+                VALUES ?o {{ {values} }}
+                ?s ?prop1 ?mid . ?mid ?prop2 ?o .
+                ?p1 wikibase:directClaim ?prop1 .
+                ?p2 wikibase:directClaim ?prop2 .
+                FILTER(?s != ?o && isIRI(?mid))
+                SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,{lang}" }}
+            }} LIMIT 500"#,
+            values = values, lang = language,
+        );
+
+        let json = match self.sparql_query(endpoint, &query) {
+            Ok(j) => j,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut results = Vec::new();
+        let mut newly_connected = std::collections::HashSet::new();
+
+        if let Some(bindings) = json.pointer("/results/bindings").and_then(|b| b.as_array()) {
+            for binding in bindings {
+                let s_uri = binding.pointer("/s/value").and_then(|v| v.as_str()).unwrap_or("");
+                let o_uri = binding.pointer("/o/value").and_then(|v| v.as_str()).unwrap_or("");
+                let mid_label = binding.pointer("/midLabel/value").and_then(|v| v.as_str()).unwrap_or("");
+                let p1_label = binding.pointer("/p1Label/value").and_then(|v| v.as_str()).unwrap_or("");
+                let p2_label = binding.pointer("/p2Label/value").and_then(|v| v.as_str()).unwrap_or("");
+
+                if mid_label.is_empty() || mid_label.starts_with("http://") {
+                    continue;
+                }
+
+                let s_qid = extract_qid(s_uri);
+                let o_qid = extract_qid(o_uri);
+
+                let (s_idx, o_idx) = match (qid_to_idx.get(s_qid), qid_to_idx.get(o_qid)) {
+                    (Some(&s), Some(&o)) => (s, o),
+                    _ => continue,
+                };
+
+                // Only add paths for pairs not already connected
+                let pair = (s_idx.min(o_idx), s_idx.max(o_idx));
+                if connected_pairs.contains(&pair) || newly_connected.contains(&pair) {
+                    continue;
+                }
+                newly_connected.insert(pair);
+
+                let s_label = &entity_labels[s_idx];
+                let o_label = &entity_labels[o_idx];
+                let r1 = wikidata_prop_to_rel_type(p1_label);
+                let r2 = wikidata_prop_to_rel_type(p2_label);
+
+                results.push((s_label.clone(), r1, mid_label.to_string()));
+                results.push((mid_label.to_string(), r2, o_label.clone()));
+            }
+        }
+
+        results
+    }
+}
