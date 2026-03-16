@@ -8,39 +8,82 @@ use crate::api::types::{
 };
 // Card grid + modal layout (no more CollapsibleSection)
 
-// ── Provider presets ──
+// ── Provider presets (matching wizard) ──
 
-struct ProviderPreset {
+struct EmbedPreset {
     id: &'static str,
     name: &'static str,
     endpoint: &'static str,
     needs_key: bool,
     quality: &'static str,
+    performance: &'static str,
     privacy: &'static str,
     cost: &'static str,
+    models: &'static [(&'static str, &'static str, &'static str)],  // (model_name, description, lang_badge)
+    default_model: &'static str,
 }
 
-const EMBED_PROVIDERS: &[ProviderPreset] = &[
-    ProviderPreset { id: "onnx", name: "ONNX (Local)", endpoint: "onnx://local", needs_key: false,
-        quality: "Good (384D all-MiniLM)", privacy: "Everything stays local", cost: "Free, ~50MB download" },
-    ProviderPreset { id: "ollama", name: "Ollama", endpoint: "http://localhost:11434/api/embed", needs_key: false,
-        quality: "Good-Excellent (model dependent)", privacy: "Local", cost: "Free" },
-    ProviderPreset { id: "openai", name: "OpenAI", endpoint: "https://api.openai.com/v1/embeddings", needs_key: true,
-        quality: "Excellent (text-embedding-3)", privacy: "Data sent to OpenAI", cost: "~$0.02/1M tokens" },
-    ProviderPreset { id: "vllm", name: "vLLM", endpoint: "http://localhost:8000/v1/embeddings", needs_key: false,
-        quality: "Model dependent", privacy: "Local", cost: "Free" },
-    ProviderPreset { id: "lmstudio", name: "LM Studio", endpoint: "http://localhost:1234/v1/embeddings", needs_key: false,
-        quality: "Model dependent", privacy: "Local", cost: "Free" },
-    ProviderPreset { id: "custom", name: "Custom Provider", endpoint: "", needs_key: false,
-        quality: "Provider dependent", privacy: "Data sent to provider", cost: "Provider dependent" },
-];
-
-const EMBED_MODEL_SUGGESTIONS: &[&str] = &[
-    "nomic-embed-text",
-    "mxbai-embed-large",
-    "all-minilm",
-    "snowflake-arctic-embed",
-    "bge-m3",
+const EMBED_PRESETS: &[EmbedPreset] = &[
+    EmbedPreset {
+        id: "onnx", name: "ONNX (Local)", endpoint: "onnx://local",
+        needs_key: false,
+        quality: "Good (384D all-MiniLM)", performance: "Fast, uses your GPU/CPU",
+        privacy: "Everything stays local", cost: "Free, ~50MB download",
+        models: &[
+            ("all-MiniLM-L6-v2", "384D, 90MB, best balance", "EN"),
+            ("multilingual-e5-small", "384D, 120MB, strong multilingual", "100+ langs"),
+            ("bge-small-en-v1.5", "384D, 130MB, high quality", "EN"),
+        ],
+        default_model: "all-MiniLM-L6-v2",
+    },
+    EmbedPreset {
+        id: "ollama", name: "Ollama", endpoint: "http://localhost:11434/api/embed",
+        needs_key: false,
+        quality: "Good-Excellent (model dependent)", performance: "Fast if local GPU",
+        privacy: "Local", cost: "Free",
+        models: &[
+            ("nomic-embed-text", "768D, 274MB, strong all-rounder", "EN"),
+            ("mxbai-embed-large", "1024D, 670MB, highest quality", "EN"),
+            ("all-minilm", "384D, 23MB, fastest", "EN"),
+            ("snowflake-arctic-embed", "1024D, 335MB, top benchmark", "Multilingual"),
+        ],
+        default_model: "nomic-embed-text",
+    },
+    EmbedPreset {
+        id: "openai", name: "OpenAI", endpoint: "https://api.openai.com/v1/embeddings",
+        needs_key: true,
+        quality: "Excellent (text-embedding-3)", performance: "Network latency per op",
+        privacy: "Data sent to OpenAI", cost: "~$0.02/1M tokens",
+        models: &[
+            ("text-embedding-3-small", "1536D, cheapest, good quality", "Multilingual"),
+            ("text-embedding-3-large", "3072D, best quality, 6x cost", "Multilingual"),
+        ],
+        default_model: "text-embedding-3-small",
+    },
+    EmbedPreset {
+        id: "vllm", name: "vLLM", endpoint: "http://localhost:8000/v1/embeddings",
+        needs_key: false,
+        quality: "Model dependent", performance: "Self-hosted, you control",
+        privacy: "Local", cost: "Free",
+        models: &[],
+        default_model: "",
+    },
+    EmbedPreset {
+        id: "lmstudio", name: "LM Studio", endpoint: "http://localhost:1234/v1/embeddings",
+        needs_key: false,
+        quality: "Model dependent", performance: "Fast with GPU",
+        privacy: "Local", cost: "Free",
+        models: &[],
+        default_model: "",
+    },
+    EmbedPreset {
+        id: "custom", name: "Custom Provider", endpoint: "",
+        needs_key: true,
+        quality: "Provider dependent", performance: "Network latency",
+        privacy: "Data sent to provider", cost: "Provider dependent",
+        models: &[],
+        default_model: "",
+    },
 ];
 
 struct OnnxQuickModel {
@@ -71,73 +114,41 @@ const ONNX_QUICK_MODELS: &[OnnxQuickModel] = &[
     },
 ];
 
-struct NerModelInfo {
+struct NerPreset {
     id: &'static str,
-    label: &'static str,
-    size: &'static str,
-    langs: &'static str,
+    name: &'static str,
+    quality: &'static str,
+    speed: &'static str,
+    download: &'static str,
     license: &'static str,
-    license_ok: bool,
-    model_url: &'static str,
-    tokenizer_url: &'static str,
-    hf_url: &'static str,
+    learning: &'static str,
+    models: &'static [(&'static str, &'static str, &'static str, &'static str, &'static str)], // (id, name, desc, hf_repo, lang)
 }
 
-const NER_MODELS: &[NerModelInfo] = &[
-    NerModelInfo {
-        id: "gliner_small-v2.1",
-        label: "GLiNER Small v2.1",
-        size: "183 MB",
-        langs: "English",
-        license: "Apache-2.0",
-        license_ok: true,
-        model_url: "https://huggingface.co/onnx-community/gliner_small-v2.1/resolve/main/onnx/model_int8.onnx",
-        tokenizer_url: "https://huggingface.co/onnx-community/gliner_small-v2.1/resolve/main/tokenizer.json",
-        hf_url: "https://huggingface.co/onnx-community/gliner_small-v2.1",
+const NER_PRESETS: &[NerPreset] = &[
+    NerPreset {
+        id: "builtin", name: "Builtin Rules",
+        quality: "Basic \u{2014} patterns only", speed: "Instant",
+        download: "None", license: "N/A",
+        learning: "Entity gazetteer grows from graph",
+        models: &[],
     },
-    NerModelInfo {
-        id: "gliner_medium-v2.1",
-        label: "GLiNER Medium v2.1",
-        size: "~350 MB",
-        langs: "English",
-        license: "Apache-2.0",
-        license_ok: true,
-        model_url: "https://huggingface.co/onnx-community/gliner_medium-v2.1/resolve/main/onnx/model_int8.onnx",
-        tokenizer_url: "https://huggingface.co/onnx-community/gliner_medium-v2.1/resolve/main/tokenizer.json",
-        hf_url: "https://huggingface.co/onnx-community/gliner_medium-v2.1",
+    NerPreset {
+        id: "gliner2", name: "GLiNER2 (Recommended)",
+        quality: "High \u{2014} NER + Relation Extraction, zero-shot, multilingual", speed: "~125ms/sentence",
+        download: "~530MB\u{2013}1.1GB ONNX model (in-process, no sidecar)", license: "Apache-2.0",
+        learning: "Discovers entities + relations in one pass. Feeds gazetteer for instant future recognition.",
+        models: &[
+            ("gliner2-fp16", "GLiNER2 Multi v1 FP16", "530MB FP16 hybrid, 100+ languages (recommended)", "dx111ge/gliner2-multi-v1-onnx", "Multilingual"),
+            ("gliner2-fp32", "GLiNER2 Multi v1 FP32", "1.1GB FP32, 100+ languages (maximum precision)", "dx111ge/gliner2-multi-v1-onnx", "Multilingual"),
+        ],
     },
-    NerModelInfo {
-        id: "gliner_multi-v2.1",
-        label: "GLiNER Multi v2.1",
-        size: "~350 MB",
-        langs: "100+ languages",
-        license: "Apache-2.0",
-        license_ok: true,
-        model_url: "https://huggingface.co/onnx-community/gliner_multi-v2.1/resolve/main/onnx/model_int8.onnx",
-        tokenizer_url: "https://huggingface.co/onnx-community/gliner_multi-v2.1/resolve/main/tokenizer.json",
-        hf_url: "https://huggingface.co/onnx-community/gliner_multi-v2.1",
-    },
-    NerModelInfo {
-        id: "gliner_large-v2.1",
-        label: "GLiNER Large v2.1",
-        size: "~800 MB",
-        langs: "English",
-        license: "Apache-2.0",
-        license_ok: true,
-        model_url: "https://huggingface.co/onnx-community/gliner_large-v2.1/resolve/main/onnx/model_int8.onnx",
-        tokenizer_url: "https://huggingface.co/onnx-community/gliner_large-v2.1/resolve/main/tokenizer.json",
-        hf_url: "https://huggingface.co/onnx-community/gliner_large-v2.1",
-    },
-    NerModelInfo {
-        id: "gliner_small-v1",
-        label: "GLiNER Small v1.0",
-        size: "~180 MB",
-        langs: "English",
-        license: "CC-BY-NC-4.0",
-        license_ok: false,
-        model_url: "https://huggingface.co/onnx-community/gliner_small/resolve/main/onnx/model_int8.onnx",
-        tokenizer_url: "https://huggingface.co/onnx-community/gliner_small/resolve/main/tokenizer.json",
-        hf_url: "https://huggingface.co/urchade/gliner_small",
+    NerPreset {
+        id: "llm", name: "LLM Fallback",
+        quality: "Highest for unusual entities", speed: "Slow (~500ms+)",
+        download: "None (uses your LLM)", license: "Depends on LLM",
+        learning: "Same learning loop as GLiNER option",
+        models: &[],
     },
 ];
 
@@ -161,6 +172,7 @@ fn parse_onnx_status(text: &str) -> String {
 }
 
 /// Parse NER model check JSON into human-readable string
+#[allow(dead_code)]
 fn parse_ner_model_status(text: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
         let ready = v.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -179,91 +191,96 @@ fn parse_ner_model_status(text: &str) -> String {
     }
 }
 
-struct LlmProviderPreset {
+struct LlmPreset {
     id: &'static str,
     name: &'static str,
     endpoint: &'static str,
     needs_key: bool,
-    description: &'static str,
     quality: &'static str,
     privacy: &'static str,
     cost: &'static str,
+    models: &'static [(&'static str, &'static str)],
+    default_model: &'static str,
     can_fetch_models: bool,
-    model_suggestions: &'static [&'static str],
 }
 
-const LLM_PROVIDERS: &[LlmProviderPreset] = &[
-    LlmProviderPreset {
-        id: "ollama", name: "Ollama (Recommended)",
-        endpoint: "http://localhost:11434/v1/chat/completions",
-        needs_key: false,
-        description: "Local LLM server. Install from ollama.com, pull a model, then connect.",
-        quality: "Good (local models)", privacy: "Local", cost: "Free",
+const LLM_PRESETS: &[LlmPreset] = &[
+    LlmPreset {
+        id: "ollama", name: "Ollama (Recommended)", endpoint: "http://localhost:11434/v1/chat/completions",
+        needs_key: false, quality: "Good (local models)", privacy: "Local", cost: "Free",
+        models: &[
+            ("llama3.2", "3B, fast, good quality"),
+            ("phi4", "14B, excellent reasoning"),
+            ("mistral", "7B, balanced"),
+            ("gemma3", "4B, efficient"),
+            ("qwen3", "8B, strong multilingual"),
+        ],
+        default_model: "llama3.2",
         can_fetch_models: true,
-        model_suggestions: &["llama3.2", "phi4", "mistral", "gemma3", "qwen3", "deepseek-r1", "command-r"],
     },
-    LlmProviderPreset {
-        id: "lmstudio", name: "LM Studio",
-        endpoint: "http://localhost:1234/v1/chat/completions",
-        needs_key: false,
-        description: "Local LLM with GUI. Download a model in LM Studio, start the server.",
-        quality: "Good", privacy: "Local", cost: "Free",
+    LlmPreset {
+        id: "lmstudio", name: "LM Studio", endpoint: "http://localhost:1234/v1/chat/completions",
+        needs_key: false, quality: "Good", privacy: "Local", cost: "Free",
+        models: &[],
+        default_model: "",
         can_fetch_models: true,
-        model_suggestions: &[],
     },
-    LlmProviderPreset {
-        id: "vllm", name: "vLLM",
-        endpoint: "http://localhost:8000/v1/chat/completions",
-        needs_key: false,
-        description: "High-performance inference server. Best for GPU-accelerated local inference.",
-        quality: "Model dependent", privacy: "Local", cost: "Free",
+    LlmPreset {
+        id: "vllm", name: "vLLM", endpoint: "http://localhost:8000/v1/chat/completions",
+        needs_key: false, quality: "Model dependent", privacy: "Local", cost: "Free",
+        models: &[],
+        default_model: "",
         can_fetch_models: true,
-        model_suggestions: &[],
     },
-    LlmProviderPreset {
-        id: "openai", name: "OpenAI",
-        endpoint: "https://api.openai.com/v1/chat/completions",
-        needs_key: true,
-        description: "Cloud API. Requires an API key from platform.openai.com.",
-        quality: "Excellent", privacy: "Cloud", cost: "Per-token",
+    LlmPreset {
+        id: "openai", name: "OpenAI", endpoint: "https://api.openai.com/v1/chat/completions",
+        needs_key: true, quality: "Excellent", privacy: "Cloud", cost: "Per-token",
+        models: &[
+            ("gpt-4o-mini", "fast, cheap, good quality"),
+            ("gpt-4o", "best quality, higher cost"),
+            ("gpt-4.1-mini", "latest mini, improved"),
+        ],
+        default_model: "gpt-4o-mini",
         can_fetch_models: false,
-        model_suggestions: &["gpt-4o", "gpt-4o-mini", "gpt-4.1-mini", "o3-mini"],
     },
-    LlmProviderPreset {
-        id: "google", name: "Google",
-        endpoint: "https://generativelanguage.googleapis.com/v1beta",
-        needs_key: true,
-        description: "Google Gemini API. Requires API key from aistudio.google.com.",
-        quality: "Excellent", privacy: "Cloud", cost: "Per-token",
+    LlmPreset {
+        id: "google", name: "Google", endpoint: "https://generativelanguage.googleapis.com/v1beta",
+        needs_key: true, quality: "Excellent", privacy: "Cloud", cost: "Per-token",
+        models: &[
+            ("gemini-2.0-flash", "fast, cheap"),
+            ("gemini-1.5-pro", "best quality"),
+            ("gemini-1.5-flash", "balanced"),
+        ],
+        default_model: "gemini-2.0-flash",
         can_fetch_models: false,
-        model_suggestions: &["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
     },
-    LlmProviderPreset {
-        id: "deepseek", name: "DeepSeek",
-        endpoint: "https://api.deepseek.com/v1/chat/completions",
-        needs_key: true,
-        description: "DeepSeek API. Known for reasoning models (R1).",
-        quality: "Good-Excellent", privacy: "Cloud", cost: "Per-token (cheap)",
+    LlmPreset {
+        id: "deepseek", name: "DeepSeek", endpoint: "https://api.deepseek.com/v1/chat/completions",
+        needs_key: true, quality: "Good-Excellent", privacy: "Cloud", cost: "Per-token (cheap)",
+        models: &[
+            ("deepseek-chat", "fast general model"),
+            ("deepseek-reasoner", "R1 reasoning model"),
+        ],
+        default_model: "deepseek-chat",
         can_fetch_models: false,
-        model_suggestions: &["deepseek-chat", "deepseek-reasoner"],
     },
-    LlmProviderPreset {
-        id: "openrouter", name: "OpenRouter",
-        endpoint: "https://openrouter.ai/api/v1/chat/completions",
-        needs_key: true,
-        description: "Unified gateway to 100+ models. Also supports Anthropic Claude.",
-        quality: "Depends on model", privacy: "Cloud", cost: "Per-token",
+    LlmPreset {
+        id: "openrouter", name: "OpenRouter", endpoint: "https://openrouter.ai/api/v1/chat/completions",
+        needs_key: true, quality: "Depends on model", privacy: "Cloud", cost: "Per-token",
+        models: &[
+            ("anthropic/claude-3.5-sonnet", "Claude 3.5 Sonnet"),
+            ("meta-llama/llama-3.1-70b", "Llama 3.1 70B"),
+            ("google/gemini-pro-1.5", "Gemini Pro 1.5"),
+        ],
+        default_model: "anthropic/claude-3.5-sonnet",
         can_fetch_models: false,
-        model_suggestions: &["anthropic/claude-3.5-sonnet", "meta-llama/llama-3.1-70b", "google/gemini-pro-1.5"],
     },
-    LlmProviderPreset {
-        id: "custom", name: "Custom",
-        endpoint: "",
-        needs_key: false,
-        description: "Any OpenAI-compatible endpoint.",
-        quality: "Provider dependent", privacy: "Depends", cost: "Depends",
+    LlmPreset {
+        id: "custom", name: "Custom", endpoint: "",
+        needs_key: false, quality: "Provider dependent", privacy: "Depends", cost: "Depends",
+        models: &[],
+        default_model: "",
         can_fetch_models: false,
-        model_suggestions: &[],
     },
 ];
 
@@ -352,13 +369,16 @@ pub fn SystemPage() -> impl IntoView {
     let (embed_model, set_embed_model) = signal(String::new());
     let (embed_test_status, set_embed_test_status) = signal(String::new());
     let (onnx_status, set_onnx_status) = signal(String::new());
+    // Ollama model fetching for embed modal
+    let (ollama_embed_models, set_ollama_embed_models) = signal(Vec::<String>::new());
+    let (ollama_fetching, set_ollama_fetching) = signal(false);
 
     // Sync config values once loaded
     Effect::new(move |_| {
         if let Some(cfg) = config.get().flatten() {
             if let Some(ep) = cfg.data.get("embed_endpoint").and_then(|v: &serde_json::Value| v.as_str()) {
                 set_embed_endpoint.set(ep.to_string());
-                for p in EMBED_PROVIDERS {
+                for p in EMBED_PRESETS {
                     if ep == p.endpoint {
                         set_embed_provider.set(p.id.to_string());
                         break;
@@ -374,7 +394,7 @@ pub fn SystemPage() -> impl IntoView {
     let _on_embed_provider_change = move |ev: web_sys::Event| {
         let val = event_target_value(&ev);
         set_embed_provider.set(val.clone());
-        if let Some(p) = EMBED_PROVIDERS.iter().find(|p| p.id == val) {
+        if let Some(p) = EMBED_PRESETS.iter().find(|p| p.id == val) {
             set_embed_endpoint.set(p.endpoint.to_string());
         }
     };
@@ -435,6 +455,43 @@ pub fn SystemPage() -> impl IntoView {
         });
     });
 
+    // Auto-fetch Ollama models when Ollama is selected for embed
+    let api_ollama_embed = api.clone();
+    Effect::new(move || {
+        let embed = embed_provider.get();
+        if embed == "ollama" && ollama_embed_models.get_untracked().is_empty() {
+            let api = api_ollama_embed.clone();
+            let endpoint = EMBED_PRESETS.iter().find(|p| p.id == "ollama").map(|p| p.endpoint).unwrap_or("http://localhost:11434/api/embed").to_string();
+            set_ollama_fetching.set(true);
+            wasm_bindgen_futures::spawn_local(async move {
+                match api.post_text("/proxy/fetch-models", &serde_json::json!({ "endpoint": endpoint })).await {
+                    Ok(text) => {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                            let mut names = Vec::new();
+                            if let Some(models) = json.get("models").and_then(|m| m.as_array()) {
+                                for m in models {
+                                    if let Some(name) = m.get("name").and_then(|n| n.as_str()) {
+                                        names.push(name.to_string());
+                                    }
+                                }
+                            }
+                            if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+                                for m in data {
+                                    if let Some(id) = m.get("id").and_then(|n| n.as_str()) {
+                                        names.push(id.to_string());
+                                    }
+                                }
+                            }
+                            set_ollama_embed_models.set(names);
+                        }
+                    }
+                    Err(_) => {}
+                }
+                set_ollama_fetching.set(false);
+            });
+        }
+    });
+
     // ── Section 3: Language Model ──
 
     let (llm_provider, set_llm_provider) = signal("ollama".to_string());
@@ -452,7 +509,7 @@ pub fn SystemPage() -> impl IntoView {
         if let Some(cfg) = config.get().flatten() {
             if let Some(v) = cfg.data.get("llm_endpoint").and_then(|v: &serde_json::Value| v.as_str()) {
                 set_llm_endpoint.set(v.to_string());
-                for p in LLM_PROVIDERS {
+                for p in LLM_PRESETS {
                     if v == p.endpoint {
                         set_llm_provider.set(p.id.to_string());
                         break;
@@ -483,7 +540,7 @@ pub fn SystemPage() -> impl IntoView {
     let _on_llm_provider_change = move |ev: web_sys::Event| {
         let val = event_target_value(&ev);
         set_llm_provider.set(val.clone());
-        if let Some(p) = LLM_PROVIDERS.iter().find(|p| p.id == val) {
+        if let Some(p) = LLM_PRESETS.iter().find(|p| p.id == val) {
             set_llm_endpoint.set(p.endpoint.to_string());
         }
         set_llm_fetched_models.set(Vec::new());
@@ -582,12 +639,13 @@ pub fn SystemPage() -> impl IntoView {
     let (ner_selected_model, set_ner_selected_model) = signal(String::new());
     let (ner_model_status, set_ner_model_status) = signal(String::new());
     let (ner_download_status, set_ner_download_status) = signal(String::new());
-    let (rel_model_status, set_rel_model_status) = signal(String::new());
-    let (rel_download_status, set_rel_download_status) = signal(String::new());
+    let (_rel_model_status, _set_rel_model_status) = signal(String::new());
+    let (_rel_download_status, _set_rel_download_status) = signal(String::new());
     let (coref_enabled, set_coref_enabled) = signal(true);
     let (rel_threshold, set_rel_threshold) = signal(0.9_f64);
+    let (rel_templates_mode, set_rel_templates_mode) = signal("general".to_string());
     let (relation_templates_json, set_relation_templates_json) = signal(String::new());
-    let (import_status, set_import_status) = signal(String::new());
+    let (_import_status, _set_import_status) = signal(String::new());
 
     // Quantization signal declared early so config Effect can set it
     let (quant_enabled, set_quant_enabled) = signal(true);
@@ -604,11 +662,7 @@ pub fn SystemPage() -> impl IntoView {
             }
             if let Some(v) = cfg.data.get("ner_model").and_then(|v: &serde_json::Value| v.as_str()) {
                 set_ner_model.set(v.to_string());
-                // Map config value to a NER_MODELS id if it matches, otherwise use as-is
-                let mapped = NER_MODELS.iter().find(|m| m.id == v)
-                    .map(|m| m.id.to_string())
-                    .unwrap_or_else(|| v.to_string());
-                set_ner_selected_model.set(mapped);
+                set_ner_selected_model.set(v.to_string());
             }
             if let Some(v) = cfg.data.get("quantization_enabled").and_then(|v: &serde_json::Value| v.as_bool()) {
                 set_quant_enabled.set(v);
@@ -664,7 +718,7 @@ pub fn SystemPage() -> impl IntoView {
     // ── Section 5: Quantization ──
 
     let api_quant = api.clone();
-    let toggle_quantization = Action::new_local(move |_: &()| {
+    let _toggle_quantization = Action::new_local(move |_: &()| {
         let api = api_quant.clone();
         let enabled = quant_enabled.get_untracked();
         async move {
@@ -785,7 +839,7 @@ pub fn SystemPage() -> impl IntoView {
     let embed_status: Signal<String> = Signal::derive(move || {
         let ep = embed_endpoint.get();
         let model_cfg = embed_model.get();
-        let provider_name = EMBED_PROVIDERS.iter()
+        let provider_name = EMBED_PRESETS.iter()
             .find(|p| p.endpoint == ep)
             .map(|p| p.name)
             .unwrap_or("");
@@ -830,11 +884,11 @@ pub fn SystemPage() -> impl IntoView {
         }
     });
 
-    let quant_status: Signal<String> = Signal::derive(move || {
+    let _quant_status: Signal<String> = Signal::derive(move || {
         if quant_enabled.get() { "Active".into() } else { "Disabled".into() }
     });
 
-    let mesh_status: Signal<String> = Signal::derive(move || {
+    let _mesh_status: Signal<String> = Signal::derive(move || {
         let count = peers.get().map(|p| p.len()).unwrap_or(0);
         if count > 0 { format!("Active ({count} peers)") } else { "Not enabled".into() }
     });
@@ -844,7 +898,7 @@ pub fn SystemPage() -> impl IntoView {
         if count > 0 { format!("{count} keys") } else { "No secrets".into() }
     });
 
-    let export_status: Signal<String> = Signal::derive(move || {
+    let _export_status: Signal<String> = Signal::derive(move || {
         "Available".to_string()
     });
 
@@ -1037,36 +1091,178 @@ pub fn SystemPage() -> impl IntoView {
                     </div>
                 })
             }}
-            <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.75rem;">"Select an embedding provider:"</p>
+
+            // ── Wizard-style provider cards ──
+            <p class="wizard-desc">"Embeddings convert text into numbers that capture meaning. This is how engram understands similarity between concepts."</p>
             <div class="wizard-cards">
-                {EMBED_PROVIDERS.iter().map(|p| {
+                {EMBED_PRESETS.iter().map(|p| {
                     let id = p.id.to_string();
                     let id2 = id.clone();
-                    let name = p.name;
-                    let quality = p.quality;
-                    let privacy = p.privacy;
-                    let cost = p.cost;
                     let endpoint = p.endpoint.to_string();
+                    let default_model = p.default_model.to_string();
                     view! {
                         <div
                             class=move || if embed_provider.get() == id { "wizard-card wizard-card-selected" } else { "wizard-card" }
                             on:click=move |_| {
                                 set_embed_provider.set(id2.clone());
                                 set_embed_endpoint.set(endpoint.clone());
+                                if !default_model.is_empty() {
+                                    set_embed_model.set(default_model.clone());
+                                }
                             }
                         >
-                            <h4>{name}</h4>
+                            <h4>{p.name}</h4>
                             <div class="wizard-card-grid">
-                                <span class="wc-label">"Quality"</span><span>{quality}</span>
-                                <span class="wc-label">"Privacy"</span><span>{privacy}</span>
-                                <span class="wc-label">"Cost"</span><span>{cost}</span>
+                                <span class="wc-label">"Quality"</span><span>{p.quality}</span>
+                                <span class="wc-label">"Speed"</span><span>{p.performance}</span>
+                                <span class="wc-label">"Privacy"</span><span>{p.privacy}</span>
+                                <span class="wc-label">"Cost"</span><span>{p.cost}</span>
                             </div>
                         </div>
                     }
                 }).collect::<Vec<_>>()}
             </div>
 
-            // ONNX sub-panel (shown when ONNX provider selected)
+            // ── Model selection (when a provider is selected) ──
+            {move || {
+                let choice = embed_provider.get();
+                let preset = EMBED_PRESETS.iter().find(|p| p.id == choice.as_str());
+                preset.map(|p| {
+                    let show_key = p.needs_key;
+                    let models: Vec<(&str, &str, &str)> = p.models.to_vec();
+                    let is_onnx = choice == "onnx";
+                    let is_custom_provider = choice == "custom";
+                    let show_custom_input = p.models.is_empty() && !is_custom_provider;
+                    view! {
+                        // Custom provider: endpoint URL input
+                        {is_custom_provider.then(|| view! {
+                            <div class="form-group mt-1">
+                                <label><i class="fa-solid fa-link"></i>" Endpoint URL"</label>
+                                <input type="text" class="form-control" placeholder="https://api.example.com/v1/embeddings"
+                                    prop:value=embed_endpoint
+                                    on:input=move |ev| set_embed_endpoint.set(event_target_value(&ev))
+                                />
+                                <small class="text-secondary">"OpenAI-compatible /v1/embeddings endpoint"</small>
+                            </div>
+                        })}
+                        // API key input
+                        {show_key.then(|| view! {
+                            <div class="form-group mt-1">
+                                <label><i class="fa-solid fa-key"></i>" API Key"</label>
+                                <input type="password" class="form-control" placeholder="sk-..."
+                                    on:input=move |ev| {
+                                        // Store API key in embed_endpoint for non-ONNX providers that need it
+                                        let _ = event_target_value(&ev);
+                                    }
+                                />
+                            </div>
+                        })}
+                        <div class="form-group mt-1">
+                            <label><i class="fa-solid fa-cube"></i>" Model"</label>
+                            // Model chips from preset
+                            {(!models.is_empty()).then(|| {
+                                let models2 = models.clone();
+                                view! {
+                                    <div class="wizard-model-chips">
+                                        {models2.into_iter().map(|(name, desc, lang)| {
+                                            let n = name.to_string();
+                                            let n2 = n.clone();
+                                            let badge_class = if lang.contains("100+") || lang.contains("ulti") {
+                                                "wizard-lang-badge wizard-lang-multi"
+                                            } else {
+                                                "wizard-lang-badge wizard-lang-en"
+                                            };
+                                            view! {
+                                                <button
+                                                    class=move || if embed_model.get() == n { "wizard-model-chip active" } else { "wizard-model-chip" }
+                                                    on:click=move |_| set_embed_model.set(n2.clone())
+                                                >
+                                                    <strong>{name}</strong>
+                                                    <span class=badge_class><i class="fa-solid fa-language"></i>" "{lang}</span>
+                                                    <small>{desc}</small>
+                                                </button>
+                                            }
+                                        }).collect::<Vec<_>>()}
+                                    </div>
+                                    // Custom HuggingFace model (for ONNX)
+                                    {is_onnx.then(|| view! {
+                                        <div class="wizard-custom-model mt-1">
+                                            <label><i class="fa-brands fa-github"></i>" Custom HuggingFace Model"</label>
+                                            <div class="wizard-custom-input-row">
+                                                <input type="text" class="form-control"
+                                                    placeholder="e.g. sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+                                                    prop:value=move || {
+                                                        let m = embed_model.get();
+                                                        let presets = ["all-MiniLM-L6-v2", "multilingual-e5-small", "bge-small-en-v1.5"];
+                                                        if presets.contains(&m.as_str()) { String::new() } else { m }
+                                                    }
+                                                    on:input=move |ev| {
+                                                        let v = event_target_value(&ev);
+                                                        if !v.trim().is_empty() {
+                                                            set_embed_model.set(v);
+                                                        }
+                                                    }
+                                                />
+                                            </div>
+                                            <small class="text-secondary">"Enter any sentence-transformer ONNX model from huggingface.co. Must contain onnx/model.onnx and tokenizer.json."</small>
+                                        </div>
+                                    })}
+                                }
+                            })}
+                            // Fetched Ollama models (when Ollama selected)
+                            {(choice == "ollama").then(|| view! {
+                                {move || {
+                                    let fetched = ollama_embed_models.get();
+                                    let is_fetching = ollama_fetching.get();
+                                    if is_fetching {
+                                        view! { <p class="text-secondary" style="font-size: 0.8rem; margin-top: 0.5rem;"><i class="fa-solid fa-spinner fa-spin"></i>" Fetching models from Ollama..."</p> }.into_any()
+                                    } else if !fetched.is_empty() {
+                                        view! {
+                                            <div style="margin-top: 0.5rem;">
+                                                <small class="text-secondary"><i class="fa-solid fa-server"></i>" Installed on your Ollama:"</small>
+                                                <div class="wizard-model-chips" style="margin-top: 4px;">
+                                                    {fetched.into_iter().map(|name| {
+                                                        let n = name.clone();
+                                                        let n2 = name.clone();
+                                                        view! {
+                                                            <button
+                                                                class=move || if embed_model.get() == n { "wizard-model-chip active" } else { "wizard-model-chip" }
+                                                                on:click=move |_| set_embed_model.set(n2.clone())
+                                                            >
+                                                                <strong>{name}</strong>
+                                                            </button>
+                                                        }
+                                                    }).collect::<Vec<_>>()}
+                                                </div>
+                                            </div>
+                                        }.into_any()
+                                    } else {
+                                        view! { <span></span> }.into_any()
+                                    }
+                                }}
+                            })}
+                            // Custom model text input (vLLM, LM Studio)
+                            {show_custom_input.then(|| view! {
+                                <input type="text" class="form-control" placeholder="Enter model name..."
+                                    prop:value=embed_model
+                                    on:input=move |ev| set_embed_model.set(event_target_value(&ev))
+                                />
+                            })}
+                            // Custom provider model input
+                            {is_custom_provider.then(|| view! {
+                                <input type="text" class="form-control" placeholder="e.g. embed-english-v3.0"
+                                    prop:value=embed_model
+                                    on:input=move |ev| set_embed_model.set(event_target_value(&ev))
+                                />
+                            })}
+                        </div>
+                    }
+                })
+            }}
+
+            // ── System extras ──
+
+            // ONNX status and management (when ONNX selected)
             {
                 let api_onnx_panel = api_for_onnx.clone();
                 move || {
@@ -1076,15 +1272,9 @@ pub fn SystemPage() -> impl IntoView {
                 let api_upload = api_check.clone();
                 is_onnx.then(|| view! {
                     <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
-                        <h4 style="margin-top: 0;"><i class="fa-solid fa-microchip"></i>" ONNX Local Embedding"</h4>
-                        <p class="text-secondary" style="font-size: 0.85rem;">
-                            "Run embeddings locally without any external service. "
-                            <a href="https://huggingface.co/models?pipeline_tag=feature-extraction&library=onnx" target="_blank" style="color: var(--accent-bright);">
-                                <i class="fa-solid fa-arrow-up-right-from-square" style="font-size: 0.7rem;"></i>" Browse Embedding Models on HuggingFace"
-                            </a>
-                        </p>
+                        <h4 style="margin-top: 0;"><i class="fa-solid fa-microchip"></i>" ONNX Status & Install"</h4>
 
-                        // ── ONNX status display ──
+                        // ONNX status display
                         {move || {
                             let st = onnx_status.get();
                             if st.is_empty() {
@@ -1105,7 +1295,7 @@ pub fn SystemPage() -> impl IntoView {
                             }
                         }}
 
-                        // ── Quick Install buttons ──
+                        // Quick Install buttons
                         <div style="margin: 0.75rem 0;">
                             <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.5rem;"><strong>"Quick Install"</strong>" \u{2014} download directly from HuggingFace:"</p>
                             {ONNX_QUICK_MODELS.iter().map(|m| {
@@ -1138,7 +1328,6 @@ pub fn SystemPage() -> impl IntoView {
                                                     });
                                                     match api.post_text("/config/onnx-download", &body).await {
                                                         Ok(r) => {
-                                                            // Parse the download response JSON
                                                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
                                                                 let msg = v.get("message").and_then(|v| v.as_str()).unwrap_or("Installed");
                                                                 let size = v.get("model_size_mb").and_then(|v| v.as_f64());
@@ -1160,64 +1349,7 @@ pub fn SystemPage() -> impl IntoView {
                             }).collect::<Vec<_>>()}
                         </div>
 
-                        // ── Custom HuggingFace model ──
-                        <details style="margin-top: 0.75rem;">
-                            <summary class="text-secondary" style="cursor: pointer; font-size: 0.85rem;"><i class="fa-brands fa-github" style="margin-right: 0.25rem;"></i>"Custom HuggingFace Model"</summary>
-                            <div style="margin-top: 0.5rem;">
-                                <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.5rem;">
-                                    "Enter any sentence-transformer ONNX model from huggingface.co. Must contain onnx/model.onnx and tokenizer.json."
-                                </p>
-                                <div class="form-row">
-                                    <label>"HuggingFace Model ID"</label>
-                                    <input type="text" class="form-control" id="onnx-custom-hf-id"
-                                        placeholder="e.g. sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-                                    />
-                                </div>
-                                <div class="button-group" style="margin-top: 0.5rem;">
-                                    <button class="btn btn-primary" on:click={
-                                        let api = api_dl.clone();
-                                        move |_| {
-                                            let api = api.clone();
-                                            wasm_bindgen_futures::spawn_local(async move {
-                                                use wasm_bindgen::JsCast;
-                                                let doc = web_sys::window().unwrap().document().unwrap();
-                                                let input = doc.get_element_by_id("onnx-custom-hf-id")
-                                                    .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok());
-                                                let hf_id = input.map(|i| i.value()).unwrap_or_default();
-                                                if hf_id.trim().is_empty() {
-                                                    set_onnx_status.set("Please enter a HuggingFace model ID.".into());
-                                                    return;
-                                                }
-                                                let hf_id = hf_id.trim();
-                                                // If no slash, assume sentence-transformers namespace
-                                                let repo = if hf_id.contains('/') { hf_id.to_string() } else { format!("sentence-transformers/{}", hf_id) };
-                                                set_onnx_status.set(format!("Downloading {}...", repo));
-                                                let body = serde_json::json!({
-                                                    "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", repo),
-                                                    "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", repo),
-                                                });
-                                                match api.post_text("/config/onnx-download", &body).await {
-                                                    Ok(r) => {
-                                                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
-                                                            let size = v.get("model_size_mb").and_then(|v| v.as_f64());
-                                                            let size_str = size.map(|s| format!(" ({:.1} MB)", s)).unwrap_or_default();
-                                                            set_onnx_status.set(format!("{} installed{}.", repo, size_str));
-                                                        } else {
-                                                            set_onnx_status.set(format!("{} installed.", repo));
-                                                        }
-                                                    }
-                                                    Err(e) => set_onnx_status.set(format!("Download failed: {e}")),
-                                                }
-                                            });
-                                        }
-                                    }>
-                                        <i class="fa-solid fa-cloud-arrow-down"></i>" Download from HuggingFace"
-                                    </button>
-                                </div>
-                            </div>
-                        </details>
-
-                        // ── Manual upload ──
+                        // Manual upload
                         <details style="margin-top: 0.75rem;">
                             <summary class="text-secondary" style="cursor: pointer; font-size: 0.85rem;"><i class="fa-solid fa-upload" style="margin-right: 0.25rem;"></i>"Manual Upload"</summary>
                             <div style="margin-top: 0.5rem;">
@@ -1279,7 +1411,6 @@ pub fn SystemPage() -> impl IntoView {
                                                     Ok(text) => {
                                                         let parsed = parse_onnx_status(&text);
                                                         if parsed.contains("No ONNX") {
-                                                            // parse_onnx_status is for GET, this is POST response
                                                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                                                                 let msg = v.get("message").and_then(|v| v.as_str()).unwrap_or("Upload complete");
                                                                 set_onnx_status.set(msg.to_string());
@@ -1312,45 +1443,11 @@ pub fn SystemPage() -> impl IntoView {
                                 </div>
                             </div>
                         </details>
-
-                        <p class="text-secondary" style="font-size: 0.7rem; margin-top: 0.5rem; margin-bottom: 0;">
-                            <i class="fa-solid fa-bolt" style="margin-right: 0.25rem;"></i>"Powered by ONNX Runtime"
-                        </p>
                     </div>
                 })
             }}
 
-            // API provider fields (shown when NOT ONNX)
-            {move || {
-                let is_api = embed_provider.get() != "onnx";
-                is_api.then(|| view! {
-                    <div class="form-row">
-                        <label>"Endpoint"</label>
-                        <input
-                            type="text"
-                            prop:value=embed_endpoint
-                            on:input=move |ev| set_embed_endpoint.set(event_target_value(&ev))
-                        />
-                    </div>
-                    <div class="form-row">
-                        <label>"Model"</label>
-                        <input
-                            type="text"
-                            placeholder="e.g. nomic-embed-text"
-                            list="embed-model-suggestions"
-                            prop:value=embed_model
-                            on:input=move |ev| set_embed_model.set(event_target_value(&ev))
-                        />
-                        <datalist id="embed-model-suggestions">
-                            {EMBED_MODEL_SUGGESTIONS.iter().map(|m| {
-                                let val = m.to_string();
-                                view! { <option value={val} /> }
-                            }).collect::<Vec<_>>()}
-                        </datalist>
-                    </div>
-                })
-            }}
-
+            // Active model info
             {move || {
                 let info = compute.get().flatten();
                 let model_from_config = embed_model.get();
@@ -1369,6 +1466,8 @@ pub fn SystemPage() -> impl IntoView {
                     }
                 })
             }}
+
+            // Save / Test / Reindex buttons
             <div class="button-group" style="margin-top: 0.5rem;">
                 <button class="btn btn-success" on:click=move |_| { save_embedding.dispatch(()); }>
                     <i class="fa-solid fa-floppy-disk"></i>" Save Embedding Config"
@@ -1402,16 +1501,15 @@ pub fn SystemPage() -> impl IntoView {
                     </button>
                 </div>
                 <div class="wizard-modal-body">
-            <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.75rem;">"Select an LLM provider. Required for area-of-interest detection and entity disambiguation."</p>
+
+            // ── Wizard-style LLM provider cards ──
+            <p class="wizard-desc">"A language model is required for area-of-interest detection, entity disambiguation, and intelligent seed enrichment."</p>
             <div class="wizard-cards">
-                {LLM_PROVIDERS.iter().map(|p| {
+                {LLM_PRESETS.iter().map(|p| {
                     let id = p.id.to_string();
                     let id2 = id.clone();
-                    let name = p.name;
-                    let quality = p.quality;
-                    let privacy = p.privacy;
-                    let cost = p.cost;
                     let endpoint = p.endpoint.to_string();
+                    let default_model = p.default_model.to_string();
                     view! {
                         <div
                             class=move || if llm_provider.get() == id { "wizard-card wizard-card-selected" } else { "wizard-card" }
@@ -1419,125 +1517,117 @@ pub fn SystemPage() -> impl IntoView {
                                 set_llm_provider.set(id2.clone());
                                 set_llm_endpoint.set(endpoint.clone());
                                 set_llm_fetched_models.set(Vec::new());
+                                if !default_model.is_empty() && llm_model.get_untracked().is_empty() {
+                                    set_llm_model.set(default_model.clone());
+                                }
                             }
                         >
-                            <h4>{name}</h4>
+                            <h4>{p.name}</h4>
                             <div class="wizard-card-grid">
-                                <span class="wc-label">"Quality"</span><span>{quality}</span>
-                                <span class="wc-label">"Privacy"</span><span>{privacy}</span>
-                                <span class="wc-label">"Cost"</span><span>{cost}</span>
+                                <span class="wc-label">"Quality"</span><span>{p.quality}</span>
+                                <span class="wc-label">"Privacy"</span><span>{p.privacy}</span>
+                                <span class="wc-label">"Cost"</span><span>{p.cost}</span>
                             </div>
                         </div>
                     }
                 }).collect::<Vec<_>>()}
             </div>
 
-            // OpenRouter/Anthropic note
+            // ── Model selection (when provider selected) ──
             {move || {
-                let prov = llm_provider.get();
-                (prov == "openrouter").then(|| view! {
-                    <div class="info-box" style="margin-bottom: 0.5rem;">
-                        <i class="fa-solid fa-circle-info"></i>
-                        " Anthropic Claude is not OpenAI-compatible directly. Use "
-                        <a href="https://openrouter.ai" target="_blank" style="color: var(--accent-bright);">"OpenRouter"</a>
-                        " as a gateway to access Claude with an OpenAI-compatible API."
-                    </div>
+                let choice = llm_provider.get();
+                let preset = LLM_PRESETS.iter().find(|p| p.id == choice.as_str());
+                preset.map(|p| {
+                    let show_key = p.needs_key;
+                    let models: Vec<(&str, &str)> = p.models.to_vec();
+                    let show_custom = p.models.is_empty();
+                    view! {
+                        // API key input
+                        {show_key.then(|| view! {
+                            <div class="form-group mt-1">
+                                <label><i class="fa-solid fa-key"></i>" API Key"
+                                    {move || {
+                                        llm_has_key.get().then(|| view! {
+                                            <span class="badge badge-core" style="margin-left: 0.5rem; font-size: 0.65rem;">"key stored"</span>
+                                        })
+                                    }}
+                                </label>
+                                <input type="password" class="form-control" placeholder="sk-..."
+                                    prop:value=llm_api_key
+                                    on:input=move |ev| set_llm_api_key.set(event_target_value(&ev))
+                                />
+                            </div>
+                        })}
+                        <div class="form-group mt-1">
+                            <label><i class="fa-solid fa-cube"></i>" Model"</label>
+                            // Preset model chips
+                            {(!models.is_empty()).then(|| {
+                                let models2 = models.clone();
+                                view! {
+                                    <div class="wizard-model-chips">
+                                        {models2.into_iter().map(|(name, desc)| {
+                                            let n = name.to_string();
+                                            let n2 = n.clone();
+                                            view! {
+                                                <button
+                                                    class=move || if llm_model.get() == n { "wizard-model-chip active" } else { "wizard-model-chip" }
+                                                    on:click=move |_| set_llm_model.set(n2.clone())
+                                                >
+                                                    <strong>{name}</strong>
+                                                    <small>{desc}</small>
+                                                </button>
+                                            }
+                                        }).collect::<Vec<_>>()}
+                                    </div>
+                                }
+                            })}
+                            // Fetched models as chips
+                            {move || {
+                                let fetched = llm_fetched_models.get();
+                                if fetched.is_empty() { return None; }
+                                let chips = fetched.iter().map(|m| {
+                                    let model_name = m.clone();
+                                    let model_name2 = model_name.clone();
+                                    view! {
+                                        <button
+                                            class=move || if llm_model.get() == model_name { "wizard-model-chip active" } else { "wizard-model-chip" }
+                                            on:click=move |_| set_llm_model.set(model_name2.clone())
+                                        >
+                                            <i class="fa-solid fa-server" style="margin-right: 0.25rem; font-size: 0.7rem;"></i>
+                                            {m.clone()}
+                                        </button>
+                                    }
+                                }).collect::<Vec<_>>();
+                                Some(view! {
+                                    <div style="margin-top: 0.5rem;">
+                                        <small class="text-secondary"><i class="fa-solid fa-server"></i>" Installed models:"</small>
+                                        <div class="wizard-model-chips" style="margin-top: 4px;">
+                                            {chips}
+                                        </div>
+                                    </div>
+                                })
+                            }}
+                            // Custom model text input
+                            {show_custom.then(|| view! {
+                                <input type="text" class="form-control" placeholder="Enter model name..."
+                                    prop:value=llm_model
+                                    on:input=move |ev| set_llm_model.set(event_target_value(&ev))
+                                />
+                            })}
+                        </div>
+                    }
                 })
             }}
 
-            <div class="form-row">
+            // ── System extras ──
+
+            // Endpoint URL
+            <div class="form-row" style="margin-top: 0.75rem;">
                 <label>"Endpoint URL"</label>
                 <input
                     type="text"
                     prop:value=llm_endpoint
                     on:input=move |ev| set_llm_endpoint.set(event_target_value(&ev))
-                />
-            </div>
-            {move || {
-                let provider = llm_provider.get();
-                let needs_key = LLM_PROVIDERS.iter().find(|p| p.id == provider).map(|p| p.needs_key).unwrap_or(false);
-                needs_key.then(|| view! {
-                    <div class="form-row">
-                        <label>
-                            "API Key"
-                            {move || {
-                                llm_has_key.get().then(|| view! {
-                                    <span class="badge badge-core" style="margin-left: 0.5rem; font-size: 0.65rem;">"key stored"</span>
-                                })
-                            }}
-                        </label>
-                        <input
-                            type="password"
-                            placeholder="sk-..."
-                            prop:value=llm_api_key
-                            on:input=move |ev| set_llm_api_key.set(event_target_value(&ev))
-                        />
-                    </div>
-                })
-            }}
-            <div class="form-row">
-                <label>"Model"</label>
-                // Preset model suggestions as clickable chips
-                {move || {
-                    let prov = llm_provider.get();
-                    LLM_PROVIDERS.iter().find(|p| p.id == prov).and_then(|p| {
-                        if p.model_suggestions.is_empty() { return None; }
-                        let chips = p.model_suggestions.iter().map(|s| {
-                            let model_name = s.to_string();
-                            let model_name2 = model_name.clone();
-                            view! {
-                                <button
-                                    class=move || {
-                                        if llm_model.get() == model_name { "wizard-model-chip active" } else { "wizard-model-chip" }
-                                    }
-                                    on:click=move |_| set_llm_model.set(model_name2.clone())
-                                >
-                                    {s.to_string()}
-                                </button>
-                            }
-                        }).collect::<Vec<_>>();
-                        Some(view! {
-                            <div style="display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.5rem;">
-                                {chips}
-                            </div>
-                        })
-                    })
-                }}
-                // Fetched models as clickable chips
-                {move || {
-                    let fetched = llm_fetched_models.get();
-                    if fetched.is_empty() { return None; }
-                    let chips = fetched.iter().map(|m| {
-                        let model_name = m.clone();
-                        let model_name2 = model_name.clone();
-                        view! {
-                            <button
-                                class=move || {
-                                    if llm_model.get() == model_name { "wizard-model-chip active" } else { "wizard-model-chip" }
-                                }
-                                on:click=move |_| set_llm_model.set(model_name2.clone())
-                            >
-                                <i class="fa-solid fa-server" style="margin-right: 0.25rem; font-size: 0.7rem;"></i>
-                                {m.clone()}
-                            </button>
-                        }
-                    }).collect::<Vec<_>>();
-                    Some(view! {
-                        <div style="margin-bottom: 0.5rem;">
-                            <span class="text-secondary" style="font-size: 0.75rem; display: block; margin-bottom: 0.25rem;">
-                                <i class="fa-solid fa-server" style="margin-right: 0.25rem;"></i>"Installed models:"
-                            </span>
-                            <div style="display: flex; flex-wrap: wrap; gap: 0.35rem;">
-                                {chips}
-                            </div>
-                        </div>
-                    })
-                }}
-                <input
-                    type="text"
-                    placeholder="e.g. llama3, gpt-4o (or click a chip above)"
-                    prop:value=llm_model
-                    on:input=move |ev| set_llm_model.set(event_target_value(&ev))
                 />
             </div>
 
@@ -1556,7 +1646,7 @@ pub fn SystemPage() -> impl IntoView {
                 />
             </div>
 
-            // Thinking model checkbox
+            // Thinking model toggle
             {move || {
                 let model = llm_model.get();
                 let is_thinking = THINKING_MODELS.iter().any(|t| model.to_lowercase().contains(t));
@@ -1572,6 +1662,7 @@ pub fn SystemPage() -> impl IntoView {
                 })
             }}
 
+            // System prompt
             <div class="form-row">
                 <label>"System Prompt"</label>
                 <textarea
@@ -1582,6 +1673,8 @@ pub fn SystemPage() -> impl IntoView {
                     on:input=move |ev| set_llm_system_prompt.set(event_target_value(&ev))
                 />
             </div>
+
+            // Save / Test / Fetch Models buttons
             <div class="button-group">
                 <button class="btn btn-success" on:click=move |_| { save_llm.dispatch(()); }>
                     <i class="fa-solid fa-floppy-disk"></i>" Save LLM Config"
@@ -1591,7 +1684,7 @@ pub fn SystemPage() -> impl IntoView {
                 </button>
                 {move || {
                     let prov = llm_provider.get();
-                    let can_fetch = LLM_PROVIDERS.iter().find(|p| p.id == prov).map(|p| p.can_fetch_models).unwrap_or(false);
+                    let can_fetch = LLM_PRESETS.iter().find(|p| p.id == prov).map(|p| p.can_fetch_models).unwrap_or(false);
                     can_fetch.then(|| view! {
                         <button class="btn btn-secondary" on:click=move |_| { fetch_models.dispatch(()); }>
                             <i class="fa-solid fa-list"></i>" Fetch Models"
@@ -1621,126 +1714,204 @@ pub fn SystemPage() -> impl IntoView {
                     </button>
                 </div>
                 <div class="wizard-modal-body">
-            <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.75rem;">
-                "NER Provider"
-            </p>
-            <div class="ner-card-grid">
-                // Built-in (Rule-based)
-                <div
-                    class=move || if ner_provider.get() == "builtin" { "ner-card ner-card-selected" } else { "ner-card" }
-                    on:click=move |_| set_ner_provider.set("builtin".into())
-                >
-                    <div class="ner-card-header">
-                        <input type="radio" name="ner_provider" prop:checked=move || ner_provider.get() == "builtin" />
-                        <strong>"Built-in (Rule-based)"</strong>
-                        <span class="badge" style="background: var(--text-muted); color: #fff; font-size: 0.65rem; margin-left: auto;">"Basic"</span>
-                    </div>
-                    <p class="text-secondary" style="font-size: 0.8rem; margin: 0.25rem 0 0;">
-                        "Pattern matching and gazetteer lookup. Always available, zero setup. Learns from your graph: known entities are recognized automatically via the built-in gazetteer."
-                    </p>
-                </div>
-                // GLiNER (ONNX)
-                <div
-                    class=move || if ner_provider.get() == "gliner" { "ner-card ner-card-selected" } else { "ner-card" }
-                    on:click=move |_| set_ner_provider.set("gliner".into())
-                >
-                    <div class="ner-card-header">
-                        <input type="radio" name="ner_provider" prop:checked=move || ner_provider.get() == "gliner" />
-                        <strong>"GLiNER (ONNX)"</strong>
-                        <span class="badge" style="background: var(--success, #2ecc71); color: #000; font-size: 0.65rem; margin-left: auto;">"Excellent"</span>
-                    </div>
-                    <p class="text-secondary" style="font-size: 0.8rem; margin: 0.25rem 0 0;">
-                        "Zero-shot NER via GLiNER models. Runs locally, no external service. Combined with graph-learned entity gazetteer for disambiguation and boosted recall."
-                    </p>
-                </div>
+
+            // ── Wizard-style NER provider cards ──
+            <p class="wizard-desc">"NER finds people, places, organizations, and concepts in your text. This is how engram knows what you\u{2019}re talking about."</p>
+            <div class="wizard-info-box">
+                <h4><i class="fa-solid fa-graduation-cap"></i>" Self-improving pipeline"</h4>
+                <p>"engram learns from every entity found:"</p>
+                <ul>
+                    <li>"NER discovers new entities \u{2192} stored in graph \u{2192} gazetteer indexes them for instant future recognition"</li>
+                    <li>"GLiNER2 relation extraction: zero-shot, multilingual, in single model pass"</li>
+                    <li>"Relation gazetteer learns every edge you store \u{2192} instant recall next time"</li>
+                </ul>
+                <p><em>"The more you use engram, the faster and more accurate it becomes."</em></p>
+            </div>
+            <div class="wizard-cards">
+                {NER_PRESETS.iter().map(|p| {
+                    let id = p.id.to_string();
+                    // Map wizard "gliner2" to system "gliner" for the signal
+                    let signal_id = if id == "gliner2" { "gliner".to_string() } else { id.clone() };
+                    let signal_id2 = signal_id.clone();
+                    view! {
+                        <div
+                            class=move || if ner_provider.get() == signal_id { "wizard-card wizard-card-selected" } else { "wizard-card" }
+                            on:click=move |_| set_ner_provider.set(signal_id2.clone())
+                        >
+                            <h4>{p.name}</h4>
+                            <div class="wizard-card-grid">
+                                <span class="wc-label">"Quality"</span><span>{p.quality}</span>
+                                <span class="wc-label">"Speed"</span><span>{p.speed}</span>
+                                <span class="wc-label">"Download"</span><span>{p.download}</span>
+                                <span class="wc-label">"License"</span><span>{p.license}</span>
+                            </div>
+                            <p class="wizard-card-note"><i class="fa-solid fa-rotate"></i>" "{p.learning}</p>
+                        </div>
+                    }
+                }).collect::<Vec<_>>()}
             </div>
 
-            // GLiNER model selector (shown when gliner provider selected)
+            // ── GLiNER2 model chips (when gliner selected) ──
+            {move || {
+                let choice = ner_provider.get();
+                // Map "gliner" -> find "gliner2" preset
+                let preset = if choice == "gliner" {
+                    NER_PRESETS.iter().find(|p| p.id == "gliner2")
+                } else {
+                    NER_PRESETS.iter().find(|p| p.id == choice.as_str())
+                };
+                preset.and_then(|p| {
+                    if p.models.is_empty() { return None; }
+                    let models: Vec<(&str, &str, &str, &str, &str)> = p.models.to_vec();
+                    Some(view! {
+                        <div class="form-group mt-1">
+                            <label><i class="fa-solid fa-cube"></i>" NER Model"</label>
+                            <p class="wizard-hint">"Select a recommended model or enter any HuggingFace model ID below."</p>
+                            <div class="wizard-model-chips">
+                                {models.into_iter().map(|(id, name, desc, _repo, lang)| {
+                                    let mid = id.to_string();
+                                    let mid2 = mid.clone();
+                                    let badge_class = if lang.contains("100+") || lang.contains("ulti") {
+                                        "wizard-lang-badge wizard-lang-multi"
+                                    } else {
+                                        "wizard-lang-badge wizard-lang-en"
+                                    };
+                                    view! {
+                                        <button
+                                            class=move || if ner_selected_model.get() == mid { "wizard-model-chip active" } else { "wizard-model-chip" }
+                                            on:click=move |_| {
+                                                set_ner_selected_model.set(mid2.clone());
+                                                set_ner_model.set(mid2.clone());
+                                            }
+                                        >
+                                            <strong>{name}</strong>
+                                            <span class=badge_class><i class="fa-solid fa-language"></i>" "{lang}</span>
+                                            <small>{desc}</small>
+                                        </button>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            </div>
+                            <div class="wizard-custom-model mt-1">
+                                <label><i class="fa-brands fa-github"></i>" Custom HuggingFace Model"</label>
+                                <div class="wizard-custom-input-row">
+                                    <input type="text" class="form-control"
+                                        placeholder="e.g. onnx-community/gliner_multi_pii-v1"
+                                        prop:value=move || {
+                                            let m = ner_selected_model.get();
+                                            let is_preset = NER_PRESETS.iter()
+                                                .flat_map(|p| p.models.iter())
+                                                .any(|(id, _, _, _, _)| *id == m.as_str());
+                                            if is_preset { String::new() } else { m }
+                                        }
+                                        on:input=move |ev| {
+                                            let v = event_target_value(&ev);
+                                            if !v.trim().is_empty() {
+                                                set_ner_selected_model.set(v.clone());
+                                                set_ner_model.set(v);
+                                            }
+                                        }
+                                    />
+                                </div>
+                                <small class="text-secondary">"Enter any GLiNER-compatible ONNX model from huggingface.co. Must contain onnx/model.onnx and tokenizer.json."</small>
+                            </div>
+                        </div>
+                    })
+                })
+            }}
+
+            // ── Relation Extraction section (like wizard STEP_REL) ──
+            {move || {
+                let is_gliner = ner_provider.get() == "gliner";
+                is_gliner.then(|| view! {
+                    <div style="margin-top: 1rem;">
+                        <h4><i class="fa-solid fa-link"></i>" Relation Extraction"</h4>
+                        <p class="wizard-desc">"GLiNER2 extracts both entities and relations in a single model pass. Configure which relation types to detect and the confidence threshold."</p>
+
+                        // Confidence Threshold
+                        <div class="form-group" style="margin-top: 1rem;">
+                            <label><i class="fa-solid fa-sliders"></i>" Confidence Threshold: "
+                                <strong>{move || format!("{:.2}", rel_threshold.get())}</strong>
+                            </label>
+                            <input type="range"
+                                min="0.50" max="0.95" step="0.05"
+                                style="width: 100%; margin-top: 0.25rem;"
+                                prop:value=move || format!("{:.2}", rel_threshold.get())
+                                on:input=move |ev| {
+                                    if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                        set_rel_threshold.set(v);
+                                    }
+                                }
+                            />
+                            <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: rgba(255,255,255,0.4);">
+                                <span>"0.50 (more relations)"</span>
+                                <span>"0.85 (recommended)"</span>
+                                <span>"0.95 (facts only)"</span>
+                            </div>
+                        </div>
+
+                        // Relation Types
+                        <div class="form-group" style="margin-top: 1rem;">
+                            <label><i class="fa-solid fa-list-check"></i>" Relation Types"</label>
+                            <p class="wizard-hint">"GLiNER2 uses zero-shot relation labels. Select a preset or define custom relation types for your domain."</p>
+                            <div class="wizard-cards" style="margin-top: 0.5rem;">
+                                <div
+                                    class=move || if rel_templates_mode.get() == "general" { "wizard-card wizard-card-selected" } else { "wizard-card" }
+                                    on:click=move |_| set_rel_templates_mode.set("general".into())
+                                    style="min-width: 200px;"
+                                >
+                                    <h4>"General (6 types)"</h4>
+                                    <p style="font-size: 0.8rem;">"works_at, headquartered_in, located_in, founded, leads, supports. Covers common entity relationships."</p>
+                                    <p style="font-size: 0.75rem; color: rgba(255,255,255,0.5);"><i class="fa-solid fa-wifi-slash" style="margin-right: 0.25rem;"></i>"Works offline / air-gapped"</p>
+                                </div>
+                                <div
+                                    class=move || if rel_templates_mode.get() == "custom" { "wizard-card wizard-card-selected" } else { "wizard-card" }
+                                    on:click=move |_| set_rel_templates_mode.set("custom".into())
+                                    style="min-width: 200px;"
+                                >
+                                    <h4>"Custom Relations"</h4>
+                                    <p style="font-size: 0.8rem;">"Define domain-specific relation types (e.g. treats, manufactures, regulates). Just name them \u{2014} GLiNER2 extracts zero-shot."</p>
+                                    <p style="font-size: 0.75rem; color: rgba(255,255,255,0.5);"><i class="fa-solid fa-file-import" style="margin-right: 0.25rem;"></i>"Air-gapped import supported"</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        // Custom relation types (shown when "custom" selected)
+                        {move || {
+                            (rel_templates_mode.get() == "custom").then(|| view! {
+                                <div class="form-group" style="margin-top: 0.75rem;">
+                                    <label>"Custom relation types JSON"</label>
+                                    <textarea
+                                        class="form-control"
+                                        style="width: 100%; min-height: 120px; font-family: monospace; font-size: 0.8rem; background: rgba(0,0,0,0.2); color: inherit; border: 1px solid rgba(255,255,255,0.1);"
+                                        prop:value=relation_templates_json
+                                        on:input=move |ev| {
+                                            set_relation_templates_json.set(event_target_value(&ev));
+                                        }
+                                        placeholder=r#"{"treats": "{head} treats {tail}", "manufactures": "{head} manufactures {tail}", "regulates": "{head} regulates {tail}"}"#
+                                    ></textarea>
+                                    <div class="wizard-info-box" style="margin-top: 0.5rem; font-size: 0.8rem;">
+                                        <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>
+                                        " Format: {\"relation_type\": \"description\"}. GLiNER2 uses the relation name as a zero-shot label. Custom types are merged with defaults."
+                                    </div>
+                                </div>
+                            })
+                        }}
+                    </div>
+                })
+            }}
+
+            // ── System extras ──
+
+            // NER model download status
             {
                 let api_ner_panel = api_for_ner.clone();
                 move || {
                 let is_gliner = ner_provider.get() == "gliner";
-                let api_check_ner = api_ner_panel.clone();
-                let api_dl_ner = api_check_ner.clone();
+                let api_dl_ner = api_ner_panel.clone();
                 let api_save_after_dl = api_dl_ner.clone();
                 is_gliner.then(|| view! {
                     <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
-                        <h4 style="margin-top: 0;"><i class="fa-solid fa-tags"></i>" GLiNER Model"</h4>
-                        <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
-                            "Select and install a GLiNER ONNX model for entity recognition."
-                        </p>
-
-                        // Model selector dropdown
-                        <div class="form-row">
-                            <label>"Model"</label>
-                            <select prop:value=ner_selected_model on:change={
-                                let api = api_check_ner.clone();
-                                move |ev: web_sys::Event| {
-                                    let val = event_target_value(&ev);
-                                    set_ner_selected_model.set(val.clone());
-                                    set_ner_model_status.set(String::new());
-                                    if !val.is_empty() {
-                                        let api = api.clone();
-                                        let model_id = val.clone();
-                                        set_ner_model_status.set("Checking...".into());
-                                        wasm_bindgen_futures::spawn_local(async move {
-                                            let path = format!("/config/ner-model?id={}", model_id);
-                                            match api.get_text(&path).await {
-                                                Ok(text) => set_ner_model_status.set(parse_ner_model_status(&text)),
-                                                Err(_) => set_ner_model_status.set("Not installed".into()),
-                                            }
-                                        });
-                                    }
-                                }
-                            }>
-                                <option value="">"-- Select a model --"</option>
-                                <optgroup label="Commercial-friendly (Apache-2.0)">
-                                    {NER_MODELS.iter().filter(|m| m.license_ok).map(|m| {
-                                        let id = m.id.to_string();
-                                        let label = format!("{} ({})", m.label, m.size);
-                                        view! { <option value={id}>{label}</option> }
-                                    }).collect::<Vec<_>>()}
-                                </optgroup>
-                                <optgroup label="Non-commercial (CC-BY-NC-4.0)">
-                                    {NER_MODELS.iter().filter(|m| !m.license_ok).map(|m| {
-                                        let id = m.id.to_string();
-                                        let label = format!("{} ({})", m.label, m.size);
-                                        view! { <option value={id}>{label}</option> }
-                                    }).collect::<Vec<_>>()}
-                                </optgroup>
-                            </select>
-                        </div>
-
-                        // Model info card
-                        {move || {
-                            let sel = ner_selected_model.get();
-                            NER_MODELS.iter().find(|m| m.id == sel).map(|m| {
-                                let license_style = if m.license_ok {
-                                    "background: rgba(46,204,113,0.15); color: #2ecc71; border: 1px solid rgba(46,204,113,0.3);"
-                                } else {
-                                    "background: rgba(231,76,60,0.15); color: #e74c3c; border: 1px solid rgba(231,76,60,0.3);"
-                                };
-                                let license_icon = if m.license_ok { "fa-solid fa-check" } else { "fa-solid fa-triangle-exclamation" };
-                                let size = m.size.to_string();
-                                let langs = m.langs.to_string();
-                                let license = m.license.to_string();
-                                let hf = m.hf_url.to_string();
-                                view! {
-                                    <div style="margin: 0.5rem 0; padding: 0.5rem; background: rgba(255,255,255,0.02); border-radius: 4px; font-size: 0.8rem;">
-                                        <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
-                                            <span><i class="fa-solid fa-hard-drive" style="margin-right: 0.25rem;"></i>{size}</span>
-                                            <span><i class="fa-solid fa-globe" style="margin-right: 0.25rem;"></i>{langs}</span>
-                                            <span style={format!("padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; {license_style}")}>
-                                                <i class={license_icon} style="margin-right: 0.2rem;"></i>{license}
-                                            </span>
-                                            <a href={hf} target="_blank" style="color: var(--accent-bright); font-size: 0.75rem;">
-                                                <i class="fa-solid fa-arrow-up-right-from-square" style="margin-right: 0.15rem;"></i>"HuggingFace"
-                                            </a>
-                                        </div>
-                                    </div>
-                                }
-                            })
-                        }}
+                        <h4 style="margin-top: 0;"><i class="fa-solid fa-cloud-arrow-down"></i>" Model Download"</h4>
 
                         // Install status
                         {move || {
@@ -1772,7 +1943,7 @@ pub fn SystemPage() -> impl IntoView {
                             })
                         }}
 
-                        // Download & Enable button (preset models)
+                        // Download & Enable button
                         <div class="button-group" style="margin-top: 0.5rem;">
                             <button class="btn btn-primary" on:click={
                                 let api_dl = api_dl_ner.clone();
@@ -1783,29 +1954,32 @@ pub fn SystemPage() -> impl IntoView {
                                         set_ner_download_status.set("Please select a model first.".into());
                                         return;
                                     }
-                                    let model_info = match NER_MODELS.iter().find(|m| m.id == sel) {
-                                        Some(m) => m,
-                                        None => {
-                                            set_ner_download_status.set("Unknown model selected.".into());
-                                            return;
-                                        }
+                                    // Check if it's a preset model with known repo
+                                    let preset_model = NER_PRESETS.iter()
+                                        .flat_map(|p| p.models.iter())
+                                        .find(|(id, _, _, _, _)| *id == sel.as_str());
+
+                                    let (model_id, repo) = if let Some((id, _name, _desc, hf_repo, _lang)) = preset_model {
+                                        (id.to_string(), hf_repo.to_string())
+                                    } else {
+                                        // Custom model ID
+                                        let repo = if sel.contains('/') { sel.clone() } else { format!("onnx-community/{}", sel) };
+                                        let mid = repo.split('/').last().unwrap_or(&repo).to_string();
+                                        (mid, repo)
                                     };
-                                    let model_id = model_info.id.to_string();
-                                    let model_url = model_info.model_url.to_string();
-                                    let tokenizer_url = model_info.tokenizer_url.to_string();
+
+                                    let variant = if model_id.contains("fp32") { "fp32" } else { "fp16" };
                                     let api_dl = api_dl.clone();
                                     let api_save = api_save.clone();
-                                    set_ner_download_status.set(format!("Downloading {}...", model_info.label));
+                                    set_ner_download_status.set(format!("Downloading {}...", model_id));
                                     wasm_bindgen_futures::spawn_local(async move {
                                         let body = serde_json::json!({
-                                            "model_id": model_id,
-                                            "model_url": model_url,
-                                            "tokenizer_url": tokenizer_url,
+                                            "repo_id": repo,
+                                            "variant": variant,
                                         });
-                                        match api_dl.post_text("/config/ner-download", &body).await {
+                                        match api_dl.post_text("/config/gliner2-download", &body).await {
                                             Ok(r) => {
                                                 set_ner_download_status.set(String::new());
-                                                // Parse the JSON response
                                                 let status_msg = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
                                                     let size = v.get("model_size_mb").and_then(|v| v.as_f64());
                                                     if let Some(mb) = size {
@@ -1817,13 +1991,12 @@ pub fn SystemPage() -> impl IntoView {
                                                     format!("Installed: {r}")
                                                 };
                                                 set_ner_model_status.set(status_msg);
-                                                // Auto-save config with this model
                                                 let cfg_body = serde_json::json!({
-                                                    "ner_provider": "gliner",
+                                                    "ner_provider": "gliner2",
                                                     "ner_model": model_id,
                                                 });
                                                 let _ = api_save.post_text("/config", &cfg_body).await;
-                                                set_status_msg.set("GLiNER model installed and NER config saved.".into());
+                                                set_status_msg.set("GLiNER2 model installed and NER config saved.".into());
                                             }
                                             Err(e) => {
                                                 set_ner_download_status.set(String::new());
@@ -1836,531 +2009,29 @@ pub fn SystemPage() -> impl IntoView {
                                 <i class="fa-solid fa-cloud-arrow-down"></i>" Download & Enable"
                             </button>
                         </div>
-
-                        // ── Custom HuggingFace NER model ──
-                        <details style="margin-top: 0.75rem;">
-                            <summary class="text-secondary" style="cursor: pointer; font-size: 0.85rem;"><i class="fa-brands fa-github" style="margin-right: 0.25rem;"></i>"Custom HuggingFace GLiNER Model"</summary>
-                            <div style="margin-top: 0.5rem;">
-                                <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.5rem;">
-                                    "Enter any GLiNER-compatible ONNX model ID from huggingface.co. Must contain onnx/model.onnx and tokenizer.json."
-                                </p>
-                                <div class="form-row">
-                                    <label>"HuggingFace Model ID"</label>
-                                    <input type="text" class="form-control" id="ner-custom-hf-id"
-                                        placeholder="e.g. onnx-community/gliner_multi_pii-v1"
-                                    />
-                                </div>
-                                <div class="button-group" style="margin-top: 0.5rem;">
-                                    <button class="btn btn-primary" on:click={
-                                        let api_dl = api_dl_ner.clone();
-                                        let api_save = api_save_after_dl.clone();
-                                        move |_| {
-                                            let api_dl = api_dl.clone();
-                                            let api_save = api_save.clone();
-                                            wasm_bindgen_futures::spawn_local(async move {
-                                                use wasm_bindgen::JsCast;
-                                                let doc = web_sys::window().unwrap().document().unwrap();
-                                                let input = doc.get_element_by_id("ner-custom-hf-id")
-                                                    .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok());
-                                                let hf_id = input.map(|i| i.value()).unwrap_or_default();
-                                                if hf_id.trim().is_empty() {
-                                                    set_ner_download_status.set("Please enter a HuggingFace model ID.".into());
-                                                    return;
-                                                }
-                                                let hf_id = hf_id.trim();
-                                                let repo = if hf_id.contains('/') { hf_id.to_string() } else { format!("onnx-community/{}", hf_id) };
-                                                // Extract model_id from repo (last part after /)
-                                                let model_id = repo.split('/').last().unwrap_or(&repo).to_string();
-                                                set_ner_download_status.set(format!("Downloading {}...", repo));
-                                                let body = serde_json::json!({
-                                                    "model_id": model_id,
-                                                    "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", repo),
-                                                    "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", repo),
-                                                });
-                                                match api_dl.post_text("/config/ner-download", &body).await {
-                                                    Ok(r) => {
-                                                        set_ner_download_status.set(String::new());
-                                                        let status_msg = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
-                                                            let size = v.get("model_size_mb").and_then(|v| v.as_f64());
-                                                            if let Some(mb) = size {
-                                                                format!("Model installed ({:.1} MB). Ready to use.", mb)
-                                                            } else {
-                                                                "Model installed. Ready to use.".to_string()
-                                                            }
-                                                        } else {
-                                                            format!("Installed: {r}")
-                                                        };
-                                                        set_ner_model_status.set(status_msg);
-                                                        // Auto-save config
-                                                        let cfg_body = serde_json::json!({
-                                                            "ner_provider": "gliner",
-                                                            "ner_model": model_id,
-                                                        });
-                                                        let _ = api_save.post_text("/config", &cfg_body).await;
-                                                        set_status_msg.set(format!("Custom GLiNER model {} installed and NER config saved.", repo));
-                                                    }
-                                                    Err(e) => {
-                                                        set_ner_download_status.set(String::new());
-                                                        set_ner_model_status.set(format!("Download failed: {e}"));
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    }>
-                                        <i class="fa-solid fa-cloud-arrow-down"></i>" Download from HuggingFace"
-                                    </button>
-                                </div>
-                            </div>
-                        </details>
-                    </div>
-                })
-            }}
-            // ── Relation Extraction Model ──
-            {
-                let api_rel = api.clone();
-                move || {
-                let is_gliner = ner_provider.get() == "gliner";
-                let api_rel_dl = api_rel.clone();
-                let api_rel_custom = api_rel.clone();
-                is_gliner.then(|| view! {
-                    <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
-                        <h4 style="margin-top: 0;"><i class="fa-solid fa-link"></i>" Relation Extraction"</h4>
-                        <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
-                            "Zero-shot relation extraction model. Multilingual, ~100MB model."
-                        </p>
-
-                        // Quick install RE model
-                        <div style="margin: 0.5rem 0;">
-                            <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.5rem;"><strong>"Quick Install"</strong></p>
-                            {[
-                                ("multilingual-MiniLMv2-L6-mnli-xnli", "MiniLMv2 (100+ langs, ~100MB, fast)", "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli"),
-                                ("mDeBERTa-v3-base-xnli", "mDeBERTa v3 (100+ langs, ~280MB, accurate)", "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"),
-                            ].into_iter().map(|(model_id, label, repo)| {
-                                let api = api_rel_dl.clone();
-                                let mid = model_id.to_string();
-                                let rp = repo.to_string();
-                                let lbl = label.to_string();
-                                view! {
-                                    <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                                        <div style="flex: 1; min-width: 0;">
-                                            <code style="font-size: 0.85rem;">{lbl}</code>
-                                        </div>
-                                        <button class="btn btn-sm btn-primary" style="white-space: nowrap; padding: 0.2rem 0.5rem; font-size: 0.75rem;" on:click={
-                                            let api = api.clone();
-                                            let mid = mid.clone();
-                                            let rp = rp.clone();
-                                            move |_| {
-                                                let api = api.clone();
-                                                let mid = mid.clone();
-                                                let rp = rp.clone();
-                                                set_rel_download_status.set(format!("Downloading {}...", rp));
-                                                wasm_bindgen_futures::spawn_local(async move {
-                                                    let body = serde_json::json!({
-                                                        "model_id": mid,
-                                                        "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", rp),
-                                                        "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", rp),
-                                                    });
-                                                    match api.post_text("/config/rel-download", &body).await {
-                                                        Ok(r) => {
-                                                            set_rel_download_status.set(String::new());
-                                                            let msg = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
-                                                                let size = v.get("model_size_mb").and_then(|v| v.as_f64());
-                                                                if let Some(mb) = size {
-                                                                    format!("RE model installed ({:.1} MB). Ready to use.", mb)
-                                                                } else {
-                                                                    "RE model installed. Ready to use.".to_string()
-                                                                }
-                                                            } else {
-                                                                "Installed.".to_string()
-                                                            };
-                                                            set_rel_model_status.set(msg);
-                                                        }
-                                                        Err(e) => {
-                                                            set_rel_download_status.set(String::new());
-                                                            set_rel_model_status.set(format!("Download failed: {e}"));
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                        }>
-                                            <i class="fa-solid fa-cloud-arrow-down"></i>" Install"
-                                        </button>
-                                    </div>
-                                }
-                            }).collect::<Vec<_>>()}
-                        </div>
-
-                        // Status display
-                        {move || {
-                            let st = rel_model_status.get();
-                            if st.is_empty() {
-                                None
-                            } else if st.contains("installed") || st.contains("Installed") || st.contains("Ready") {
-                                Some(view! {
-                                    <div style="margin: 0.25rem 0; padding: 0.35rem 0.5rem; background: rgba(46,204,113,0.1); border: 1px solid rgba(46,204,113,0.3); border-radius: 4px; font-size: 0.8rem;">
-                                        <i class="fa-solid fa-circle-check" style="color: #2ecc71; margin-right: 0.25rem;"></i>{st.clone()}
-                                    </div>
-                                }.into_any())
-                            } else {
-                                Some(view! {
-                                    <div style="margin: 0.25rem 0; padding: 0.35rem 0.5rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; font-size: 0.8rem;">
-                                        <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>{st.clone()}
-                                    </div>
-                                }.into_any())
-                            }
-                        }}
-
-                        // Download progress
-                        {move || {
-                            let st = rel_download_status.get();
-                            (!st.is_empty()).then(|| view! {
-                                <div class="info-box" style="margin: 0.25rem 0; font-size: 0.8rem;">
-                                    <i class="fa-solid fa-spinner fa-spin" style="margin-right: 0.25rem;"></i>{st}
-                                </div>
-                            })
-                        }}
-
-                        // Custom HuggingFace RE model
-                        <details style="margin-top: 0.5rem;">
-                            <summary class="text-secondary" style="cursor: pointer; font-size: 0.85rem;"><i class="fa-brands fa-github" style="margin-right: 0.25rem;"></i>"Custom HuggingFace RE Model"</summary>
-                            <div style="margin-top: 0.5rem;">
-                                <div class="form-row">
-                                    <label>"HuggingFace Model ID"</label>
-                                    <input type="text" class="form-control" id="rel-custom-hf-id"
-                                        placeholder="e.g. MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli"
-                                    />
-                                </div>
-                                <div class="button-group" style="margin-top: 0.5rem;">
-                                    <button class="btn btn-primary" on:click={
-                                        let api = api_rel_custom.clone();
-                                        move |_| {
-                                            let api = api.clone();
-                                            wasm_bindgen_futures::spawn_local(async move {
-                                                use wasm_bindgen::JsCast;
-                                                let doc = web_sys::window().unwrap().document().unwrap();
-                                                let input = doc.get_element_by_id("rel-custom-hf-id")
-                                                    .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok());
-                                                let hf_id = input.map(|i| i.value()).unwrap_or_default();
-                                                if hf_id.trim().is_empty() {
-                                                    set_rel_download_status.set("Please enter a HuggingFace model ID.".into());
-                                                    return;
-                                                }
-                                                let hf_id = hf_id.trim();
-                                                let repo = if hf_id.contains('/') { hf_id.to_string() } else { format!("MoritzLaurer/{}", hf_id) };
-                                                let model_id = repo.split('/').last().unwrap_or(&repo).to_string();
-                                                set_rel_download_status.set(format!("Downloading {}...", repo));
-                                                let body = serde_json::json!({
-                                                    "model_id": model_id,
-                                                    "model_url": format!("https://huggingface.co/{}/resolve/main/onnx/model.onnx", repo),
-                                                    "tokenizer_url": format!("https://huggingface.co/{}/resolve/main/tokenizer.json", repo),
-                                                });
-                                                match api.post_text("/config/rel-download", &body).await {
-                                                    Ok(r) => {
-                                                        set_rel_download_status.set(String::new());
-                                                        let msg = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r) {
-                                                            let size = v.get("model_size_mb").and_then(|v| v.as_f64());
-                                                            if let Some(mb) = size {
-                                                                format!("RE model installed ({:.1} MB). Ready to use.", mb)
-                                                            } else {
-                                                                "RE model installed. Ready to use.".to_string()
-                                                            }
-                                                        } else {
-                                                            "Installed.".to_string()
-                                                        };
-                                                        set_rel_model_status.set(msg);
-                                                    }
-                                                    Err(e) => {
-                                                        set_rel_download_status.set(String::new());
-                                                        set_rel_model_status.set(format!("Download failed: {e}"));
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    }>
-                                        <i class="fa-solid fa-cloud-arrow-down"></i>" Download from HuggingFace"
-                                    </button>
-                                </div>
-                            </div>
-                        </details>
-
-                        // Manual install note
-                        <div class="info-box" style="margin-top: 0.75rem; font-size: 0.8rem; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 4px; padding: 0.5rem;">
-                            <i class="fa-solid fa-folder-open" style="margin-right: 0.25rem;"></i>
-                            <strong>"Manual install: "</strong>
-                            "Place "<code>"model.onnx"</code>" + "<code>"tokenizer.json"</code>" in "
-                            <code>"~/.engram/models/rel/&lt;model-name&gt;/"</code>
-                            ". Works with any RE/NLI model (ONNX format, 3-class: entailment/neutral/contradiction)."
-                        </div>
-                    </div>
-
-                    // ── Coreference Resolution (planned) ──
-                    <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); opacity: 0.5;">
-                        <h4 style="margin-top: 0;">
-                            <i class="fa-solid fa-users"></i>" Coreference Resolution"
-                            <span class="badge badge-archival" style="margin-left: 0.5rem; font-size: 0.65rem;">"Coming Soon"</span>
-                        </h4>
-                        <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
-                            "Resolves pronouns and noun phrases to canonical entity names before relation extraction. E.g. \"He\" -> \"John Smith\", \"the company\" -> \"Apple\". (planned feature)"
-                        </p>
-                        <div style="display: flex; align-items: center; gap: 0.5rem;">
-                            <input
-                                type="checkbox"
-                                disabled=true
-                                prop:checked=coref_enabled
-                            />
-                            <label style="margin: 0; color: var(--text-muted);">"Enable coreference resolution"</label>
-                        </div>
-                        <div class="info-box" style="margin-top: 0.5rem; font-size: 0.8rem;">
-                            <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>
-                            " This feature is not yet implemented. Rule-based coreference resolution is planned for a future release."
-                        </div>
-                    </div>
-
-                    // ── Confidence Threshold ──
-                    <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
-                        <h4 style="margin-top: 0;"><i class="fa-solid fa-sliders"></i>" RE Confidence Threshold"</h4>
-                        <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
-                            "Minimum confidence for relation extraction. Higher = fewer but more precise relations."
-                        </p>
-                        <div style="display: flex; align-items: center; gap: 0.75rem;">
-                            <input type="range"
-                                min="0.30" max="0.95" step="0.05"
-                                style="flex: 1;"
-                                prop:value=move || format!("{:.2}", rel_threshold.get())
-                                on:input=move |ev| {
-                                    if let Ok(v) = event_target_value(&ev).parse::<f64>() {
-                                        set_rel_threshold.set(v);
-                                    }
-                                }
-                            />
-                            <strong style="min-width: 3em; text-align: right;">{move || format!("{:.2}", rel_threshold.get())}</strong>
-                        </div>
-                        <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: rgba(255,255,255,0.4); margin-top: 0.25rem;">
-                            <span>"0.30 (recall)"</span>
-                            <span>"0.90 (default)"</span>
-                            <span>"0.95 (precision)"</span>
-                        </div>
-                    </div>
-
-                    // ── Relation Templates ──
-                    <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
-                        <h4 style="margin-top: 0;"><i class="fa-solid fa-list-check"></i>" Relation Templates"</h4>
-                        <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
-                            "Relation type labels for GLiNER2 zero-shot extraction. Each maps a relation type to a natural language pattern with {head} and {tail} placeholders."
-                        </p>
-
-                        // Import/Export buttons
-                        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
-                            <button class="btn btn-sm btn-secondary" on:click={
-                                let api = api.clone();
-                                move |_| {
-                                    let api = api.clone();
-                                    wasm_bindgen_futures::spawn_local(async move {
-                                        match api.get_text("/config/relation-templates/export").await {
-                                            Ok(text) => {
-                                                // Create a downloadable blob
-                                                use wasm_bindgen::JsCast;
-                                                let blob = web_sys::Blob::new_with_str_sequence_and_options(
-                                                    &js_sys::Array::of1(&text.into()),
-                                                    web_sys::BlobPropertyBag::new().type_("application/json"),
-                                                ).ok();
-                                                if let Some(blob) = blob {
-                                                    if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
-                                                        let doc = web_sys::window().unwrap().document().unwrap();
-                                                        let a = doc.create_element("a").unwrap();
-                                                        a.set_attribute("href", &url).ok();
-                                                        a.set_attribute("download", "engram-relation-templates.json").ok();
-                                                        a.dyn_ref::<web_sys::HtmlElement>().unwrap().click();
-                                                        web_sys::Url::revoke_object_url(&url).ok();
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => set_import_status.set(format!("Export failed: {e}")),
-                                        }
-                                    });
-                                }
-                            }>
-                                <i class="fa-solid fa-file-export" style="margin-right: 0.25rem;"></i>"Export"
-                            </button>
-                            <button class="btn btn-sm btn-secondary" on:click={
-                                move |_| {
-                                    // Create a hidden file input and click it
-                                    use wasm_bindgen::JsCast;
-                                    let doc = web_sys::window().unwrap().document().unwrap();
-                                    let input = doc.create_element("input").unwrap();
-                                    let input = input.dyn_into::<web_sys::HtmlInputElement>().unwrap();
-                                    input.set_type("file");
-                                    input.set_accept(".json");
-                                    input.set_attribute("style", "display:none").ok();
-                                    input.set_id("_rel_template_import");
-                                    doc.body().unwrap().append_child(&input).ok();
-                                    input.click();
-                                }
-                            }>
-                                <i class="fa-solid fa-file-import" style="margin-right: 0.25rem;"></i>"Import"
-                            </button>
-                            // Hidden file input change handler (imports the file)
-                            <script>"
-                            document.addEventListener('change', function(e) {
-                                if (e.target && e.target.id === '_rel_template_import') {
-                                    var file = e.target.files[0];
-                                    if (!file) return;
-                                    var reader = new FileReader();
-                                    reader.onload = function(ev) {
-                                        try {
-                                            var data = JSON.parse(ev.target.result);
-                                            fetch('/config/relation-templates/import', {
-                                                method: 'POST',
-                                                headers: {'Content-Type': 'application/json'},
-                                                body: JSON.stringify(data)
-                                            }).then(function(r) { return r.json(); })
-                                            .then(function(j) {
-                                                // Reload config to refresh templates textarea
-                                                window.location.reload();
-                                            });
-                                        } catch(ex) {
-                                            alert('Invalid JSON file');
-                                        }
-                                    };
-                                    reader.readAsText(file);
-                                    e.target.remove();
-                                }
-                            });
-                            "</script>
-                        </div>
-
-                        // Import status
-                        {move || {
-                            let st = import_status.get();
-                            (!st.is_empty()).then(|| view! {
-                                <div class="info-box" style="margin-bottom: 0.5rem; font-size: 0.8rem;">
-                                    <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>{st}
-                                </div>
-                            })
-                        }}
-
-                        <details>
-                            <summary style="cursor: pointer; font-size: 0.85rem;"><i class="fa-solid fa-pen-to-square" style="margin-right: 0.25rem;"></i>"Edit Templates (JSON)"</summary>
-                            <div style="margin-top: 0.5rem;">
-                                <textarea
-                                    class="form-control"
-                                    style="width: 100%; min-height: 200px; font-family: monospace; font-size: 0.8rem; background: rgba(0,0,0,0.2); color: inherit; border: 1px solid rgba(255,255,255,0.1);"
-                                    prop:value=relation_templates_json
-                                    on:input=move |ev| {
-                                        set_relation_templates_json.set(event_target_value(&ev));
-                                    }
-                                    placeholder=r#"{"works_at": "{head} works at {tail}", "born_in": "{head} was born in {tail}", ...}"#
-                                ></textarea>
-                                <div class="info-box" style="margin-top: 0.5rem; font-size: 0.75rem;">
-                                    <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>
-                                    " 21 default relation types ship with engram (TACRED/FewRel/Wikidata). Used as GLiNER2 zero-shot labels. Leave empty to use defaults. Format: {\"relation_type\": \"{head} verb {tail}\"}."
-                                </div>
-                                <div style="margin-top: 0.5rem;">
-                                    <button class="btn btn-sm btn-secondary" on:click=move |_| {
-                                        // Reset to default templates
-                                        let defaults = serde_json::json!({
-                                            "works_at": "{head} works at {tail}",
-                                            "born_in": "{head} was born in {tail}",
-                                            "lives_in": "{head} lives in {tail}",
-                                            "educated_at": "{head} was educated at {tail}",
-                                            "spouse": "{head} is married to {tail}",
-                                            "parent_of": "{head} is the parent of {tail}",
-                                            "child_of": "{head} is the child of {tail}",
-                                            "citizen_of": "{head} is a citizen of {tail}",
-                                            "member_of": "{head} is a member of {tail}",
-                                            "holds_position": "{head} holds the position of {tail}",
-                                            "founded_by": "{head} was founded by {tail}",
-                                            "headquartered_in": "{head}'s headquarters are in {tail}",
-                                            "subsidiary_of": "{head} is a subsidiary of {tail}",
-                                            "acquired_by": "{head} was acquired by {tail}",
-                                            "located_in": "{head} is located in {tail}",
-                                            "instance_of": "{head} is a {tail}",
-                                            "part_of": "{head} is part of {tail}",
-                                            "capital_of": "{head} is the capital of {tail}",
-                                            "cause_of": "{head} causes {tail}",
-                                            "author_of": "{head} was written by {tail}",
-                                            "produces": "{head} produces {tail}"
-                                        });
-                                        set_relation_templates_json.set(serde_json::to_string_pretty(&defaults).unwrap_or_default());
-                                    }>
-                                        <i class="fa-solid fa-rotate-left" style="margin-right: 0.25rem;"></i>"Reset to Defaults"
-                                    </button>
-                                </div>
-                            </div>
-                        </details>
                     </div>
                 })
             }}
 
+            // Coreference Resolution toggle (Coming Soon)
+            <div class="card" style="margin: 0.75rem 0; padding: 0.75rem; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); opacity: 0.5;">
+                <h4 style="margin-top: 0;">
+                    <i class="fa-solid fa-users"></i>" Coreference Resolution"
+                    <span class="badge badge-archival" style="margin-left: 0.5rem; font-size: 0.65rem;">"Coming Soon"</span>
+                </h4>
+                <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+                    "Resolves pronouns and noun phrases to canonical entity names. E.g. \"He\" -> \"John Smith\". (planned feature)"
+                </p>
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <input type="checkbox" disabled=true prop:checked=coref_enabled />
+                    <label style="margin: 0; color: var(--text-muted);">"Enable coreference resolution"</label>
+                </div>
+            </div>
+
+            // Save NER/RE Config button
             <div class="button-group" style="margin-top: 0.5rem;">
                 <button class="btn btn-success" on:click=move |_| { save_ner.dispatch(()); }>
                     <i class="fa-solid fa-floppy-disk"></i>" Save NER/RE Config"
-                </button>
-            </div>
-
-                    // ── Quantization (merged into NER modal) ──
-                    <h4 style="margin-top: 1.5rem;"><i class="fa-solid fa-compress"></i>" Quantization"</h4>
-            <div class="form-row" style="display: flex; align-items: center; gap: 0.5rem;">
-                <input
-                    type="checkbox"
-                    prop:checked=quant_enabled
-                    on:change=move |ev| {
-                        let checked = event_target_checked(&ev);
-                        set_quant_enabled.set(checked);
-                    }
-                />
-                <label style="margin: 0;">"Enable vector quantization (Int8)"</label>
-            </div>
-            <div class="info-box" style="margin-top: 0.5rem;">
-                <i class="fa-solid fa-circle-info"></i>
-                " Quantization reduces memory usage by compressing embedding vectors. Slight accuracy trade-off."
-            </div>
-
-            // Detailed status from compute info
-            {move || {
-                compute.get().flatten().map(|c| {
-                    let dim = c.embedder_dim.unwrap_or(0);
-                    let backend = c.gpu_backend.clone().unwrap_or_else(|| "CPU".into());
-                    view! {
-                        <table class="data-table" style="margin-top: 0.75rem;">
-                            <tbody>
-                                <tr>
-                                    <td style="width: 50%; font-weight: 500;">"Int8 Quantization"</td>
-                                    <td>{move || if quant_enabled.get() {
-                                        view! { <span class="badge badge-core">"active"</span> }.into_any()
-                                    } else {
-                                        view! { <span class="badge badge-archival">"off"</span> }.into_any()
-                                    }}</td>
-                                </tr>
-                                <tr>
-                                    <td style="font-weight: 500;">"Vector Dimensions"</td>
-                                    <td>{dim.to_string()}</td>
-                                </tr>
-                                <tr>
-                                    <td style="font-weight: 500;">"Compute Backend"</td>
-                                    <td>{backend}</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    }
-                })
-            }}
-
-            // Vector count from stats
-            {move || {
-                stats.get().flatten().map(|s| {
-                    view! {
-                        <div class="info-box" style="margin-top: 0.5rem;">
-                            <i class="fa-solid fa-chart-bar"></i>
-                            " Nodes: "{s.nodes.to_string()}" | Edges: "{s.edges.to_string()}
-                        </div>
-                    }
-                })
-            }}
-
-            <div class="button-group" style="margin-top: 0.5rem;">
-                <button class="btn btn-success" on:click=move |_| { toggle_quantization.dispatch(()); }>
-                    <i class="fa-solid fa-floppy-disk"></i>" Apply"
                 </button>
             </div>
                 </div> // wizard-modal-body
