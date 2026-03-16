@@ -231,13 +231,13 @@ pub fn GraphPage() -> impl IntoView {
         }
     });
 
-    // Load node details on click + highlight + open detail modal
+    // Load node details on click + highlight (sidebar preview only, no modal)
     let api_detail = api.clone();
     let on_select = Callback::new(move |node_id: String| {
         set_selected_node.set(Some(node_id.clone()));
         set_highlighted_node.set(Some(node_id.clone()));
         set_detail_node_id.set(Some(node_id.clone()));
-        set_detail_modal_open.set(true);
+        // Do NOT open modal on click -- modal opens from sidebar "Open" button or context menu
         let api = api_detail.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let encoded = js_sys::encode_uri_component(&node_id);
