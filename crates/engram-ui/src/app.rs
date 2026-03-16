@@ -32,10 +32,11 @@ pub fn App() -> impl IntoView {
 
     let is_authed = move || auth_state.get().is_some();
 
-    // Wizard visibility signal
+    // Wizard visibility signal -- provide as context so System page can trigger it
     let (wizard_open, set_wizard_open) = signal(false);
+    provide_context(set_wizard_open);
 
-    // Check config status when authenticated — show wizard if empty graph & not dismissed
+    // Check config status when authenticated — auto-show wizard only if empty graph & not dismissed
     let api_for_check = use_context::<ApiClient>().unwrap_or_else(|| ApiClient::new(&base_url));
     let check_status = Action::new_local(move |_: &()| {
         let api = api_for_check.clone();

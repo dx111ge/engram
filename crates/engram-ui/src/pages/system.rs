@@ -2790,30 +2790,18 @@ fn DatabaseManagementInline(
             // ── Rerun Onboarding Wizard ──
             <h4 style="margin-top: 1.5rem;"><i class="fa-solid fa-hat-wizard"></i>" Onboarding Wizard"</h4>
             <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 0.75rem;">
-                "Rerun the initial setup wizard to reconfigure embedding, LLM, and NER settings."
+                "Rerun the setup wizard to reconfigure settings or seed a new topic into your knowledge graph."
             </p>
             <div class="button-group">
                 <button class="btn btn-primary" on:click={
-                    let api = api.clone();
                     move |_| {
-                        let api = api.clone();
-                        wasm_bindgen_futures::spawn_local(async move {
-                            let body = serde_json::json!({ "wizard_dismissed": false });
-                            match api.post_text("/config", &body).await {
-                                Ok(_) => {
-                                    // Reload page to trigger wizard
-                                    if let Some(window) = web_sys::window() {
-                                        let _ = window.location().reload();
-                                    }
-                                }
-                                Err(e) => {
-                                    set_status_msg.set(format!("Failed to reset wizard: {e}"));
-                                }
-                            }
-                        });
+                        // Open wizard directly via shared context signal
+                        if let Some(set_open) = use_context::<WriteSignal<bool>>() {
+                            set_open.set(true);
+                        }
                     }
                 }>
-                    <i class="fa-solid fa-hat-wizard"></i>" Rerun Onboarding Wizard"
+                    <i class="fa-solid fa-hat-wizard"></i>" Run Setup Wizard"
                 </button>
             </div>
         </div>
