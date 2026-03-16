@@ -4,6 +4,7 @@ mod llm;
 mod ner;
 mod secrets;
 mod database;
+pub mod rules;
 
 use leptos::prelude::*;
 
@@ -414,6 +415,16 @@ pub fn SystemPage() -> impl IntoView {
                         view! { <span class="status-dot green"></span>{txt} }
                     }}</div>
                 </div>
+                // ── Card: Rules ──
+                <div class="system-card" on:click=move |_| set_modal_open.set("rules".into())>
+                    <div class="system-card-header">
+                        <span class="system-card-icon"><i class="fa-solid fa-gavel"></i></span>
+                        <span class="system-card-title">"Rules"</span>
+                    </div>
+                    <div class="system-card-status">
+                        <span class="status-dot green"></span>"Inference & Action"
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -716,5 +727,12 @@ pub fn SystemPage() -> impl IntoView {
                 </div>
             </div>
         </div>
+
+        // ── Modal: Rules ──
+        <rules::RulesModal
+            open=Signal::derive(move || modal_open.get() == "rules")
+            set_modal_open
+            set_status_msg
+        />
     }
 }

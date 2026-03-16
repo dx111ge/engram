@@ -2470,3 +2470,90 @@ input[type="range"] {
     border-radius: 0;
   }
 }
+
+/* ============================================
+   INSIGHTS PAGE
+   ============================================ */
+.assessment-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+.assessment-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.assessment-card:hover {
+  border-color: var(--accent-bright, #3b82f6);
+}
+.assessment-card-prob-bar {
+  flex: 1;
+  height: 6px;
+  background: #333;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.assessment-card-prob-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.assessment-detail-modal {
+  max-width: 600px;
+}
+.evidence-table {
+  font-size: 0.85rem;
+}
+.gap-table {
+  width: 100%;
+}
+.gap-severity {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.gap-severity-bar {
+  flex: 1;
+  height: 6px;
+  background: #333;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.gap-severity-fill {
+  height: 100%;
+  border-radius: 3px;
+}
+.suggested-query {
+  display: inline-block;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  margin: 2px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.suggested-query:hover {
+  background: var(--accent-light, #1e3a5f);
+}
+.rules-tab {
+  padding: 0.5rem 1rem;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  font-size: 0.9rem;
+}
+.rules-tab:hover {
+  color: var(--text-primary);
+}
+.rules-tab-active {
+  color: var(--accent-bright, #3b82f6);
+  border-bottom-color: var(--accent-bright, #3b82f6);
+}
