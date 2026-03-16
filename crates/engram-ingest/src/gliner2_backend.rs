@@ -73,7 +73,7 @@ struct TokenizedText {
     word_offsets: Vec<(usize, usize)>,
     first_token_positions: Vec<usize>,
     token_ids: Vec<i64>,
-    text_token_count: usize,
+    _text_token_count: usize,
 }
 
 /// Intermediate: scored span above threshold.
@@ -280,7 +280,7 @@ impl Gliner2Backend {
             word_offsets,
             first_token_positions,
             token_ids,
-            text_token_count: token_idx,
+            _text_token_count: token_idx,
         }
     }
 
@@ -341,7 +341,7 @@ impl Gliner2Backend {
         &mut self,
         word_hidden: Vec<f32>,
         num_words: usize,
-        word_offsets: &[(usize, usize)],
+        _word_offsets: &[(usize, usize)],
     ) -> Result<(Vec<f32>, Vec<i64>, Vec<i64>), String> {
         let hidden_size = self.config.hidden_size;
 

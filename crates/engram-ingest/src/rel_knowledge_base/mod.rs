@@ -564,6 +564,7 @@ fn extract_first_uri(json: &serde_json::Value) -> Option<String> {
 }
 
 /// Extract relation URI/label pairs from SPARQL results JSON.
+#[allow(dead_code)] // used in tests
 fn extract_relations_from_sparql(json: &serde_json::Value) -> Vec<(String, String)> {
     let bindings = match json
         .get("results")

@@ -28,13 +28,13 @@ pub(crate) fn build_pipeline(
     graph: std::sync::Arc<std::sync::RwLock<engram_core::graph::Graph>>,
     config: engram_ingest::PipelineConfig,
     kb_endpoints: Option<Vec<crate::state::KbEndpointConfig>>,
-    ner_model: Option<String>,
-    rel_model: Option<String>,
+    _ner_model: Option<String>,
+    _rel_model: Option<String>,
     relation_templates: Option<std::collections::HashMap<String, String>>,
     rel_threshold: Option<f32>,
     _coreference_enabled: Option<bool>,
-    ner_cache: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn engram_ingest::Extractor>>>>,
-    rel_cache: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn engram_ingest::RelationExtractor>>>>,
+    _ner_cache: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn engram_ingest::Extractor>>>>,
+    _rel_cache: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn engram_ingest::RelationExtractor>>>>,
 ) -> engram_ingest::Pipeline {
     use engram_ingest::{NerChain, ChainStrategy};
 
