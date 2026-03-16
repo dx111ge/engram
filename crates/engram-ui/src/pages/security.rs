@@ -400,8 +400,7 @@ pub fn SecurityPage() -> impl IntoView {
                         </tbody>
                     </table>
 
-                    <h4><i class="fa-solid fa-user-plus"></i>" Add User"</h4>
-                    <div style="display: flex; gap: 0.5rem; align-items: end; margin-top: 0.5rem;">
+                    <div style="display: flex; gap: 0.5rem; align-items: end; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.08);">
                         <div style="flex: 2;">
                             <label class="form-label">"Username"</label>
                             <input
@@ -444,7 +443,7 @@ pub fn SecurityPage() -> impl IntoView {
                             />
                         </div>
                         <button class="btn btn-primary" on:click=move |_| { create_user.dispatch(()); }>
-                            <i class="fa-solid fa-plus"></i>" Add"
+                            <i class="fa-solid fa-user-plus"></i>" Add User"
                         </button>
                     </div>
                 </CollapsibleSection>
