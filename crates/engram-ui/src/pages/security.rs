@@ -130,8 +130,13 @@ pub fn SecurityPage() -> impl IntoView {
     let load_users = Action::new_local(move |_: &()| {
         let api = api_load_users.clone();
         async move {
-            match api.get::<Vec<UserInfo>>("/auth/users").await {
-                Ok(u) => set_users.set(u),
+            match api.get::<serde_json::Value>("/auth/users").await {
+                Ok(val) => {
+                    // API returns {"users": [...]} wrapper
+                    let users_val = val.get("users").cloned().unwrap_or(serde_json::Value::Array(vec![]));
+                    let u: Vec<UserInfo> = serde_json::from_value(users_val).unwrap_or_default();
+                    set_users.set(u);
+                }
                 Err(e) => {
                     set_msg_is_error.set(true);
                     set_result_msg.set(format!("Failed to load users: {e}"));
