@@ -10,6 +10,7 @@ pub mod warning_banner;
 pub mod collapsible_section;
 pub mod auth_screen;
 pub mod crud_modal;
+pub mod detail_modal;
 pub mod chat_panel;
 pub mod chat_types;
 pub mod source_wizard;

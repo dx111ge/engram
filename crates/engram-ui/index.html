@@ -14,19 +14,45 @@
     import SpriteText from "https://esm.sh/three-spritetext";
     import { Group } from "https://esm.sh/three";
 
-    // Confidence-based node color (green → amber → red)
-    function confColor(c) {
-      if (c >= 0.8) return '#66bb6a';
-      if (c >= 0.6) return '#4fc3f7';
-      if (c >= 0.4) return '#ffa726';
-      if (c >= 0.2) return '#ef5350';
-      return '#78909c';
+    // Type-based node color with known overrides + consistent hash fallback
+    var TYPE_COLORS = {
+      'person': '#66bb6a',
+      'org': '#4fc3f7',
+      'organization': '#4fc3f7',
+      'location': '#42a5f5',
+      'event': '#ffa726',
+      'product': '#ab47bc',
+      'position': '#78909c'
+    };
+
+    function typeColor(nodeType) {
+      if (!nodeType) return '#78909c';
+      var key = nodeType.toLowerCase();
+      if (TYPE_COLORS[key]) return TYPE_COLORS[key];
+      // Consistent hash fallback for unknown types
+      var hash = 0;
+      for (var i = 0; i < key.length; i++) {
+        hash = key.charCodeAt(i) + ((hash << 5) - hash);
+      }
+      var h = Math.abs(hash) % 360;
+      return 'hsl(' + h + ', 55%, 55%)';
     }
 
     window.__engram_graph = {
       instance: null,
+      _startNodeId: null,
+      _hiddenTypes: new Set(),
+      _hiddenRels: new Set(),
+      _showEdgeLabels: true,
+      _highlightedNode: null,
+      _temporalCurrentOnly: false,
+      _contextMenuEl: null,
+      _findPathFrom: null,
+      _pathHighlight: new Set(),
+      _pathNodes: new Set(),
+      _orphanedNodes: new Set(),
 
-      create: function(container, nodesJson, linksJson, onClickCb, onDblClickCb) {
+      create: function(container, nodesJson, linksJson, onClickCb, onDblClickCb, startNodeId) {
         if (this.instance) {
           this.instance._destructor && this.instance._destructor();
           container.innerHTML = '';
@@ -34,6 +60,14 @@
 
         var nodes = JSON.parse(nodesJson);
         var links = JSON.parse(linksJson);
+        var self = this;
+        self._startNodeId = startNodeId || null;
+
+        // Remove any existing context menu
+        if (self._contextMenuEl) {
+          self._contextMenuEl.remove();
+          self._contextMenuEl = null;
+        }
 
         var graph = ForceGraph3D()(container)
           .backgroundColor('#0a0e17')
@@ -41,13 +75,44 @@
           .height(container.clientHeight)
           .graphData({ nodes: nodes, links: links })
           .nodeLabel(function(n) { return n.title || n.label; })
-          .nodeColor(function(n) { return confColor(n.confidence || 0.5); })
-          .nodeVal(function(n) { return n.size || 5; })
+          .nodeColor(function(n) {
+            var color = typeColor(n.node_type);
+            // Start node golden glow
+            if (self._startNodeId && n.id === self._startNodeId) {
+              return '#ffd700';
+            }
+            // Highlighted node
+            if (self._highlightedNode && n.id === self._highlightedNode) {
+              return '#ffffff';
+            }
+            return color;
+          })
+          .nodeVal(function(n) {
+            // Start node slightly larger
+            if (self._startNodeId && n.id === self._startNodeId) {
+              return (n.size || 5) * 1.5;
+            }
+            return n.size || 5;
+          })
           .nodeOpacity(0.85)
           .nodeResolution(16)
+          .nodeVisibility(function(n) {
+            // Path isolation: if path active, only show path nodes
+            if (self._pathNodes.size > 0 && !self._pathNodes.has(n.id)) return false;
+            if (self._hiddenTypes.size > 0) {
+              var nt = (n.node_type || 'Entity').toLowerCase();
+              if (self._hiddenTypes.has(nt)) return false;
+            }
+            // Hide orphaned nodes (all their edges are hidden)
+            if (self._orphanedNodes.size > 0 && self._orphanedNodes.has(n.id)) return false;
+            return true;
+          })
           .nodeThreeObjectExtend(true)
           .nodeThreeObject(function(node) {
-            var color = confColor(node.confidence || 0.5);
+            var color = typeColor(node.node_type);
+            if (self._startNodeId && node.id === self._startNodeId) {
+              color = '#ffd700';
+            }
             var group = new Group();
 
             // Node label (white, bold, above sphere)
@@ -66,7 +131,7 @@
             var nodeRadius = (node.size || 5) * 0.8;
             var tag = new SpriteText(typeName.toUpperCase());
             tag.material.depthWrite = false;
-            tag.color = '#ffffff';
+            tag.color = color;
             tag.textHeight = 3;
             tag.fontWeight = '600';
             tag.strokeWidth = 0.6;
@@ -76,8 +141,28 @@
 
             return group;
           })
-          .linkColor(function(link) { return 'rgba(100, 160, 255, 0.35)'; })
-          .linkWidth(1.2)
+          .linkColor(function(link) {
+            // Path highlight
+            var src = typeof link.source === 'object' ? link.source.id : link.source;
+            var tgt = typeof link.target === 'object' ? link.target.id : link.target;
+            if (self._pathHighlight.size > 0 && (self._pathHighlight.has(src + '>' + tgt) || self._pathHighlight.has(tgt + '>' + src))) {
+              return '#ffd700';
+            }
+            // Temporal edges: dim if not current
+            if (self._temporalCurrentOnly && link.valid_to) {
+              return 'rgba(100, 160, 255, 0.12)';
+            }
+            return 'rgba(100, 160, 255, 0.35)';
+          })
+          .linkWidth(function(link) {
+            var src = typeof link.source === 'object' ? link.source.id : link.source;
+            var tgt = typeof link.target === 'object' ? link.target.id : link.target;
+            if (self._pathHighlight.size > 0 && (self._pathHighlight.has(src + '>' + tgt) || self._pathHighlight.has(tgt + '>' + src))) {
+              return 3.5;
+            }
+            if (self._temporalCurrentOnly && link.valid_to) return 0.4;
+            return 1.2;
+          })
           .linkDirectionalArrowLength(4)
           .linkDirectionalArrowRelPos(1)
           .linkDirectionalArrowColor(function() { return 'rgba(100, 160, 255, 0.6)'; })
@@ -86,10 +171,41 @@
           .linkDirectionalParticleWidth(1.8)
           .linkDirectionalParticleSpeed(0.006)
           .linkDirectionalParticleColor(function() { return 'rgba(100, 200, 255, 0.8)'; })
+          .linkVisibility(function(link) {
+            var src = typeof link.source === 'object' ? link.source : null;
+            var tgt = typeof link.target === 'object' ? link.target : null;
+            var srcId = src ? src.id : link.source;
+            var tgtId = tgt ? tgt.id : link.target;
+            // Path isolation: if path active, only show path edges
+            if (self._pathHighlight.size > 0) {
+              if (!self._pathHighlight.has(srcId + '>' + tgtId) && !self._pathHighlight.has(tgtId + '>' + srcId)) return false;
+            }
+            // Hide edges whose source or target node type is hidden
+            if (self._hiddenTypes.size > 0) {
+              if (src) { var st = (src.node_type || 'Entity').toLowerCase(); if (self._hiddenTypes.has(st)) return false; }
+              if (tgt) { var tt = (tgt.node_type || 'Entity').toLowerCase(); if (self._hiddenTypes.has(tt)) return false; }
+            }
+            if (self._hiddenRels.size > 0) {
+              var rel = (link.label || '').toLowerCase();
+              if (self._hiddenRels.has(rel)) return false;
+            }
+            return true;
+          })
           .linkThreeObjectExtend(true)
           .linkThreeObject(function(link) {
+            if (!self._showEdgeLabels) return null;
             if (!link.label) return null;
-            var sprite = new SpriteText(link.label);
+            var text = link.label;
+            // Append temporal info if present
+            if (link.valid_from || link.valid_to) {
+              var temporal = ' [';
+              if (link.valid_from) temporal += link.valid_from;
+              temporal += ' - ';
+              if (link.valid_to) temporal += link.valid_to; else temporal += 'now';
+              temporal += ']';
+              text += temporal;
+            }
+            var sprite = new SpriteText(text);
             sprite.material.depthWrite = false;
             sprite.color = '#b0bec5';
             sprite.textHeight = 2.5;
@@ -106,9 +222,41 @@
             Object.assign(sprite.position, middle);
           })
           .onNodeClick(function(node) {
+            // Dismiss context menu on click
+            if (self._contextMenuEl) {
+              self._contextMenuEl.remove();
+              self._contextMenuEl = null;
+            }
+            // Find-path mode: if source is set, run BFS to clicked node
+            if (self._findPathFrom && node.id && self._findPathFrom !== node.id) {
+              var path = self.findPath(self._findPathFrom, node.id);
+              self._findPathFrom = null;
+              self._pathHighlight = new Set();
+              self._pathNodes = new Set();
+              if (path && path.length > 1) {
+                for (var i = 0; i < path.length; i++) {
+                  self._pathNodes.add(path[i]);
+                }
+                for (var i = 0; i < path.length - 1; i++) {
+                  self._pathHighlight.add(path[i] + '>' + path[i+1]);
+                  self._pathHighlight.add(path[i+1] + '>' + path[i]);
+                }
+                // Refresh visibility + colors to isolate path
+                graph.nodeVisibility(graph.nodeVisibility());
+                graph.linkVisibility(graph.linkVisibility());
+                graph.linkColor(graph.linkColor());
+                graph.linkWidth(graph.linkWidth());
+              }
+              // Remove cursor hint
+              var hint = document.querySelector('.engram-path-hint');
+              if (hint) hint.remove();
+              return;
+            }
             if (onClickCb && node.id) onClickCb(node.id);
             var distance = 120;
-            var distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z);
+            var hyp = Math.hypot(node.x, node.y, node.z);
+            if (hyp < 1) hyp = 1;
+            var distRatio = 1 + distance / hyp;
             graph.cameraPosition(
               { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
               node, 1000
@@ -120,11 +268,78 @@
             node.fz = node.z;
           });
 
-        if (onDblClickCb) {
-          graph.onNodeRightClick(function(node) {
-            if (node.id) onDblClickCb(node.id);
+        // Right-click: show context menu
+        graph.onNodeRightClick(function(node, event) {
+          if (self._contextMenuEl) {
+            self._contextMenuEl.remove();
+            self._contextMenuEl = null;
+          }
+          if (!node || !node.id) return;
+
+          // Create context menu DOM
+          var menu = document.createElement('div');
+          menu.className = 'engram-context-menu';
+          menu.style.left = event.clientX + 'px';
+          menu.style.top = event.clientY + 'px';
+
+          var items = [
+            { icon: 'fa-solid fa-expand', label: 'Expand', action: 'expand' },
+            { icon: 'fa-solid fa-circle-info', label: 'Open Detail', action: 'details' },
+            { icon: 'fa-solid fa-bullseye', label: 'Set as Start', action: 'set_start' },
+            { icon: 'fa-solid fa-route', label: 'Find Path To...', action: 'find_path' },
+            { icon: 'fa-solid fa-eye-slash', label: 'Hide Type', action: 'hide_type' },
+          ];
+
+          items.forEach(function(item) {
+            var row = document.createElement('div');
+            row.className = 'engram-context-item';
+            row.innerHTML = '<i class="' + item.icon + '"></i> ' + item.label;
+            row.addEventListener('click', function() {
+              menu.remove();
+              self._contextMenuEl = null;
+              if (item.action === 'expand' && onDblClickCb) {
+                onDblClickCb(node.id);
+              } else if (item.action === 'details' && onClickCb) {
+                onClickCb(node.id);
+              } else if (item.action === 'set_start') {
+                self._startNodeId = node.id;
+                graph.nodeColor(graph.nodeColor()); // refresh
+              } else if (item.action === 'find_path') {
+                self._findPathFrom = node.id;
+                self._pathHighlight = new Set();
+                // Refresh to clear old path highlight
+                graph.linkColor(graph.linkColor());
+                graph.linkWidth(graph.linkWidth());
+                // Show hint
+                var hint = document.createElement('div');
+                hint.className = 'engram-path-hint';
+                hint.innerHTML = '<i class="fa-solid fa-route"></i> Click target node to find path from <strong>' + node.label + '</strong>';
+                document.body.appendChild(hint);
+                setTimeout(function() { if (hint.parentNode) hint.remove(); }, 8000);
+              } else if (item.action === 'hide_type') {
+                var nt = (node.node_type || 'Entity').toLowerCase();
+                self._hiddenTypes.add(nt);
+                graph.nodeVisibility(graph.nodeVisibility()); // refresh
+                graph.linkVisibility(graph.linkVisibility());
+              }
+            });
+            menu.appendChild(row);
           });
-        }
+
+          document.body.appendChild(menu);
+          self._contextMenuEl = menu;
+
+          // Dismiss on click elsewhere
+          setTimeout(function() {
+            document.addEventListener('click', function dismiss() {
+              if (self._contextMenuEl) {
+                self._contextMenuEl.remove();
+                self._contextMenuEl = null;
+              }
+              document.removeEventListener('click', dismiss);
+            }, { once: true });
+          }, 10);
+        });
 
         // Spread nodes wider
         graph.d3Force('charge').strength(-180);
@@ -153,11 +368,127 @@
         this.instance.zoomToFit(400);
       },
 
+      filter: function(hiddenTypesJson, hiddenRelsJson) {
+        var self = this;
+        self._hiddenTypes = new Set(JSON.parse(hiddenTypesJson || '[]').map(function(t) { return t.toLowerCase(); }));
+        self._hiddenRels = new Set(JSON.parse(hiddenRelsJson || '[]').map(function(r) { return r.toLowerCase(); }));
+        self._orphanedNodes = new Set();
+        // Clear path isolation when filters change
+        self._pathHighlight = new Set();
+        self._pathNodes = new Set();
+        if (self.instance && (self._hiddenRels.size > 0 || self._hiddenTypes.size > 0)) {
+          // Precompute: find nodes that have NO visible edges
+          var data = self.instance.graphData();
+          var nodeHasVisibleEdge = {};
+          data.links.forEach(function(l) {
+            var src = typeof l.source === 'object' ? l.source : null;
+            var tgt = typeof l.target === 'object' ? l.target : null;
+            var srcId = src ? src.id : l.source;
+            var tgtId = tgt ? tgt.id : l.target;
+            var rel = (l.label || '').toLowerCase();
+            var srcType = src ? (src.node_type || 'Entity').toLowerCase() : '';
+            var tgtType = tgt ? (tgt.node_type || 'Entity').toLowerCase() : '';
+            var edgeVisible = !self._hiddenRels.has(rel)
+              && !self._hiddenTypes.has(srcType)
+              && !self._hiddenTypes.has(tgtType);
+            if (edgeVisible) {
+              nodeHasVisibleEdge[srcId] = true;
+              nodeHasVisibleEdge[tgtId] = true;
+            }
+          });
+          data.nodes.forEach(function(n) {
+            var nt = (n.node_type || 'Entity').toLowerCase();
+            if (!self._hiddenTypes.has(nt) && !nodeHasVisibleEdge[n.id]) {
+              self._orphanedNodes.add(n.id);
+            }
+          });
+        }
+        if (self.instance) {
+          self.instance.nodeVisibility(self.instance.nodeVisibility());
+          self.instance.linkVisibility(self.instance.linkVisibility());
+          self.instance.linkColor(self.instance.linkColor());
+          self.instance.linkWidth(self.instance.linkWidth());
+        }
+      },
+
+      toggleEdgeLabels: function(show) {
+        this._showEdgeLabels = show;
+        if (this.instance) {
+          // Re-create link objects to toggle labels
+          this.instance.linkThreeObject(this.instance.linkThreeObject());
+        }
+      },
+
+      highlightNode: function(nodeId) {
+        this._highlightedNode = nodeId || null;
+        if (this.instance) {
+          this.instance.nodeColor(this.instance.nodeColor());
+        }
+      },
+
+      setTemporalMode: function(currentOnly) {
+        this._temporalCurrentOnly = currentOnly;
+        if (this.instance) {
+          this.instance.linkColor(this.instance.linkColor());
+          this.instance.linkWidth(this.instance.linkWidth());
+        }
+      },
+
+      findPath: function(fromId, toId) {
+        // Client-side BFS in the current graph data
+        if (!this.instance) return null;
+        var data = this.instance.graphData();
+        var adj = {};
+        data.links.forEach(function(l) {
+          var src = typeof l.source === 'object' ? l.source.id : l.source;
+          var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+          if (!adj[src]) adj[src] = [];
+          if (!adj[tgt]) adj[tgt] = [];
+          adj[src].push(tgt);
+          adj[tgt].push(src);
+        });
+        // BFS
+        var visited = new Set();
+        var queue = [[fromId]];
+        visited.add(fromId);
+        while (queue.length > 0) {
+          var path = queue.shift();
+          var current = path[path.length - 1];
+          if (current === toId) return path;
+          var neighbors = adj[current] || [];
+          for (var i = 0; i < neighbors.length; i++) {
+            if (!visited.has(neighbors[i])) {
+              visited.add(neighbors[i]);
+              queue.push(path.concat([neighbors[i]]));
+            }
+          }
+        }
+        return null;
+      },
+
+      clearPath: function() {
+        this._pathHighlight = new Set();
+        this._pathNodes = new Set();
+        this._findPathFrom = null;
+        if (this.instance) {
+          this.instance.nodeVisibility(this.instance.nodeVisibility());
+          this.instance.linkVisibility(this.instance.linkVisibility());
+          this.instance.linkColor(this.instance.linkColor());
+          this.instance.linkWidth(this.instance.linkWidth());
+        }
+        var hint = document.querySelector('.engram-path-hint');
+        if (hint) hint.remove();
+      },
+
       destroy: function() {
         if (this.instance) {
           this.instance._destructor && this.instance._destructor();
           this.instance._destructor = null;
           this.instance = null;
+        }
+        if (this._contextMenuEl) {
+          this._contextMenuEl.remove();
+          this._contextMenuEl = null;
         }
       }
     };

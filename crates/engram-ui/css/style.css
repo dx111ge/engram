@@ -2017,3 +2017,356 @@ input[type="range"] {
     grid-template-columns: 1fr;
   }
 }
+
+/* ============================================
+   Explore Page Enhancements
+   ============================================ */
+
+/* --- Filter Chips --- */
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 0.5rem;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  transition: all var(--transition);
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.filter-chip-active {
+  background: var(--accent-light);
+  border-color: var(--accent-bright);
+  color: var(--text-primary);
+}
+
+.filter-chip-active:hover {
+  background: var(--accent);
+  border-color: var(--accent-bright);
+}
+
+.filter-chip-hidden {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-muted);
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.filter-chip-hidden:hover {
+  opacity: 0.9;
+  border-color: var(--border-light);
+}
+
+.chip-count {
+  font-size: 0.7rem;
+  opacity: 0.7;
+  font-weight: 400;
+}
+
+/* --- Context Menu --- */
+.engram-context-menu {
+  position: fixed;
+  z-index: 9999;
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px var(--shadow);
+  padding: 4px 0;
+  min-width: 180px;
+  animation: ctx-fade-in 0.12s ease;
+}
+
+@keyframes ctx-fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.engram-context-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.engram-context-item:hover {
+  background: var(--bg-hover);
+}
+
+.engram-context-item i {
+  width: 16px;
+  text-align: center;
+  color: var(--accent-bright);
+  font-size: 0.8rem;
+}
+
+/* --- Path Hint --- */
+.engram-path-hint {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9998;
+  background: rgba(255, 215, 0, 0.15);
+  border: 1px solid rgba(255, 215, 0, 0.4);
+  color: #ffd700;
+  padding: 10px 20px;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  animation: ctx-fade-in 0.2s ease;
+  backdrop-filter: blur(8px);
+}
+
+.engram-path-hint i {
+  margin-right: 8px;
+}
+
+/* --- Search Mode Selector --- */
+.search-mode-select {
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.search-mode-select:focus {
+  border-color: var(--accent-bright);
+  outline: none;
+}
+
+/* --- Checkbox Labels --- */
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.checkbox-label input[type="checkbox"] {
+  accent-color: var(--accent-bright);
+  width: 14px;
+  height: 14px;
+}
+
+/* --- Node Action Buttons --- */
+.node-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.node-actions .btn {
+  font-size: 0.75rem;
+  padding: 4px 8px;
+}
+
+/* --- Temporal Edge Styles --- */
+.temporal-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.05);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.temporal-badge i {
+  font-size: 0.65rem;
+}
+
+/* ============================================
+   SYSTEM PAGE - Card Grid + Modal Layout
+   ============================================ */
+
+/* Tab bar */
+.system-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 1.5rem;
+}
+.system-tab {
+  padding: 0.6rem 1.25rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: color var(--transition), border-color var(--transition);
+  background: none;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.system-tab:hover {
+  color: var(--text-primary);
+}
+.system-tab.active {
+  color: var(--accent-bright);
+  border-bottom-color: var(--accent-bright);
+}
+
+/* Card grid */
+.system-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+.system-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  cursor: pointer;
+  transition: border-color var(--transition), box-shadow var(--transition), transform 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.system-card:hover {
+  border-color: var(--accent-bright);
+  box-shadow: 0 4px 16px rgba(74, 158, 255, 0.08);
+  transform: translateY(-2px);
+}
+.system-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.system-card-icon {
+  font-size: 1.5rem;
+  color: var(--accent-bright);
+  width: 2rem;
+  text-align: center;
+}
+.system-card-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.system-card-status {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-top: auto;
+  padding-top: 0.25rem;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+.system-card-status .badge {
+  font-size: 0.7rem;
+}
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.status-dot.green { background: #66bb6a; }
+.status-dot.amber { background: #ffa726; }
+.status-dot.gray { background: #78909c; }
+
+/* --- Wizard Modal Header/Body (used by system page modals) --- */
+.wizard-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+}
+.wizard-modal-header h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 1.1rem;
+}
+.wizard-modal-header h3 i {
+  color: var(--accent-bright);
+}
+.wizard-modal-body {
+  padding: 1.25rem;
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* System modal (reuses wizard-modal pattern but wider) */
+.system-modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 780px;
+  max-width: 95vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  animation: modalIn 0.2s ease;
+}
+.system-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+}
+.system-modal-header h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 1.1rem;
+}
+.system-modal-body {
+  padding: 1.25rem;
+  overflow-y: auto;
+  flex: 1;
+}
+.system-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem 1.25rem;
+  border-top: 1px solid var(--border);
+  background: var(--bg-card);
+}
+
+@media (max-width: 600px) {
+  .system-grid {
+    grid-template-columns: 1fr;
+  }
+  .system-modal {
+    width: 100vw;
+    max-width: 100vw;
+    border-radius: 0;
+  }
+}

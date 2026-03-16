@@ -351,11 +351,19 @@ pub async fn query(
         .traverse_directed(&req.start, depth, min_conf, direction)
         .map_err(|e| api_err(StatusCode::NOT_FOUND, e.to_string()))?;
 
+    let type_filter = req.node_type.as_deref();
     let mut nodes = Vec::new();
     for &nid in &result.nodes {
         if let Ok(Some(node)) = g.get_node_by_id(nid) {
             let label = g.label_for_id(nid).unwrap_or_else(|_| node.label().to_string());
             let node_type = g.get_node_type(&label);
+            // Apply node_type filter if specified
+            if let Some(filter) = type_filter {
+                let nt = node_type.as_deref().unwrap_or("Entity");
+                if !nt.eq_ignore_ascii_case(filter) {
+                    continue;
+                }
+            }
             nodes.push(NodeHit {
                 node_id: nid,
                 label,
@@ -377,6 +385,8 @@ pub async fn query(
                 to: ev.to,
                 relationship: ev.relationship,
                 confidence: ev.confidence,
+                valid_from: None,
+                valid_to: None,
             })
         })
         .collect();
@@ -484,6 +494,8 @@ pub async fn get_node(
             to: e.to,
             relationship: e.relationship,
             confidence: e.confidence,
+            valid_from: None,
+            valid_to: None,
         })
         .collect();
 
@@ -496,6 +508,8 @@ pub async fn get_node(
             to: e.to,
             relationship: e.relationship,
             confidence: e.confidence,
+            valid_from: None,
+            valid_to: None,
         })
         .collect();
 
@@ -757,6 +771,8 @@ pub async fn explain(
             to: e.to,
             relationship: e.relationship,
             confidence: e.confidence,
+            valid_from: None,
+            valid_to: None,
         })
         .collect();
 
@@ -769,6 +785,8 @@ pub async fn explain(
             to: e.to,
             relationship: e.relationship,
             confidence: e.confidence,
+            valid_from: None,
+            valid_to: None,
         })
         .collect();
 

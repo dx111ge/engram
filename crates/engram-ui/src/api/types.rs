@@ -150,6 +150,8 @@ pub struct QueryRequest {
     pub direction: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -243,6 +245,10 @@ pub struct EdgeResponse {
     pub to: String,
     pub relationship: String,
     pub confidence: f32,
+    #[serde(default)]
+    pub valid_from: Option<String>,
+    #[serde(default)]
+    pub valid_to: Option<String>,
 }
 
 // ── Learning ──

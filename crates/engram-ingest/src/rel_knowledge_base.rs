@@ -624,13 +624,14 @@ impl KbRelationExtractor {
     /// Property expansion: fetch key Wikidata properties for all linked entities.
     /// Discovers NEW entities (e.g., "Lockheed Martin" as manufacturer of HIMARS)
     /// and returns them as (entity_label, property_label, new_entity_label) triples.
+    /// Returns (from_label, rel_type, to_label, valid_from, valid_to) tuples.
     fn property_expansion(
         &self,
         endpoint: &KbEndpoint,
         qids: &[(&str, usize)], // (QID URI, entity_index)
         entity_labels: &[String],
         language: &str,
-    ) -> Vec<(String, String, String)> {
+    ) -> Vec<(String, String, String, Option<String>, Option<String>)> {
         if qids.is_empty() {
             return Vec::new();
         }
@@ -640,13 +641,20 @@ impl KbRelationExtractor {
             .collect::<Vec<_>>()
             .join(" ");
 
-        // Key Wikidata properties that discover interesting connected entities
+        // Key Wikidata properties that discover interesting connected entities.
+        // Also fetches P580 (start time) and P582 (end time) temporal qualifiers
+        // via statement nodes when available.
         let query = format!(
-            r#"SELECT ?entity ?entityLabel ?propLabel ?value ?valueLabel WHERE {{
+            r#"SELECT ?entity ?entityLabel ?propLabel ?value ?valueLabel ?startTime ?endTime WHERE {{
                 VALUES ?entity {{ {values} }}
-                VALUES ?prop {{ wdt:P39 wdt:P27 wdt:P17 wdt:P159 wdt:P176 wdt:P495 wdt:P36 }}
-                ?entity ?prop ?value .
+                VALUES ?propNode {{ wd:P39 wd:P27 wd:P17 wd:P159 wd:P176 wd:P495 wd:P36 }}
+                ?propNode wikibase:claim ?propclaim .
+                ?propNode wikibase:statementProperty ?stmtprop .
+                ?entity ?propclaim ?stmt .
+                ?stmt ?stmtprop ?value .
                 FILTER(isIRI(?value))
+                OPTIONAL {{ ?stmt pq:P580 ?startTime . }}
+                OPTIONAL {{ ?stmt pq:P582 ?endTime . }}
                 SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,{lang}" }}
             }} LIMIT 300"#,
             values = values,
@@ -687,10 +695,18 @@ impl KbRelationExtractor {
                 if seen.contains(&key) { continue; }
                 seen.insert(key);
 
+                // Extract temporal qualifiers
+                let start_time = binding.pointer("/startTime/value")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().take(10).collect::<String>()); // YYYY-MM-DD
+                let end_time = binding.pointer("/endTime/value")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().take(10).collect::<String>()); // YYYY-MM-DD
+
                 // Map Wikidata property URIs to readable relation types
                 let rel_type = wikidata_prop_to_rel_type(prop_label);
 
-                results.push((entity_label, rel_type, value_label.to_string()));
+                results.push((entity_label, rel_type, value_label.to_string(), start_time, end_time));
             }
         }
 
@@ -1038,7 +1054,7 @@ impl RelationExtractor for KbRelationExtractor {
                         };
 
                         if let Ok(mut g) = self.graph.write() {
-                            for (from_label, rel_type, to_label) in &expansion {
+                            for (from_label, rel_type, to_label, _valid_from, _valid_to) in &expansion {
                                 let _ = g.store_with_confidence(to_label, 0.70, &provenance);
 
                                 let node_type = match rel_type.as_str() {

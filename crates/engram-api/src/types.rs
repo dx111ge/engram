@@ -31,6 +31,8 @@ pub struct QueryRequest {
     pub min_confidence: Option<f32>,
     /// Traversal direction: "out", "in", or "both" (default: "both")
     pub direction: Option<String>,
+    /// Filter results to nodes of this type only
+    pub node_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -161,6 +163,10 @@ pub struct EdgeResponse {
     pub to: String,
     pub relationship: String,
     pub confidence: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_to: Option<String>,
 }
 
 #[derive(Serialize)]
