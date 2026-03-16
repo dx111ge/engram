@@ -110,6 +110,18 @@ impl Graph {
         self.adj_out.entry(from_node).or_default().push(edge_slot);
         self.adj_in.entry(to_node).or_default().push(edge_slot);
 
+        // Increment edge counters on both nodes
+        if let Some(from_slot) = self.find_slot_by_id(from_node) {
+            self.brain.update_node_field(from_slot, |n| {
+                n.edge_out_count += 1;
+            })?;
+        }
+        if let Some(to_slot) = self.find_slot_by_id(to_node) {
+            self.brain.update_node_field(to_slot, |n| {
+                n.edge_in_count += 1;
+            })?;
+        }
+
         let edge = self.brain.read_edge(edge_slot)?;
         self.emit(GraphEvent::EdgeCreated {
             edge_id,
@@ -138,6 +150,48 @@ impl Graph {
             e.confidence = confidence.clamp(0.0, 1.0);
         })?;
         Ok(edge_id)
+    }
+
+    /// Create a relationship with explicit confidence and temporal bounds.
+    /// `valid_from` and `valid_to` are date strings like "2000-05-07" (parsed to unix seconds).
+    pub fn relate_with_temporal(
+        &mut self,
+        from_label: &str,
+        to_label: &str,
+        relationship: &str,
+        confidence: f32,
+        valid_from: Option<&str>,
+        valid_to: Option<&str>,
+        provenance: &Provenance,
+    ) -> Result<u64> {
+        let edge_id = self.relate(from_label, to_label, relationship, provenance)?;
+        let (_, edge_count) = self.brain.stats();
+        let edge_slot = edge_count - 1;
+        self.brain.update_edge_field(edge_slot, |e| {
+            e.confidence = confidence.clamp(0.0, 1.0);
+            if let Some(vf) = valid_from {
+                e.valid_from = parse_date_to_unix(vf);
+            }
+            if let Some(vt) = valid_to {
+                e.valid_to = parse_date_to_unix(vt);
+            }
+        })?;
+        Ok(edge_id)
+    }
+
+    /// Set a property on an edge (by slot).
+    pub fn set_edge_property(&mut self, edge_slot: u64, key: &str, value: &str) {
+        self.edge_props.set(edge_slot, key, value);
+    }
+
+    /// Get a property from an edge (by slot).
+    pub fn get_edge_property(&self, edge_slot: u64, key: &str) -> Option<String> {
+        self.edge_props.get(edge_slot, key).map(|s| s.to_string())
+    }
+
+    /// Get all properties for an edge (by slot).
+    pub fn get_edge_properties(&self, edge_slot: u64) -> Option<std::collections::HashMap<String, String>> {
+        self.edge_props.get_all(edge_slot).cloned()
     }
 
     /// Soft-delete a node by label. Sets confidence to 0, marks as deleted.
@@ -327,6 +381,18 @@ impl Graph {
             slots.retain(|&s| s != slot);
         }
 
+        // Decrement edge counters on both nodes
+        if let Some(from_slot) = self.find_slot_by_id(from_id) {
+            self.brain.update_node_field(from_slot, |n| {
+                n.edge_out_count = n.edge_out_count.saturating_sub(1);
+            })?;
+        }
+        if let Some(to_slot) = self.find_slot_by_id(to_id) {
+            self.brain.update_node_field(to_slot, |n| {
+                n.edge_in_count = n.edge_in_count.saturating_sub(1);
+            })?;
+        }
+
         self.emit(GraphEvent::EdgeDeleted {
             edge_id,
             from: from_id,
@@ -428,6 +494,8 @@ impl Graph {
             to: to_label,
             relationship: rel_name,
             confidence: edge.confidence,
+            valid_from: timestamp_to_date(edge.valid_from),
+            valid_to: timestamp_to_date(edge.valid_to),
         })
     }
 
@@ -452,6 +520,8 @@ impl Graph {
                     to: target_label,
                     relationship: rel_name,
                     confidence: edge.confidence,
+                    valid_from: timestamp_to_date(edge.valid_from),
+                    valid_to: timestamp_to_date(edge.valid_to),
                 });
             }
         }
@@ -479,6 +549,8 @@ impl Graph {
                     to: label.to_string(),
                     relationship: rel_name,
                     confidence: edge.confidence,
+                    valid_from: timestamp_to_date(edge.valid_from),
+                    valid_to: timestamp_to_date(edge.valid_to),
                 });
             }
         }

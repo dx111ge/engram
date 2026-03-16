@@ -193,3 +193,8 @@ dynamically generated from Google's Discovery Service.
 | Encryption at rest | Low | Deferred since v0.1.0 |
 | Binary vector quantization | Low | 32x reduction, useful for candidate filtering (int8 done) |
 | Product quantization (PQ) | Low | Configurable compression, for very large collections |
+| Node clustering / Type clouds | Medium | Group same-type nodes into expandable clusters. Reduces visual clutter for large graphs. Explored in `design-explore-v3-performance.md` (technique D). |
+| Geometry sharing / Instanced rendering | Low | THREE.InstancedMesh for same-type nodes. Reduces draw calls from N to ~6 (one per type). Explored in technique F. |
+| Web worker physics | Low | Move force simulation to Web Worker. Eliminates main-thread jank during layout. Explored in technique H. |
+| ~~Temporal edge data pipeline~~ | **Done** | Implemented 2026-03-16. Edge struct has `valid_from`/`valid_to` (72 bytes). Edge property store (`.brain.edge_props`) for arbitrary qualifiers. Full chain: SPARQL -> relate_with_temporal() -> EdgeView -> EdgeResponse -> Frontend. |
+| ~~Chat system redesign~~ | **Done** | Implemented 2026-03-16. Intelligence analyst workbench with 48 tools, auto-context retrieval, write confirmation batching, temporal awareness, follow-up suggestions. Page-aware visibility (Explore/Insights only). Design: `docs/design-chat.md`. |

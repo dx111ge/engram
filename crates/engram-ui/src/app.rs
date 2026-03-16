@@ -7,6 +7,7 @@ use crate::api::types::ConfigStatusResponse;
 use crate::auth;
 use crate::components::auth_screen::AuthScreen;
 use crate::components::chat_panel::ChatPanel;
+use crate::components::chat_types::{ChatSelectedNode, ChatCurrentAssessment};
 use crate::components::nav::Nav;
 use crate::components::onboarding_wizard::OnboardingWizard;
 use crate::components::toast::{Toast, ToastContainer};
@@ -29,6 +30,10 @@ pub fn App() -> impl IntoView {
     // Provide chat open state
     let chat_open = RwSignal::new(false);
     provide_context(chat_open);
+
+    // Provide page context signals for chat panel
+    provide_context(ChatSelectedNode(RwSignal::new(None)));
+    provide_context(ChatCurrentAssessment(RwSignal::new(None)));
 
     let is_authed = move || auth_state.get().is_some();
 

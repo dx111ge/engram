@@ -5,6 +5,7 @@ use crate::api::types::{
     ActionRule, AddEvidenceRequest, Assessment, AssessmentCreate, AssessmentDetail,
     GapsResponse, InferenceRule, StatsResponse,
 };
+use crate::components::chat_types::ChatCurrentAssessment;
 use crate::components::collapsible_section::CollapsibleSection;
 
 // ── Helper response types ──
@@ -257,11 +258,14 @@ fn AssessmentsSection(set_status_msg: WriteSignal<String>) -> impl IntoView {
     });
     load_assessments.dispatch(());
 
+    let chat_assessment = use_context::<ChatCurrentAssessment>();
     let api_detail = api.clone();
     let load_detail = Action::new_local(move |label: &String| {
         let api = api_detail.clone();
         let label = label.clone();
         async move {
+            // Update chat context with current assessment
+            if let Some(ctx) = chat_assessment { ctx.0.set(Some(label.clone())); }
             let path = format!("/assessments/{}", js_sys::encode_uri_component(&label));
             match api.get::<AssessmentDetail>(&path).await {
                 Ok(d) => set_selected_detail.set(Some(d)),

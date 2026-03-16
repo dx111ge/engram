@@ -1,109 +1,31 @@
 use leptos::prelude::*;
 
-use crate::api::ApiClient;
-
-#[derive(Clone, Debug)]
-struct Message {
-    role: String,
-    text: String,
-}
-
+/// NL page -- redirects users to the Knowledge Chat panel (floating, available on Explore/Insights).
+/// The old /tell + /ask pattern-matching interface is superseded by LLM-powered chat with tool calling.
 #[component]
 pub fn NlPage() -> impl IntoView {
-    let api = use_context::<ApiClient>().expect("ApiClient context");
-
-    let (messages, set_messages) = signal(Vec::<Message>::new());
-    let (input, set_input) = signal(String::new());
-    let (loading, set_loading) = signal(false);
-
-    let api_c = api.clone();
-    let send_message = Action::new_local(move |_: &()| {
-        let api = api_c.clone();
-        let text = input.get_untracked();
-        async move {
-            if text.is_empty() {
-                return;
-            }
-
-            set_messages.update(|msgs| {
-                msgs.push(Message { role: "user".into(), text: text.clone() });
-            });
-            set_input.set(String::new());
-            set_loading.set(true);
-
-            // Determine if this is a tell or ask
-            let lower = text.to_lowercase();
-            let is_tell = lower.starts_with("tell") || lower.starts_with("remember")
-                || lower.starts_with("store") || lower.starts_with("add")
-                || lower.contains(" is ") || lower.contains(" are ");
-
-            let result = if is_tell {
-                let body = serde_json::json!({"text": text, "source": "ui"});
-                api.post_text("/tell", &body).await
-            } else {
-                let body = serde_json::json!({"text": text});
-                api.post_text("/ask", &body).await
-            };
-
-            let response = match result {
-                Ok(r) => r,
-                Err(e) => format!("Error: {e}"),
-            };
-
-            set_messages.update(|msgs| {
-                msgs.push(Message { role: "assistant".into(), text: response });
-            });
-            set_loading.set(false);
-        }
-    });
-
-    let on_submit = move |ev: leptos::ev::SubmitEvent| {
-        ev.prevent_default();
-        send_message.dispatch(());
-    };
+    // Auto-open chat panel if context signal is available
+    let chat_open = use_context::<RwSignal<bool>>();
+    if let Some(open) = chat_open {
+        open.set(true);
+    }
 
     view! {
         <div class="page-header">
             <h2><i class="fa-solid fa-comments"></i>" Natural Language"</h2>
         </div>
 
-        <div class="chat-container">
-            <div class="chat-messages">
-                <For
-                    each={move || messages.get().into_iter().enumerate().collect::<Vec<_>>()}
-                    key={|(i, _)| *i}
-                    children={move |(_, msg)| {
-                        let role_label = if msg.role == "user" { "You" } else { "engram" };
-                        let cls = format!("chat-message {}", msg.role);
-                        view! {
-                            <div class=cls>
-                                <div class="message-role">{role_label}</div>
-                                <div class="message-text">{msg.text.clone()}</div>
-                            </div>
-                        }
-                    }}
-                />
-                {move || loading.get().then(|| view! {
-                    <div class="chat-message assistant">
-                        <div class="message-role">"engram"</div>
-                        <div class="message-text typing">"..."</div>
-                    </div>
-                })}
-            </div>
-
-            <form class="chat-input-form" on:submit=on_submit>
-                <input
-                    type="text"
-                    class="chat-input"
-                    placeholder="Tell me something or ask a question..."
-                    prop:value=input
-                    on:input=move |ev| set_input.set(event_target_value(&ev))
-                    disabled=move || loading.get()
-                />
-                <button type="submit" class="btn btn-primary" disabled=move || loading.get()>
-                    <i class="fa-solid fa-paper-plane"></i>
-                </button>
-            </form>
+        <div class="card" style="max-width:600px;margin:2rem auto;text-align:center;padding:2rem;">
+            <i class="fa-solid fa-arrow-right-to-bracket" style="font-size:2rem;color:var(--accent, #4a9eff);margin-bottom:1rem;display:block;"></i>
+            <h3 style="margin:0 0 0.5rem;">"Use Knowledge Chat"</h3>
+            <p style="color:var(--text-muted, #8b8fa3);margin:0 0 1.5rem;">
+                "The natural language interface has been replaced by the Knowledge Chat panel. "
+                "Open it with the "<i class="fa-solid fa-comments"></i>" button in the bottom-right corner on the Explore or Insights pages."
+            </p>
+            <p style="color:var(--text-muted, #8b8fa3);font-size:0.85rem;">
+                "Knowledge Chat provides 40+ tools, auto-context retrieval, write confirmation, "
+                "temporal awareness, and follow-up suggestions."
+            </p>
         </div>
     }
 }

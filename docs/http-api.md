@@ -1205,6 +1205,61 @@ curl http://localhost:3030/tools
 
 Returns OpenAI-compatible tool/function definitions for LLM integration.
 
+### Chat Tool Endpoints
+
+Intelligence analyst workbench endpoints. Used by the chat panel's LLM tool calling loop.
+All return JSON. All require authentication.
+
+#### Temporal Queries
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/chat/temporal_query` | POST | Query edges for an entity within a time range |
+| `/chat/timeline` | POST | Chronological events for an entity (sorted by `valid_from`) |
+| `/chat/current_state` | POST | Only current (non-expired) edges for an entity |
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3030/chat/timeline \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"entity": "Putin", "limit": 10}'
+```
+
+#### Compare & Analytics
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/chat/compare` | POST | Side-by-side comparison (shared/unique neighbors, properties) |
+| `/chat/shortest_path` | POST | BFS shortest path between two entities |
+| `/chat/most_connected` | POST | Top-N entities by edge count |
+| `/chat/isolated` | POST | Nodes with few/no connections |
+
+#### Investigation & Changes
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/chat/changes` | POST | Entities created/updated since a given date |
+| `/chat/watch` | POST | Mark entity as watched (sets `_watched` property) |
+| `/chat/schedule` | POST | Create or list scheduled monitoring tasks |
+
+#### Reasoning & Simulation
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/chat/what_if` | POST | Simulate confidence cascade: affected entities + impact |
+| `/chat/influence_path` | POST | Find indirect influence path between two entities |
+
+#### Reporting & Export
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/chat/briefing` | POST | Structured briefing on a topic (entities, edges, counts) |
+| `/chat/export_subgraph` | POST | Export entity + N-hop neighborhood as JSON |
+| `/chat/entity_timeline` | POST | Chronological narrative with date range filtering |
+
+---
+
 ## Concurrency Model
 
 Engram uses **RwLock** (not Mutex) for graph access:
