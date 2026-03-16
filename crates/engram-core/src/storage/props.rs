@@ -24,9 +24,22 @@ impl PropertyStore {
         }
     }
 
+    /// Create a new empty property store with a custom file extension.
+    pub fn new_with_extension(brain_path: &Path, ext: &str) -> Self {
+        PropertyStore {
+            path: brain_path.with_extension(ext),
+            props: HashMap::new(),
+        }
+    }
+
     /// Load properties from the sidecar file.
     pub fn load(brain_path: &Path) -> Result<Self> {
-        let path = brain_path.with_extension("brain.props");
+        Self::load_with_extension(brain_path, "brain.props")
+    }
+
+    /// Load properties from a sidecar file with a custom extension.
+    pub fn load_with_extension(brain_path: &Path, ext: &str) -> Result<Self> {
+        let path = brain_path.with_extension(ext);
         let mut store = PropertyStore {
             path,
             props: HashMap::new(),

@@ -5,8 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use wasm_bindgen::JsValue;
 
-const DEFAULT_BASE_URL: &str = "http://localhost:3030";
-const STORAGE_KEY: &str = "engram_api_url";
+const FALLBACK_BASE_URL: &str = "http://localhost:3030";
 const AUTH_STORAGE_KEY: &str = "engram_auth";
 
 #[derive(Clone, Debug)]
@@ -40,19 +39,18 @@ impl ApiClient {
         }
     }
 
+    /// Derive API base URL from the browser's current origin.
+    /// The frontend is always served by the same engram binary as the API,
+    /// so window.location.origin is always correct -- even through tunnels/proxies.
     pub fn load_base_url() -> String {
-        web_sys::window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item(STORAGE_KEY).ok().flatten())
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
-    }
-
-    pub fn save_base_url(url: &str) {
-        if let Some(storage) = web_sys::window()
-            .and_then(|w| w.local_storage().ok().flatten())
+        if let Some(origin) = web_sys::window()
+            .and_then(|w| w.location().origin().ok())
         {
-            let _ = storage.set_item(STORAGE_KEY, url);
+            if !origin.is_empty() && origin != "null" {
+                return origin;
+            }
         }
+        FALLBACK_BASE_URL.to_string()
     }
 
     fn url(&self, path: &str) -> String {

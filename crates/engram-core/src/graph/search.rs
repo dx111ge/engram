@@ -291,6 +291,8 @@ impl Graph {
                 to: to_label,
                 relationship: rel_name,
                 confidence: edge.confidence,
+                valid_from: timestamp_to_date(edge.valid_from),
+                valid_to: timestamp_to_date(edge.valid_to),
             });
         }
         Ok(result)

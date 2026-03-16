@@ -1,5 +1,4 @@
 mod presets;
-mod connection;
 mod embedding;
 mod llm;
 mod ner;
@@ -69,11 +68,6 @@ pub fn SystemPage() -> impl IntoView {
         let api = api_identity.clone();
         async move { api.get_text("/mesh/identity").await.ok().unwrap_or_default() }
     });
-
-    // ── Section 1: Connection ──
-
-    let (api_url, set_api_url) = signal(ApiClient::load_base_url());
-    let (health_status, set_health_status) = signal(String::new());
 
     // ── Section 2: Embedding ──
 
@@ -277,13 +271,6 @@ pub fn SystemPage() -> impl IntoView {
 
     // ── Status indicators (derived from loaded config/compute) ──
 
-    let connection_status: Signal<String> = Signal::derive(move || {
-        let h = health_status.get();
-        if h.starts_with("Connected") { "Connected".into() }
-        else if h.starts_with("Failed") { "Error".into() }
-        else { String::new() }
-    });
-
     let embed_status: Signal<String> = Signal::derive(move || {
         let ep = embed_endpoint.get();
         let model_cfg = embed_model.get();
@@ -402,20 +389,6 @@ pub fn SystemPage() -> impl IntoView {
                         view! { <span class={dot}></span>{st} }
                     }}</div>
                 </div>
-                // ── Card: Connection ──
-                <div class="system-card" on:click=move |_| set_modal_open.set("connection".into())>
-                    <div class="system-card-header">
-                        <span class="system-card-icon"><i class="fa-solid fa-plug"></i></span>
-                        <span class="system-card-title">"Connection"</span>
-                    </div>
-                    <div class="system-card-status">{move || {
-                        let url = api_url.get();
-                        let st = connection_status.get();
-                        let txt = if st.is_empty() { url } else { format!("{url} | {st}") };
-                        let dot = if st == "Connected" { "status-dot green" } else { "status-dot amber" };
-                        view! { <span class={dot}></span>{txt} }
-                    }}</div>
-                </div>
                 // ── Card: Secrets ──
                 <div class="system-card" on:click=move |_| set_modal_open.set("secrets".into())>
                     <div class="system-card-header">
@@ -459,25 +432,6 @@ pub fn SystemPage() -> impl IntoView {
         // ══════════════════════════════════════
         //  MODALS
         // ══════════════════════════════════════
-
-        // ── Modal: Connection ──
-        <div class=move || if modal_open.get() == "connection" { "modal-overlay active" } else { "modal-overlay" }>
-            <div class="wizard-modal">
-                <div class="wizard-modal-header">
-                    <h3><i class="fa-solid fa-plug"></i>" Connection"</h3>
-                    <button class="btn btn-secondary btn-sm" on:click=move |_| set_modal_open.set(String::new())>
-                        <i class="fa-solid fa-xmark"></i>
-                    </button>
-                </div>
-                <div class="wizard-modal-body">
-                    {connection::render_connection_modal(
-                        api_url, set_api_url,
-                        health_status, set_health_status,
-                        set_status_msg, set_modal_open,
-                    )}
-                </div>
-            </div>
-        </div>
 
         // ── Modal: Embedding ──
         <div class=move || if modal_open.get() == "embedding" { "modal-overlay active" } else { "modal-overlay" }>

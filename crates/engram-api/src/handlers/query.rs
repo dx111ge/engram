@@ -50,8 +50,8 @@ pub async fn query(
                 to: ev.to,
                 relationship: ev.relationship,
                 confidence: ev.confidence,
-                valid_from: None,
-                valid_to: None,
+                valid_from: ev.valid_from,
+                valid_to: ev.valid_to,
             })
         })
         .collect();
@@ -159,8 +159,8 @@ pub async fn get_node(
             to: e.to,
             relationship: e.relationship,
             confidence: e.confidence,
-            valid_from: None,
-            valid_to: None,
+            valid_from: e.valid_from,
+            valid_to: e.valid_to,
         })
         .collect();
 
@@ -173,8 +173,8 @@ pub async fn get_node(
             to: e.to,
             relationship: e.relationship,
             confidence: e.confidence,
-            valid_from: None,
-            valid_to: None,
+            valid_from: e.valid_from,
+            valid_to: e.valid_to,
         })
         .collect();
 

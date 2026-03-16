@@ -1,5 +1,7 @@
 # Explore Page v2: Smart Search + Detail Modal + Investigation Flow
 
+> **Status: COMPLETED** -- All features implemented. See `design-explore-v3-performance.md` for the subsequent performance pass (LOD, smart scaling, edge bundling, find path redesign, Edit tab, color legend).
+
 ## Context
 Testing revealed fundamental UX problems: 3 confusing action buttons (Research/Enrich/Ingest), useless search modes, Detail navigating away and losing graph state, sidebar too cramped for node actions. This redesign unifies everything.
 

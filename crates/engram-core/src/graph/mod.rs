@@ -106,8 +106,10 @@ pub struct Graph {
     pub(crate) adj_in: HashMap<u64, Vec<u64>>,
     /// Persisted edge type registry
     pub(crate) type_registry: TypeRegistry,
-    /// Persisted property store
+    /// Persisted node property store
     pub(crate) props: PropertyStore,
+    /// Persisted edge property store (version, qualifiers, domain-specific metadata)
+    pub(crate) edge_props: PropertyStore,
     /// Full-text BM25 index on labels + properties
     pub(crate) fulltext: FullTextIndex,
     /// Temporal index for bi-temporal range queries
@@ -157,6 +159,7 @@ impl Graph {
             adj_in: HashMap::new(),
             type_registry: TypeRegistry::new(path),
             props: PropertyStore::new(path),
+            edge_props: PropertyStore::new_with_extension(path, "brain.edge_props"),
             fulltext: FullTextIndex::new(),
             temporal: TemporalIndex::new(),
             type_bitmap: BitmapIndex::new(),
@@ -190,6 +193,8 @@ impl Graph {
             adj_in: HashMap::new(),
             type_registry,
             props,
+            edge_props: PropertyStore::load_with_extension(path, "brain.edge_props")
+                .unwrap_or_else(|_| PropertyStore::new_with_extension(path, "brain.edge_props")),
             fulltext: FullTextIndex::new(),
             temporal: TemporalIndex::new(),
             type_bitmap: BitmapIndex::new(),
@@ -559,6 +564,62 @@ pub struct EdgeView {
     pub to: String,
     pub relationship: String,
     pub confidence: f32,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+}
+
+/// Parse a date string like "2000-05-07" to unix seconds. Returns 0 on failure.
+pub fn parse_date_to_unix(date: &str) -> i64 {
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() < 3 { return 0; }
+    let y: i32 = parts[0].parse().unwrap_or(0);
+    let m: u32 = parts[1].parse().unwrap_or(1);
+    let d: u32 = parts[2].parse().unwrap_or(1);
+    if y < 1970 || m == 0 || m > 12 || d == 0 || d > 31 { return 0; }
+
+    let mut days: i64 = 0;
+    for yr in 1970..y {
+        days += if yr % 4 == 0 && (yr % 100 != 0 || yr % 400 == 0) { 366 } else { 365 };
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    for i in 0..(m - 1) as usize {
+        days += month_days[i] as i64;
+    }
+    days += (d - 1) as i64;
+    days * 86400
+}
+
+/// Convert a unix-seconds timestamp to YYYY-MM-DD string. Returns None if 0.
+pub fn timestamp_to_date(ts: i64) -> Option<String> {
+    if ts == 0 {
+        return None;
+    }
+    // Simple conversion: seconds since epoch to date
+    let secs_per_day: i64 = 86400;
+    let days = ts / secs_per_day;
+    // Days since 1970-01-01
+    let mut y = 1970i32;
+    let mut remaining = days;
+    loop {
+        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 0u32;
+    for &md in &month_days {
+        if remaining < md as i64 {
+            break;
+        }
+        remaining -= md as i64;
+        m += 1;
+    }
+    Some(format!("{:04}-{:02}-{:02}", y, m + 1, remaining + 1))
 }
 
 impl std::fmt::Display for EdgeView {

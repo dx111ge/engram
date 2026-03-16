@@ -53,8 +53,15 @@ pub async fn relate(
     let mut g = state.graph.write().map_err(|_| write_lock_err())?;
     let prov = provenance(&None);
 
-    let edge_slot = if let Some(conf) = req.confidence {
-        g.relate_with_confidence(&req.from, &req.to, &req.relationship, conf, &prov)
+    let has_temporal = req.valid_from.is_some() || req.valid_to.is_some();
+    let edge_slot = if has_temporal || req.confidence.is_some() {
+        g.relate_with_temporal(
+            &req.from, &req.to, &req.relationship,
+            req.confidence.unwrap_or(0.8),
+            req.valid_from.as_deref(),
+            req.valid_to.as_deref(),
+            &prov,
+        )
     } else {
         g.relate(&req.from, &req.to, &req.relationship, &prov)
     }

@@ -92,12 +92,26 @@ impl Resolver for ConservativeResolver {
             .iter()
             .map(|candidate| {
                 let string_sim = compute_string_similarity(label, &candidate.label);
+
+                // Also check canonical_name property -- if the existing node has
+                // canonical_name matching our incoming label, boost the score.
+                // This handles: existing "Putin" with canonical_name "Vladimir Putin"
+                // matching incoming "Vladimir Putin".
+                let canonical_sim = graph
+                    .get_property(&candidate.label, "canonical_name")
+                    .ok()
+                    .flatten()
+                    .map(|canonical| compute_string_similarity(label, &canonical))
+                    .unwrap_or(0.0);
+
+                let best_string_sim = string_sim.max(canonical_sim);
+
                 let fulltext_score = candidate.score as f32;
 
                 // Normalize fulltext score to [0, 1] range (BM25 scores can be > 1)
                 let norm_fulltext = (fulltext_score / (fulltext_score + 1.0)).min(1.0);
 
-                let combined = self.config.string_weight * string_sim
+                let combined = self.config.string_weight * best_string_sim
                     + self.config.fulltext_weight * norm_fulltext;
 
                 (candidate.node_id, combined)

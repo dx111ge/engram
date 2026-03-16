@@ -2136,6 +2136,106 @@ input[type="range"] {
   margin-right: 8px;
 }
 
+/* --- Progressive Disclosure Hint Overlay --- */
+.engram-hint-overlay {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  background: rgba(74, 158, 255, 0.12);
+  border: 1px solid rgba(74, 158, 255, 0.3);
+  color: var(--accent-bright);
+  padding: 10px 20px;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  animation: ctx-fade-in 0.3s ease;
+  white-space: nowrap;
+}
+
+.engram-hint-overlay:hover {
+  background: rgba(74, 158, 255, 0.2);
+}
+
+/* --- Path Autocomplete --- */
+.path-autocomplete {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  max-height: 200px;
+  overflow-y: auto;
+  box-shadow: 0 4px 16px var(--shadow);
+}
+
+.path-autocomplete-item {
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  color: var(--text-primary);
+  transition: background var(--transition);
+}
+
+.path-autocomplete-item:hover {
+  background: var(--bg-hover);
+}
+
+/* --- Color Legend (Step O) --- */
+.engram-legend {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  z-index: 10;
+  background: rgba(30, 42, 69, 0.85);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  backdrop-filter: blur(8px);
+  transition: opacity 0.3s ease;
+  pointer-events: auto;
+}
+
+.engram-legend.engram-legend-faded {
+  opacity: 0.3;
+}
+
+.engram-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  padding: 2px 0;
+}
+
+.engram-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* --- Edit Tab: Danger Zone --- */
+.danger-zone {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 1px solid rgba(214, 48, 49, 0.3);
+  border-radius: var(--radius);
+  background: rgba(214, 48, 49, 0.05);
+}
+
+.danger-zone h4 {
+  color: var(--error);
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+
 /* --- Search Mode Selector --- */
 .search-mode-select {
   background: var(--bg-input);

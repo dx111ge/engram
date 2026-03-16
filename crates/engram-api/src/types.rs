@@ -21,6 +21,8 @@ pub struct RelateRequest {
     pub to: String,
     pub relationship: String,
     pub confidence: Option<f32>,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
 }
 
 #[derive(Deserialize)]

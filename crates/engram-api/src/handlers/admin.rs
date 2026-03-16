@@ -100,8 +100,8 @@ pub async fn explain(
             to: e.to,
             relationship: e.relationship,
             confidence: e.confidence,
-            valid_from: None,
-            valid_to: None,
+            valid_from: e.valid_from,
+            valid_to: e.valid_to,
         })
         .collect();
 
@@ -114,8 +114,8 @@ pub async fn explain(
             to: e.to,
             relationship: e.relationship,
             confidence: e.confidence,
-            valid_from: None,
-            valid_to: None,
+            valid_from: e.valid_from,
+            valid_to: e.valid_to,
         })
         .collect();
 

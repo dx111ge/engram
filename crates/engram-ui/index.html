@@ -12,7 +12,7 @@
   <!-- Leptos mounts here -->
   <script type="module">
     import SpriteText from "https://esm.sh/three-spritetext";
-    import { Group } from "https://esm.sh/three";
+    import { Group, LOD } from "https://esm.sh/three";
 
     // Type-based node color with known overrides + consistent hash fallback
     var TYPE_COLORS = {
@@ -23,6 +23,17 @@
       'event': '#ffa726',
       'product': '#ab47bc',
       'position': '#78909c'
+    };
+
+    // Display names for legend
+    var TYPE_LABELS = {
+      'person': 'Person',
+      'org': 'Organization',
+      'organization': 'Organization',
+      'location': 'Location',
+      'event': 'Event',
+      'product': 'Product',
+      'position': 'Position'
     };
 
     function typeColor(nodeType) {
@@ -43,7 +54,7 @@
       _startNodeId: null,
       _hiddenTypes: new Set(),
       _hiddenRels: new Set(),
-      _showEdgeLabels: true,
+      _showEdgeLabels: false,
       _highlightedNode: null,
       _temporalCurrentOnly: false,
       _contextMenuEl: null,
@@ -51,6 +62,9 @@
       _pathHighlight: new Set(),
       _pathNodes: new Set(),
       _orphanedNodes: new Set(),
+      _bundlingEnabled: false,
+      _originalLinks: null,
+      _legendEl: null,
 
       create: function(container, nodesJson, linksJson, onClickCb, onDblClickCb, startNodeId) {
         if (this.instance) {
@@ -69,11 +83,25 @@
           self._contextMenuEl = null;
         }
 
+        // ── Smart Visual Scaling (Step B) ──
+        var nodeCount = nodes.length;
+        var particles = nodeCount < 30 ? 3 : (nodeCount < 80 ? 1 : 0);
+        var resolution = nodeCount < 80 ? 16 : 8;
+        var curvature = nodeCount < 50 ? 0.2 : 0;
+        self._showEdgeLabels = nodeCount < 80;
+
+        // ── Edge Bundling (Step I) ──
+        self._originalLinks = links.slice();
+        var displayLinks = links;
+        if (self._bundlingEnabled && links.length > 0) {
+          displayLinks = self._bundleEdges(links);
+        }
+
         var graph = ForceGraph3D()(container)
           .backgroundColor('#0a0e17')
           .width(container.clientWidth)
           .height(container.clientHeight)
-          .graphData({ nodes: nodes, links: links })
+          .graphData({ nodes: nodes, links: displayLinks })
           .nodeLabel(function(n) { return n.title || n.label; })
           .nodeColor(function(n) {
             var color = typeColor(n.node_type);
@@ -95,7 +123,7 @@
             return n.size || 5;
           })
           .nodeOpacity(0.85)
-          .nodeResolution(16)
+          .nodeResolution(resolution)
           .nodeVisibility(function(n) {
             // Path isolation: if path active, only show path nodes
             if (self._pathNodes.size > 0 && !self._pathNodes.has(n.id)) return false;
@@ -113,9 +141,13 @@
             if (self._startNodeId && node.id === self._startNodeId) {
               color = '#ffd700';
             }
-            var group = new Group();
 
-            // Node label (white, bold, above sphere)
+            // ── LOD: Level of Detail (Step C) ──
+            // Labels always visible. Type tag only at close range.
+            var lod = new LOD();
+
+            // Level 0 (close < 300): full detail - label + type tag
+            var groupFull = new Group();
             var label = new SpriteText(node.label);
             label.material.depthWrite = false;
             label.color = '#ffffff';
@@ -124,9 +156,8 @@
             label.strokeWidth = 0.5;
             label.strokeColor = '#111111';
             label.position.y = 14;
-            group.add(label);
+            groupFull.add(label);
 
-            // Type tag (smaller, well below sphere)
             var typeName = node.node_type || 'Entity';
             var nodeRadius = (node.size || 5) * 0.8;
             var tag = new SpriteText(typeName.toUpperCase());
@@ -137,9 +168,29 @@
             tag.strokeWidth = 0.6;
             tag.strokeColor = '#000000';
             tag.position.y = -(nodeRadius + 3);
-            group.add(tag);
+            groupFull.add(tag);
+            lod.addLevel(groupFull, 0);
 
-            return group;
+            // Level 1 (far > 300): label only, no type tag
+            var groupFar = new Group();
+            var labelFar = new SpriteText(node.label);
+            labelFar.material.depthWrite = false;
+            labelFar.color = '#ffffff';
+            labelFar.textHeight = 5;
+            labelFar.fontWeight = 'bold';
+            labelFar.strokeWidth = 0.5;
+            labelFar.strokeColor = '#111111';
+            labelFar.position.y = 14;
+            groupFar.add(labelFar);
+            lod.addLevel(groupFar, 300);
+
+            return lod;
+          })
+          .linkLabel(function(link) {
+            if (link._bundled) {
+              return link._children.map(function(c) { return c.label || 'related_to'; }).join(', ');
+            }
+            return '';
           })
           .linkColor(function(link) {
             // Path highlight
@@ -147,6 +198,10 @@
             var tgt = typeof link.target === 'object' ? link.target.id : link.target;
             if (self._pathHighlight.size > 0 && (self._pathHighlight.has(src + '>' + tgt) || self._pathHighlight.has(tgt + '>' + src))) {
               return '#ffd700';
+            }
+            // Bundled edges: distinct tint
+            if (link._bundled) {
+              return 'rgba(130, 180, 255, 0.5)';
             }
             // Temporal edges: dim if not current
             if (self._temporalCurrentOnly && link.valid_to) {
@@ -160,14 +215,18 @@
             if (self._pathHighlight.size > 0 && (self._pathHighlight.has(src + '>' + tgt) || self._pathHighlight.has(tgt + '>' + src))) {
               return 3.5;
             }
+            // Bundled edges: thicker based on count
+            if (link._bundled) {
+              return 1.2 + Math.min(link._bundleCount * 0.6, 4);
+            }
             if (self._temporalCurrentOnly && link.valid_to) return 0.4;
             return 1.2;
           })
           .linkDirectionalArrowLength(4)
           .linkDirectionalArrowRelPos(1)
           .linkDirectionalArrowColor(function() { return 'rgba(100, 160, 255, 0.6)'; })
-          .linkCurvature(0.2)
-          .linkDirectionalParticles(3)
+          .linkCurvature(curvature)
+          .linkDirectionalParticles(particles)
           .linkDirectionalParticleWidth(1.8)
           .linkDirectionalParticleSpeed(0.006)
           .linkDirectionalParticleColor(function() { return 'rgba(100, 200, 255, 0.8)'; })
@@ -196,6 +255,10 @@
             if (!self._showEdgeLabels) return null;
             if (!link.label) return null;
             var text = link.label;
+            // Bundled edge: show count
+            if (link._bundled) {
+              text = link._bundleCount + ' relations';
+            }
             // Append temporal info if present
             if (link.valid_from || link.valid_to) {
               var temporal = ' [';
@@ -226,6 +289,10 @@
             if (self._contextMenuEl) {
               self._contextMenuEl.remove();
               self._contextMenuEl = null;
+            }
+            // Dismiss hint on interaction
+            if (window.__engram_hint_dismiss) {
+              window.__engram_hint_dismiss();
             }
             // Find-path mode: if source is set, run BFS to clicked node
             if (self._findPathFrom && node.id && self._findPathFrom !== node.id) {
@@ -286,7 +353,7 @@
             { icon: 'fa-solid fa-expand', label: 'Expand', action: 'expand' },
             { icon: 'fa-solid fa-circle-info', label: 'Open Detail', action: 'details' },
             { icon: 'fa-solid fa-bullseye', label: 'Set as Start', action: 'set_start' },
-            { icon: 'fa-solid fa-route', label: 'Find Path To...', action: 'find_path' },
+            { icon: 'fa-solid fa-route', label: 'Find Path From...', action: 'find_path' },
             { icon: 'fa-solid fa-eye-slash', label: 'Hide Type', action: 'hide_type' },
           ];
 
@@ -305,17 +372,17 @@
                 self._startNodeId = node.id;
                 graph.nodeColor(graph.nodeColor()); // refresh
               } else if (item.action === 'find_path') {
+                // Set start node for sidebar Find Path
                 self._findPathFrom = node.id;
                 self._pathHighlight = new Set();
+                self._pathNodes = new Set();
                 // Refresh to clear old path highlight
+                graph.nodeVisibility(graph.nodeVisibility());
+                graph.linkVisibility(graph.linkVisibility());
                 graph.linkColor(graph.linkColor());
                 graph.linkWidth(graph.linkWidth());
-                // Show hint
-                var hint = document.createElement('div');
-                hint.className = 'engram-path-hint';
-                hint.innerHTML = '<i class="fa-solid fa-route"></i> Click target node to find path from <strong>' + node.label + '</strong>';
-                document.body.appendChild(hint);
-                setTimeout(function() { if (hint.parentNode) hint.remove(); }, 8000);
+                // Trigger Leptos path_from signal via custom event
+                window.dispatchEvent(new CustomEvent('engram-set-path-from', { detail: node.id }));
               } else if (item.action === 'hide_type') {
                 var nt = (node.node_type || 'Entity').toLowerCase();
                 self._hiddenTypes.add(nt);
@@ -341,8 +408,17 @@
           }, 10);
         });
 
-        // Spread nodes wider
-        graph.d3Force('charge').strength(-180);
+        // ── Physics Engine (Step E) ──
+        // Use ngraph for better performance with large graphs
+        // Note: forceEngine('ngraph') not available via builder on 3d-force-graph,
+        // so we keep d3 force but tune it for performance
+        if (nodeCount < 100) {
+          graph.d3Force('charge').strength(-180);
+        } else {
+          // Lighter simulation for large graphs
+          graph.d3Force('charge').strength(-100);
+          graph.cooldownTicks(100);
+        }
 
         // Responsive resize
         var ro = new ResizeObserver(function() {
@@ -353,14 +429,114 @@
 
         this.instance = graph;
         this.instance._resizeObserver = ro;
-        this.instance._destructor = function() { ro.disconnect(); };
+        this.instance._destructor = function() {
+          ro.disconnect();
+          // Remove legend
+          if (self._legendEl) {
+            self._legendEl.remove();
+            self._legendEl = null;
+          }
+        };
+
+        // ── Color Legend (Step O) ──
+        self._buildLegend(container, nodes);
+      },
+
+      // ── Edge Bundling Helper ──
+      _bundleEdges: function(links) {
+        var linkGroups = {};
+        links.forEach(function(l) {
+          var src = typeof l.source === 'object' ? l.source.id : l.source;
+          var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+          var pair = [src, tgt].sort().join('|');
+          if (!linkGroups[pair]) linkGroups[pair] = [];
+          linkGroups[pair].push(l);
+        });
+
+        var bundled = [];
+        Object.keys(linkGroups).forEach(function(pair) {
+          var group = linkGroups[pair];
+          if (group.length === 1) {
+            bundled.push(group[0]);
+          } else {
+            var b = {
+              source: group[0].source,
+              target: group[0].target,
+              label: group.length + ' relations',
+              _bundled: true,
+              _children: group,
+              _bundleCount: group.length,
+            };
+            bundled.push(b);
+          }
+        });
+        return bundled;
+      },
+
+      toggleBundling: function(enabled) {
+        this._bundlingEnabled = enabled;
+        if (this.instance && this._originalLinks) {
+          var links = enabled ? this._bundleEdges(this._originalLinks) : this._originalLinks.slice();
+          var data = this.instance.graphData();
+          this.instance.graphData({ nodes: data.nodes, links: links });
+        }
+      },
+
+      // ── Color Legend (Step O) ──
+      _buildLegend: function(container, nodes) {
+        // Remove old legend
+        if (this._legendEl) {
+          this._legendEl.remove();
+          this._legendEl = null;
+        }
+
+        // Collect unique types present in data
+        var typesInGraph = {};
+        nodes.forEach(function(n) {
+          var t = (n.node_type || 'Entity').toLowerCase();
+          if (!typesInGraph[t]) {
+            typesInGraph[t] = n.node_type || 'Entity';
+          }
+        });
+
+        var typeKeys = Object.keys(typesInGraph);
+        if (typeKeys.length === 0) return;
+
+        var legend = document.createElement('div');
+        legend.className = 'engram-legend';
+
+        typeKeys.forEach(function(key) {
+          var color = typeColor(key);
+          var displayName = TYPE_LABELS[key] || typesInGraph[key];
+          var row = document.createElement('div');
+          row.className = 'engram-legend-item';
+          row.innerHTML = '<span class="engram-legend-dot" style="background:' + color + '"></span>' + displayName;
+          legend.appendChild(row);
+        });
+
+        container.style.position = 'relative';
+        container.appendChild(legend);
+        this._legendEl = legend;
+
+        // Auto-hide after 10s, show on hover
+        setTimeout(function() {
+          legend.classList.add('engram-legend-faded');
+        }, 10000);
+        legend.addEventListener('mouseenter', function() {
+          legend.classList.remove('engram-legend-faded');
+        });
+        legend.addEventListener('mouseleave', function() {
+          legend.classList.add('engram-legend-faded');
+        });
       },
 
       update: function(nodesJson, linksJson) {
         if (!this.instance) return;
         var nodes = JSON.parse(nodesJson);
         var links = JSON.parse(linksJson);
-        this.instance.graphData({ nodes: nodes, links: links });
+        this._originalLinks = links.slice();
+        var displayLinks = this._bundlingEnabled ? this._bundleEdges(links) : links;
+        this.instance.graphData({ nodes: nodes, links: displayLinks });
       },
 
       recenter: function() {
@@ -434,12 +610,14 @@
         }
       },
 
+      // ── Find Path: BFS (shortest) ──
       findPath: function(fromId, toId) {
-        // Client-side BFS in the current graph data
         if (!this.instance) return null;
         var data = this.instance.graphData();
+        // Use original links for pathfinding (unbundled)
+        var linkList = this._originalLinks || data.links;
         var adj = {};
-        data.links.forEach(function(l) {
+        linkList.forEach(function(l) {
           var src = typeof l.source === 'object' ? l.source.id : l.source;
           var tgt = typeof l.target === 'object' ? l.target.id : l.target;
           if (!adj[src]) adj[src] = [];
@@ -447,7 +625,6 @@
           adj[src].push(tgt);
           adj[tgt].push(src);
         });
-        // BFS
         var visited = new Set();
         var queue = [[fromId]];
         visited.add(fromId);
@@ -466,10 +643,109 @@
         return null;
       },
 
+      // ── Find All Paths: DFS with backtracking (Step J) ──
+      findAllPaths: function(fromId, toId, maxDepth) {
+        if (!this.instance) return [];
+        maxDepth = maxDepth || 5;
+        var data = this.instance.graphData();
+        // Use original unbundled links for adjacency
+        var linkList = this._originalLinks || data.links;
+        var adj = {};
+        linkList.forEach(function(l) {
+          var src = typeof l.source === 'object' ? l.source.id : l.source;
+          var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+          if (!adj[src]) adj[src] = [];
+          if (!adj[tgt]) adj[tgt] = [];
+          if (adj[src].indexOf(tgt) === -1) adj[src].push(tgt);
+          if (adj[tgt].indexOf(src) === -1) adj[tgt].push(src);
+        });
+
+        var allPaths = [];
+        var visited = new Set();
+
+        function dfs(current, path) {
+          if (allPaths.length >= 10) return;
+          if (current === toId) {
+            allPaths.push(path.slice());
+            return;
+          }
+          if (path.length > maxDepth) return;
+          var neighbors = adj[current] || [];
+          for (var i = 0; i < neighbors.length; i++) {
+            var n = neighbors[i];
+            if (!visited.has(n)) {
+              visited.add(n);
+              path.push(n);
+              dfs(n, path);
+              path.pop();
+              visited.delete(n);
+            }
+          }
+        }
+
+        visited.add(fromId);
+        dfs(fromId, [fromId]);
+
+        // Sort by length (shortest first)
+        allPaths.sort(function(a, b) { return a.length - b.length; });
+        return allPaths;
+      },
+
+      // ── Show multiple paths on graph (Step J) ──
+      showPaths: function(pathsJson) {
+        var paths = JSON.parse(pathsJson);
+        this._pathNodes = new Set();
+        this._pathHighlight = new Set();
+
+        for (var p = 0; p < paths.length; p++) {
+          var path = paths[p];
+          for (var i = 0; i < path.length; i++) {
+            this._pathNodes.add(path[i]);
+          }
+          for (var i = 0; i < path.length - 1; i++) {
+            this._pathHighlight.add(path[i] + '>' + path[i+1]);
+            this._pathHighlight.add(path[i+1] + '>' + path[i]);
+          }
+        }
+
+        if (this.instance) {
+          // Temporarily unbundle edges along paths for detail
+          if (this._bundlingEnabled && this._originalLinks) {
+            var data = this.instance.graphData();
+            var unbundledLinks = [];
+            var pathPairs = this._pathHighlight;
+            data.links.forEach(function(l) {
+              var src = typeof l.source === 'object' ? l.source.id : l.source;
+              var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+              if (l._bundled && (pathPairs.has(src + '>' + tgt) || pathPairs.has(tgt + '>' + src))) {
+                // Unbundle: show individual children
+                l._children.forEach(function(c) { unbundledLinks.push(c); });
+              } else {
+                unbundledLinks.push(l);
+              }
+            });
+            this.instance.graphData({ nodes: data.nodes, links: unbundledLinks });
+          }
+
+          this.instance.nodeVisibility(this.instance.nodeVisibility());
+          this.instance.linkVisibility(this.instance.linkVisibility());
+          this.instance.linkColor(this.instance.linkColor());
+          this.instance.linkWidth(this.instance.linkWidth());
+        }
+      },
+
       clearPath: function() {
         this._pathHighlight = new Set();
         this._pathNodes = new Set();
         this._findPathFrom = null;
+
+        // Re-bundle if bundling is enabled
+        if (this.instance && this._bundlingEnabled && this._originalLinks) {
+          var data = this.instance.graphData();
+          var bundled = this._bundleEdges(this._originalLinks);
+          this.instance.graphData({ nodes: data.nodes, links: bundled });
+        }
+
         if (this.instance) {
           this.instance.nodeVisibility(this.instance.nodeVisibility());
           this.instance.linkVisibility(this.instance.linkVisibility());
@@ -489,6 +765,10 @@
         if (this._contextMenuEl) {
           this._contextMenuEl.remove();
           this._contextMenuEl = null;
+        }
+        if (this._legendEl) {
+          this._legendEl.remove();
+          this._legendEl = null;
         }
       }
     };

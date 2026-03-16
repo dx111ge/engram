@@ -36,6 +36,7 @@ impl Graph {
         self.brain.checkpoint()?;
         self.type_registry.flush()?;
         self.props.flush()?;
+        self.edge_props.flush()?;
         self.hnsw.flush().map_err(|e| StorageError::InvalidFile {
             reason: format!("vector flush failed: {e}"),
         })?;

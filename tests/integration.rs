@@ -1047,3 +1047,217 @@ fn jsonld_export_import_roundtrip() {
 
     println!("JSON-LD roundtrip: 2 nodes, 1 edge exported and re-imported successfully");
 }
+
+// ============================================================================
+// Graph Performance & Edit Tests
+//
+// Tests for depth-limited traversal, confidence manipulation, and property CRUD
+// that support the v1.1.0 Explore page enhancements.
+// ============================================================================
+
+#[test]
+fn traverse_depth_1_returns_immediate_neighbors() {
+    let (_dir, mut g) = setup();
+    let p = prov("depth-test");
+
+    // Build chain: A -> B -> C -> D
+    g.store_with_confidence("A", 0.8, &p).unwrap();
+    g.store_with_confidence("B", 0.8, &p).unwrap();
+    g.store_with_confidence("C", 0.8, &p).unwrap();
+    g.store_with_confidence("D", 0.8, &p).unwrap();
+    g.relate("A", "B", "links_to", &p).unwrap();
+    g.relate("B", "C", "links_to", &p).unwrap();
+    g.relate("C", "D", "links_to", &p).unwrap();
+
+    // Depth 1: should get A and B only
+    let result = g.traverse("A", 1, 0.0).unwrap();
+    assert!(result.nodes.len() <= 2, "depth 1 should return at most 2 nodes, got {}", result.nodes.len());
+    assert!(result.edges.len() <= 1, "depth 1 should return at most 1 edge, got {}", result.edges.len());
+
+    // Depth 2: should get A, B, C
+    let result2 = g.traverse("A", 2, 0.0).unwrap();
+    assert!(result2.nodes.len() <= 3, "depth 2 should return at most 3 nodes, got {}", result2.nodes.len());
+
+    // Depth 3: should get all 4
+    let result3 = g.traverse("A", 3, 0.0).unwrap();
+    assert_eq!(result3.nodes.len(), 4, "depth 3 should return all 4 nodes");
+
+    println!("traverse depth limits work correctly: d1={}, d2={}, d3={} nodes",
+        result.nodes.len(), result2.nodes.len(), result3.nodes.len());
+}
+
+#[test]
+fn traverse_min_confidence_filters_weak_edges() {
+    let (_dir, mut g) = setup();
+    let p = prov("conf-test");
+
+    g.store_with_confidence("Hub", 0.9, &p).unwrap();
+    g.store_with_confidence("Strong", 0.8, &p).unwrap();
+    g.store_with_confidence("Weak", 0.2, &p).unwrap();
+    g.relate_with_confidence("Hub", "Strong", "connected", 0.8, &p).unwrap();
+    g.relate_with_confidence("Hub", "Weak", "connected", 0.1, &p).unwrap();
+
+    // No filter: both neighbors
+    let all = g.traverse("Hub", 1, 0.0).unwrap();
+    assert_eq!(all.nodes.len(), 3);
+
+    // Filter at 0.5: only strong edge
+    let filtered = g.traverse("Hub", 1, 0.5).unwrap();
+    assert_eq!(filtered.nodes.len(), 2, "min_confidence 0.5 should filter out weak edge");
+
+    println!("confidence filter: all={}, filtered={} nodes", all.nodes.len(), filtered.nodes.len());
+}
+
+#[test]
+fn reinforce_increases_confidence() {
+    let (_dir, mut g) = setup();
+    let p = prov("reinforce-test");
+
+    g.store_with_confidence("TestEntity", 0.5, &p).unwrap();
+    let before = g.node_confidence("TestEntity").unwrap().unwrap();
+
+    g.reinforce_confirm("TestEntity", &p).unwrap();
+    let after = g.node_confidence("TestEntity").unwrap().unwrap();
+
+    assert!(after > before, "reinforce should increase confidence: {} -> {}", before, after);
+    assert!(after <= 1.0, "confidence should not exceed 1.0");
+
+    println!("reinforce: {:.2} -> {:.2}", before, after);
+}
+
+#[test]
+fn correct_decreases_confidence() {
+    let (_dir, mut g) = setup();
+    let p = prov("correct-test");
+
+    g.store_with_confidence("BadFact", 0.8, &p).unwrap();
+    let before = g.node_confidence("BadFact").unwrap().unwrap();
+
+    g.correct("BadFact", &p, 0).unwrap();
+    let after = g.node_confidence("BadFact").unwrap().unwrap();
+
+    assert!(after < before, "correct should decrease confidence: {} -> {}", before, after);
+    assert!(after >= 0.0, "confidence should not go below 0.0");
+
+    println!("correct: {:.2} -> {:.2}", before, after);
+}
+
+#[test]
+fn property_crud_roundtrip() {
+    let (_dir, mut g) = setup();
+    let p = prov("prop-test");
+
+    g.store_with_confidence("PropNode", 0.7, &p).unwrap();
+
+    // Set properties
+    g.set_property("PropNode", "color", "blue").unwrap();
+    g.set_property("PropNode", "size", "large").unwrap();
+
+    // Get single property
+    let color = g.get_property("PropNode", "color").unwrap();
+    assert_eq!(color, Some("blue".to_string()));
+
+    // Get all properties
+    let props = g.get_properties("PropNode").unwrap().unwrap();
+    assert_eq!(props.len(), 2);
+    assert_eq!(props.get("color").map(|s| s.as_str()), Some("blue"));
+    assert_eq!(props.get("size").map(|s| s.as_str()), Some("large"));
+
+    // Overwrite property
+    g.set_property("PropNode", "color", "red").unwrap();
+    let color2 = g.get_property("PropNode", "color").unwrap();
+    assert_eq!(color2, Some("red".to_string()));
+
+    println!("property CRUD: set, get, overwrite all work correctly");
+}
+
+#[test]
+fn relate_with_temporal_stores_dates() {
+    let (_dir, mut g) = setup();
+    let p = prov("temporal-test");
+
+    g.store("Putin", &p).unwrap();
+    g.store("President of Russia", &p).unwrap();
+
+    g.relate_with_temporal(
+        "Putin", "President of Russia", "holds_position", 0.9,
+        Some("2000-05-07"), Some("2008-05-07"), &p,
+    ).unwrap();
+
+    // Read back via edges_from and check temporal fields
+    let edges = g.edges_from("Putin").unwrap();
+    let edge = edges.iter().find(|e| e.to == "President of Russia").unwrap();
+    assert_eq!(edge.valid_from.as_deref(), Some("2000-05-07"));
+    assert_eq!(edge.valid_to.as_deref(), Some("2008-05-07"));
+    assert!(edge.confidence > 0.85);
+
+    println!("temporal relate: valid_from={:?}, valid_to={:?}",
+        edge.valid_from, edge.valid_to);
+}
+
+#[test]
+fn relate_without_temporal_has_none_dates() {
+    let (_dir, mut g) = setup();
+    let p = prov("no-temporal-test");
+
+    g.store("A", &p).unwrap();
+    g.store("B", &p).unwrap();
+    g.relate("A", "B", "related_to", &p).unwrap();
+
+    let edges = g.edges_from("A").unwrap();
+    let edge = edges.iter().find(|e| e.to == "B").unwrap();
+    assert_eq!(edge.valid_from, None);
+    assert_eq!(edge.valid_to, None);
+
+    println!("non-temporal relate: valid_from=None, valid_to=None");
+}
+
+#[test]
+fn edge_is_current_check() {
+    use engram_core::storage::edge::Edge;
+
+    let mut edge = Edge::new(1, 10, 20, 5, 1000);
+    // No temporal bounds = always current
+    assert!(edge.is_current(999999));
+    assert!(!edge.has_temporal());
+
+    // Set end date in the past
+    edge.valid_to = 1500;
+    assert!(edge.has_temporal());
+    assert!(edge.is_current(1000)); // before end
+    assert!(!edge.is_current(2000)); // after end
+
+    // Unset end date = still current
+    edge.valid_to = 0;
+    edge.valid_from = 1000;
+    assert!(edge.has_temporal());
+    assert!(edge.is_current(999999));
+
+    println!("edge temporal helpers work correctly");
+}
+
+#[test]
+fn edge_property_store_roundtrip() {
+    let (_dir, mut g) = setup();
+    let p = prov("edge-props-test");
+
+    g.store("requests", &p).unwrap();
+    g.store("urllib3", &p).unwrap();
+    let _edge_id = g.relate("requests", "urllib3", "depends_on", &p).unwrap();
+
+    // Edge slot is edge_count - 1
+    let (_, edge_count) = g.stats();
+    let edge_slot = edge_count - 1;
+
+    g.set_edge_property(edge_slot, "since_version", "2.0.0");
+    g.set_edge_property(edge_slot, "removed_in", "3.0.0");
+
+    assert_eq!(g.get_edge_property(edge_slot, "since_version"), Some("2.0.0".to_string()));
+    assert_eq!(g.get_edge_property(edge_slot, "removed_in"), Some("3.0.0".to_string()));
+    assert_eq!(g.get_edge_property(edge_slot, "missing"), None);
+
+    let all = g.get_edge_properties(edge_slot).unwrap();
+    assert_eq!(all.len(), 2);
+
+    println!("edge property store: set, get, get_all work correctly");
+}

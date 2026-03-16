@@ -1,0 +1,80 @@
+You are working in C:\SourceCode\engram. The project is a Rust knowledge engine with a Leptos WASM frontend.
+
+## Task: Rewrite the System page from collapsible accordion to 3x2 card grid + modal editing
+
+The current file `crates/engram-ui/src/pages/system.rs` is 2533 lines with 9 CollapsibleSection accordion panels. Rewrite it as:
+
+### New structure:
+1. **Main system.rs** (~200 lines): Tab bar (System | Mesh) + 3x2 card grid + modal state management
+2. **system/ directory** with sub-modules for each card's modal content
+
+### Design:
+- **System tab**: 6 summary cards in a 3x2 CSS grid (3 columns on desktop, 1 on mobile)
+- **Mesh tab**: "Coming Soon" placeholder with mesh icon and brief description
+- Each card shows: icon, title, 1-2 line status summary, colored status dot, "Configure" button
+- Clicking "Configure" / "Manage" opens a modal overlay (reuse the wizard-modal pattern from onboarding_wizard.rs)
+- Modal contains the full settings UI (moved from the current collapsible content)
+
+### The 6 cards:
+
+**Row 1 (Pipeline):**
+1. **Embeddings** - icon: fa-circle-nodes, status: "ONNX Local | 384D" or provider name, green dot if configured. Modal: provider selection (wizard-style cards), model selection, ONNX install, quantization toggle (int8 checkbox), reindex button.
+2. **NER & Relations** - icon: fa-tags, status: "GLiNER2 FP16 | Threshold 0.85", green dot. Modal: NER provider cards (Builtin, GLiNER2, LLM), model download, RE threshold slider, relation type presets (General/Custom), custom JSON import.
+3. **Language Model** - icon: fa-comments, status: "qwen2.5:7b | Ollama", green dot. Modal: provider cards (wizard-style: Ollama, LM Studio, OpenAI, vLLM, etc.), model selection, API key, system prompt textarea, temperature slider, thinking model toggle.
+
+**Row 2 (Administration):**
+4. **Connection** - icon: fa-plug, status: "127.0.0.1:3030 | Connected", green dot. Modal: API URL input, Test button with result (node/edge count), Save button.
+5. **Secrets** - icon: fa-key, status: "2 keys stored" or "No secrets", lock icon. Modal: list of secret keys, add/delete, masked values.
+6. **Database** - icon: fa-database, status: "68 facts, 282 connections". Modal: stats display, Import JSON-LD button, Export JSON-LD button, Reset Database button (with confirmation), Rerun Onboarding Wizard button.
+
+### Important implementation details:
+
+1. Read the ENTIRE current system.rs first to understand all the signals, actions, and API calls.
+2. The modal should use this pattern (from the wizard):
+```rust
+<div class=move || if modal_open.get() == "embedding" { "modal-overlay active" } else { "modal-overlay" }>
+    <div class="wizard-modal">
+        // modal content
+        <button on:click=move |_| set_modal_open.set(String::new())>Close</button>
+    </div>
+</div>
+```
+3. Use a single `(modal_open, set_modal_open)` signal of type `String` -- empty means no modal, "embedding"/"ner"/"llm"/"connection"/"secrets"/"database" opens that modal.
+4. Keep ALL existing functionality -- provider selection, model download, ONNX install, test buttons, secrets CRUD, import/export, reset, etc. Just move them into modals.
+5. The card summary should derive its status from the existing config/stats resources.
+6. For the Mesh tab, create a simple "Coming Soon" view with the mesh icon, brief description of planned features (peer discovery, federated query, knowledge profiles), and a "This feature is under development" message.
+7. Card CSS: use `system-card` class with colored left border (blue for pipeline row, green for admin row), hover effect, and status dot.
+8. Grid CSS: use `display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem;` -- will need a `@media` query for mobile but that can be in the existing stylesheet.
+
+### CSS to add:
+Add these styles inline or note they need to go into the stylesheet:
+```css
+.system-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+.system-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 1.25rem; cursor: pointer; transition: all 0.2s; border-left: 3px solid var(--accent); }
+.system-card:hover { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.15); }
+.system-card h4 { margin: 0 0 0.5rem 0; }
+.system-card .card-status { font-size: 0.85rem; color: rgba(255,255,255,0.6); }
+.system-card .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.system-card .status-dot.green { background: #66bb6a; }
+.system-card .status-dot.amber { background: #ffa726; }
+.system-card .status-dot.gray { background: #78909c; }
+.system-tabs { display: flex; gap: 0; border-bottom: 2px solid rgba(255,255,255,0.1); margin-bottom: 1.5rem; }
+.system-tab { padding: 0.75rem 1.5rem; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; color: rgba(255,255,255,0.5); }
+.system-tab.active { border-bottom-color: var(--accent); color: white; }
+.system-tab .coming-soon { font-size: 0.65rem; background: rgba(255,255,255,0.1); padding: 1px 6px; border-radius: 8px; margin-left: 6px; }
+```
+
+### File structure:
+- Keep everything in ONE file for now (system.rs). Don't split into sub-modules yet -- that can be a follow-up. The priority is the design change.
+- BUT organize the code with clear section comments: // ── Card: Embeddings ──, // ── Modal: Embeddings ──, etc.
+
+### What to keep vs change:
+- KEEP: all signals, actions, API calls, provider presets, model lists, ONNX install logic, NER model download, LLM system prompt, secrets CRUD, import/export, reset
+- CHANGE: layout from CollapsibleSection accordion to card grid + modals
+- ADD: Relation Extraction section (threshold slider + relation type config from wizard's STEP_REL), Mesh tab, Rerun Wizard button
+- REMOVE: CollapsibleSection import and usage
+
+### Connection test fix:
+The connection test currently shows "0 nodes, 0 edges". Fix it to properly parse the stats response. The test hits the configured API URL's `/health` endpoint but should also hit `/stats` with the auth token to get real node/edge counts.
+
+Do NOT create new files. Rewrite system.rs in place. Make sure it compiles with `trunk build` (Leptos WASM).

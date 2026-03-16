@@ -362,7 +362,7 @@ impl RelationExtractor for KbRelationExtractor {
                         };
 
                         if let Ok(mut g) = self.graph.write() {
-                            for (from_label, rel_type, to_label, _valid_from, _valid_to) in &expansion {
+                            for (from_label, rel_type, to_label, valid_from, valid_to) in &expansion {
                                 let _ = g.store_with_confidence(to_label, 0.70, &provenance);
 
                                 let node_type = match rel_type.as_str() {
@@ -379,7 +379,17 @@ impl RelationExtractor for KbRelationExtractor {
                                     let _ = g.store_with_confidence(from_label, 0.70, &provenance);
                                 }
 
-                                match g.relate(from_label, to_label, rel_type, &provenance) {
+                                // Use temporal relate if SPARQL returned date bounds
+                                let result = if valid_from.is_some() || valid_to.is_some() {
+                                    g.relate_with_temporal(
+                                        from_label, to_label, rel_type, 0.8,
+                                        valid_from.as_deref(), valid_to.as_deref(),
+                                        &provenance,
+                                    )
+                                } else {
+                                    g.relate(from_label, to_label, rel_type, &provenance)
+                                };
+                                match result {
                                     Ok(_) => stats.relations_found += 1,
                                     Err(e) => {
                                         eprintln!("[KB] relate FAILED: {} -[{}]-> {}: {}", from_label, rel_type, to_label, e);

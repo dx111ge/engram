@@ -4,7 +4,6 @@ use leptos_router::components::A;
 use crate::api::ApiClient;
 use crate::api::types::HealthResponse;
 use crate::auth;
-use crate::components::settings::SettingsModal;
 
 #[component]
 pub fn Nav() -> impl IntoView {
@@ -12,7 +11,6 @@ pub fn Nav() -> impl IntoView {
     let auth_state = auth::use_auth();
 
     let (mobile_open, set_mobile_open) = signal(false);
-    let (settings_open, set_settings_open) = signal(false);
     let (online, set_online) = signal(false);
 
     let toggle_nav = move |_| set_mobile_open.update(|v| *v = !*v);
@@ -61,9 +59,6 @@ pub fn Nav() -> impl IntoView {
         }
     };
 
-    let open_settings = move |_| set_settings_open.set(true);
-    let close_settings = Callback::new(move |_: ()| set_settings_open.set(false));
-
     view! {
         <nav id="main-nav">
             <div class="nav-brand">
@@ -88,14 +83,10 @@ pub fn Nav() -> impl IntoView {
                     <span class="badge badge-active" style="font-size: 0.65rem;">{role}</span>
                 </div>
                 <span class=health_class title=health_title></span>
-                <button class="btn-icon" on:click=open_settings title="API Settings">
-                    <i class="fa-solid fa-gear"></i>
-                </button>
                 <button class="btn-icon" on:click=do_logout title="Logout">
                     <i class="fa-solid fa-right-from-bracket"></i>
                 </button>
             </div>
         </nav>
-        <SettingsModal open=settings_open on_close=close_settings />
     }
 }

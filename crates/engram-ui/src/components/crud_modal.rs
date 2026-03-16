@@ -20,14 +20,11 @@ pub fn CrudModal(
     let (create_content, set_create_content) = signal(String::new());
     let (create_confidence, set_create_confidence) = signal(0.5f32);
 
-    // Connect tab state
+    // Relate tab state
     let (conn_from, set_conn_from) = signal(String::new());
     let (conn_to, set_conn_to) = signal(String::new());
     let (conn_rel, set_conn_rel) = signal(String::new());
     let (conn_conf, set_conn_conf) = signal(0.5f32);
-
-    // Delete tab state
-    let (del_label, set_del_label) = signal(String::new());
 
     let overlay_class = move || {
         if open.get() { "modal-overlay active" } else { "modal-overlay" }
@@ -68,7 +65,7 @@ pub fn CrudModal(
         }
     });
 
-    // Connect entities
+    // Relate entities
     let api_conn = api.clone();
     let do_connect = Action::new_local(move |_: &()| {
         let api = api_conn.clone();
@@ -89,30 +86,11 @@ pub fn CrudModal(
         }
     });
 
-    // Delete entity
-    let api_del = api.clone();
-    let do_delete = Action::new_local(move |_: &()| {
-        let api = api_del.clone();
-        let label = del_label.get_untracked();
-        async move {
-            set_result_msg.set(None);
-            let encoded = js_sys::encode_uri_component(&label);
-            match api.delete(&format!("/node/{encoded}")).await {
-                Ok(_) => {
-                    set_result_msg.set(Some("Entity deleted".into()));
-                    set_del_label.set(String::new());
-                    if let Some(cb) = on_created { cb.run(()); }
-                }
-                Err(e) => set_result_msg.set(Some(format!("Error: {e}"))),
-            }
-        }
-    });
-
     view! {
         <div class=overlay_class on:click=close>
             <div class="modal" style="max-width: 600px;" on:click=|e| e.stop_propagation()>
                 <div class="modal-header">
-                    <h3><i class="fa-solid fa-pencil"></i>" Graph Operations"</h3>
+                    <h3><i class="fa-solid fa-plus"></i>" Create New"</h3>
                     <button class="btn-icon modal-close" on:click=close>
                         <i class="fa-solid fa-xmark"></i>
                     </button>
@@ -123,11 +101,8 @@ pub fn CrudModal(
                         <button class=move || tab_class(CrudTab::Create) on:click=move |_| set_tab.set(CrudTab::Create)>
                             <i class="fa-solid fa-plus"></i>" Create"
                         </button>
-                        <button class=move || tab_class(CrudTab::Connect) on:click=move |_| set_tab.set(CrudTab::Connect)>
-                            <i class="fa-solid fa-link"></i>" Connect"
-                        </button>
-                        <button class=move || tab_class(CrudTab::Delete) on:click=move |_| set_tab.set(CrudTab::Delete)>
-                            <i class="fa-solid fa-trash"></i>" Delete"
+                        <button class=move || tab_class(CrudTab::Relate) on:click=move |_| set_tab.set(CrudTab::Relate)>
+                            <i class="fa-solid fa-link"></i>" Relate"
                         </button>
                     </div>
 
@@ -177,7 +152,7 @@ pub fn CrudModal(
                                 </button>
                             </div>
                         }.into_any(),
-                        CrudTab::Connect => view! {
+                        CrudTab::Relate => view! {
                             <div>
                                 <div class="form-row">
                                     <div class="form-group">
@@ -217,23 +192,6 @@ pub fn CrudModal(
                                 </button>
                             </div>
                         }.into_any(),
-                        CrudTab::Delete => view! {
-                            <div>
-                                <div class="form-group">
-                                    <label>"Entity Label to Delete"</label>
-                                    <input type="text" placeholder="entity label"
-                                        prop:value=del_label
-                                        on:input=move |ev| set_del_label.set(event_target_value(&ev)) />
-                                </div>
-                                <button class="btn btn-danger" on:click=move |_| {
-                                    if !del_label.get_untracked().is_empty() {
-                                        do_delete.dispatch(());
-                                    }
-                                }>
-                                    <i class="fa-solid fa-trash"></i>" Delete Entity"
-                                </button>
-                            </div>
-                        }.into_any(),
                     }}
                 </div>
             </div>
@@ -244,6 +202,5 @@ pub fn CrudModal(
 #[derive(Clone, Copy, PartialEq)]
 enum CrudTab {
     Create,
-    Connect,
-    Delete,
+    Relate,
 }

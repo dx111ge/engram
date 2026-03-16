@@ -1,5 +1,7 @@
 # Explore Page Enhancement Plan
 
+> **Status: COMPLETED** -- All phases implemented. See `design-explore-v2.md` for the smart search/detail modal redesign and `design-explore-v3-performance.md` for performance optimizations (LOD, edge bundling, find path redesign, entity editing).
+
 ## Context
 The Explore/Graph page shows a 3D force-directed graph with basic search and depth controls. Nodes are colored by confidence (not type), there's no filtering, no way to highlight the searched entity, and no context menu. This limits analysis -- you can't answer "show me only persons" or "what connects Putin to NATO" without manually scanning the graph.
 
