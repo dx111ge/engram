@@ -2221,6 +2221,23 @@ input[type="range"] {
   flex-shrink: 0;
 }
 
+.engram-legend-dot.engram-legend-diamond {
+  border-radius: 0;
+  transform: rotate(45deg);
+  width: 8px;
+  height: 8px;
+}
+
+.engram-legend-dot.engram-legend-triangle {
+  border-radius: 0;
+  background: transparent !important;
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 10px solid;
+}
+
 /* --- Edit Tab: Danger Zone --- */
 .danger-zone {
   margin-top: 1.5rem;

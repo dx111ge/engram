@@ -339,6 +339,11 @@ pub struct IngestRequest {
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum IngestItem {
+    /// Structured content with optional source URL.
+    WithUrl {
+        content: String,
+        source_url: Option<String>,
+    },
     /// Structured key-value data.
     Structured(HashMap<String, String>),
     /// Plain text.
@@ -517,6 +522,7 @@ pub struct SeedCommitResponse {
 pub struct IngestResponse {
     pub facts_stored: u32,
     pub relations_created: u32,
+    pub relations_deduplicated: u32,
     pub facts_resolved: u32,
     pub facts_deduped: u32,
     pub conflicts_detected: u32,

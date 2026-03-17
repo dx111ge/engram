@@ -115,6 +115,9 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/assessments/{label}/history", get(handlers::assessment_history))
         .route("/assessments/{label}/watch", post(handlers::add_assessment_watch))
         .route("/assessments/{label}/watch/{entity}", delete(handlers::remove_assessment_watch))
+        // Facts (confirm/debunk with trust propagation)
+        .route("/facts/{label}/confirm", post(handlers::fact_confirm))
+        .route("/facts/{label}/debunk", post(handlers::fact_debunk))
         // Secrets (local-only, no mesh/A2A exposure)
         .route("/secrets", get(handlers::list_secrets))
         .route("/secrets/{key}", post(handlers::set_secret))
@@ -136,6 +139,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/relation-templates/import", post(handlers::import_relation_templates))
         // Admin
         .route("/admin/reset", post(handlers::admin_reset))
+        .route("/admin/dedup-edges", post(handlers::admin_dedup_edges))
         // Config status & KB management
         .route("/config/status", get(handlers::config_status))
         .route("/config/wizard-complete", post(handlers::wizard_complete))

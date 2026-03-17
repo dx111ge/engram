@@ -70,6 +70,7 @@ pub use confidence::{ConfidenceCalculator, ConfidenceConfig};
 pub use conflict::{ConflictConfig, ConflictDetector};
 pub use dedup::{ContentDedup, dedup_batch, dedup_by_label};
 pub use error::IngestError;
+pub use learned_trust::{LearnedTrustConfig, TrustManager, extract_source_from_url};
 pub use ledger::SearchLedger;
 pub use file_source::{FileSource, FileSourceConfig, PollWatcher};
 pub use gazetteer::{GazetteerExtractor, GraphGazetteer, GazetteerEntry};

@@ -149,6 +149,7 @@ mod tests {
             relations: vec![],
             conflicts: vec![],
             resolution: None,
+            source_text: None,
         }
     }
 

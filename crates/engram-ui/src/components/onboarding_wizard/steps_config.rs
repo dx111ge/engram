@@ -49,17 +49,64 @@ pub(crate) fn render_step_quantization(
     }.into_any()
 }
 
-/// Step 7: Knowledge Sources
+/// Helper: render an inline trust slider for a specific source.
+/// Returns a view fragment. `key` is used in source_trust_values, `default_pct` is 0-100.
+fn trust_slider_inline(
+    source_trust_values: RwSignal<Vec<(String, u32)>>,
+    key: &'static str,
+    default_pct: u32,
+) -> impl IntoView {
+    let key_read = key.to_string();
+    let key_write = key.to_string();
+    let key_display = key.to_string();
+    view! {
+        <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; padding: 0.4rem 0.6rem; background: rgba(255,255,255,0.03); border-radius: 4px;">
+            <i class="fa-solid fa-shield-halved" style="font-size: 0.75rem; color: rgba(255,255,255,0.4);"></i>
+            <span style="font-size: 0.75rem; color: rgba(255,255,255,0.5); white-space: nowrap;">"Trust:"</span>
+            <input type="range" min="0" max="100" step="5"
+                style="flex: 1; accent-color: var(--accent-bright, #4fc3f7);"
+                prop:value=move || {
+                    let vals = source_trust_values.get();
+                    vals.iter().find(|(k, _)| k == &key_read).map(|(_, v)| *v).unwrap_or(default_pct).to_string()
+                }
+                on:input=move |ev| {
+                    use wasm_bindgen::JsCast;
+                    let val = ev.target()
+                        .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+                        .and_then(|el| el.value().parse::<u32>().ok())
+                        .unwrap_or(default_pct);
+                    source_trust_values.update(|v| {
+                        if let Some(entry) = v.iter_mut().find(|(k, _)| k == &key_write) {
+                            entry.1 = val;
+                        } else {
+                            v.push((key_write.clone(), val));
+                        }
+                    });
+                }
+            />
+            <span style="font-size: 0.75rem; color: rgba(255,255,255,0.5); min-width: 32px; text-align: right;">
+                {move || {
+                    let vals = source_trust_values.get();
+                    let v = vals.iter().find(|(k, _)| k == &key_display).map(|(_, v)| *v).unwrap_or(default_pct);
+                    format!("{}%", v)
+                }}
+            </span>
+        </div>
+    }
+}
+
+/// Step 7: Knowledge Sources with per-source trust sliders
 pub(crate) fn render_step_kb_sources(
     kb_wikidata: ReadSignal<bool>,
     set_kb_wikidata: WriteSignal<bool>,
     kb_dbpedia: ReadSignal<bool>,
     set_kb_dbpedia: WriteSignal<bool>,
+    source_trust_values: RwSignal<Vec<(String, u32)>>,
 ) -> AnyView {
     view! {
         <div class="wizard-step">
             <h2><i class="fa-solid fa-database"></i>" Knowledge Sources"</h2>
-            <p class="wizard-desc">"Knowledge sources are external databases that engram consults to verify and enrich what you tell it."</p>
+            <p class="wizard-desc">"Knowledge sources are external databases that engram consults to verify and enrich what you tell it. Each source has a trust level that controls how much its facts influence your graph."</p>
             <div class="wizard-info-box">
                 <p>"When you say \u{201c}Berlin is in Germany\u{201d}, Wikidata confirms this AND adds that Berlin is a city, has 3.7M people, is the capital, sits on the Spree river \u{2014} all as hard facts with high confidence."</p>
                 <p><strong>"Without a knowledge source, an empty graph has no context for building relationships."</strong></p>
@@ -74,8 +121,8 @@ pub(crate) fn render_step_kb_sources(
                         <span class="wc-label">"Coverage"</span><span>"100M+ entities, universal"</span>
                         <span class="wc-label">"Quality"</span><span>"Excellent \u{2014} curated, structured"</span>
                         <span class="wc-label">"License"</span><span>"CC0 (public domain)"</span>
-                        <span class="wc-label">"Auth"</span><span>"None needed"</span>
                     </div>
+                    {trust_slider_inline(source_trust_values, "wikidata", 80)}
                 </div>
                 <div
                     class=move || if kb_dbpedia.get() { "wizard-card wizard-card-selected" } else { "wizard-card" }
@@ -86,8 +133,8 @@ pub(crate) fn render_step_kb_sources(
                         <span class="wc-label">"Coverage"</span><span>"Wikipedia-derived, encyclopedic"</span>
                         <span class="wc-label">"Quality"</span><span>"Good for well-known entities"</span>
                         <span class="wc-label">"License"</span><span>"CC-BY-SA"</span>
-                        <span class="wc-label">"Auth"</span><span>"None needed"</span>
                     </div>
+                    {trust_slider_inline(source_trust_values, "dbpedia", 70)}
                 </div>
             </div>
         </div>
@@ -105,6 +152,7 @@ pub(crate) fn render_step_web_search(
     web_search_test_result: ReadSignal<Option<String>>,
     web_search_testing: ReadSignal<bool>,
     do_web_search_test: Action<(), ()>,
+    source_trust_values: RwSignal<Vec<(String, u32)>>,
 ) -> AnyView {
     view! {
         <div class="wizard-step">
@@ -216,6 +264,13 @@ pub(crate) fn render_step_web_search(
                     })}
                 </div>
             })}
+            // Web search trust slider
+            <div style="margin-top: 1rem;">
+                <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.25rem;">
+                    "How much should engram trust web search results?"
+                </p>
+                {trust_slider_inline(source_trust_values, "web", 30)}
+            </div>
         </div>
     }.into_any()
 }

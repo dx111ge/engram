@@ -89,6 +89,8 @@ pub struct ExtractedRelation {
     pub confidence: f32,
     /// How this relation was extracted.
     pub method: ExtractionMethod,
+    /// Source text snippet surrounding this relation (for fact node creation).
+    pub source_text: Option<String>,
 }
 
 // ── Entity resolution types ──
@@ -162,6 +164,8 @@ pub struct ProcessedFact {
     pub conflicts: Vec<ConflictRecord>,
     /// Resolution result from entity resolution stage.
     pub resolution: Option<ResolutionResult>,
+    /// Source text snippet for fact node creation.
+    pub source_text: Option<String>,
 }
 
 // ── Pipeline configuration ──
@@ -344,6 +348,8 @@ pub struct PipelineResult {
     pub facts_stored: u32,
     /// Relations created.
     pub relations_created: u32,
+    /// Relations deduplicated (existing edge reused).
+    pub relations_deduplicated: u32,
     /// Facts that matched existing entities (upserted/skipped).
     pub facts_resolved: u32,
     /// Facts dropped by dedup.

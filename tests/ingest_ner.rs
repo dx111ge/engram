@@ -327,6 +327,7 @@ fn confidence_calculation() {
         relations: vec![],
         conflicts: vec![],
         resolution: None,
+        source_text: None,
     };
 
     let high = calc.calculate(&high_fact, &g);
@@ -350,6 +351,7 @@ fn confidence_calculation() {
         relations: vec![],
         conflicts: vec![],
         resolution: None,
+        source_text: None,
     };
 
     let low = calc.calculate(&low_fact, &g);
@@ -482,6 +484,7 @@ fn content_dedup_by_hash() {
         relations: vec![],
         conflicts: vec![],
         resolution: None,
+        source_text: None,
     };
 
     // Same entity = duplicate
@@ -534,6 +537,7 @@ fn conflict_detection_flags_contradictions() {
         relations: vec![],
         conflicts: vec![],
         resolution: None,
+        source_text: None,
     };
 
     let incoming = ProcessedFact {
@@ -554,6 +558,7 @@ fn conflict_detection_flags_contradictions() {
         relations: vec![],
         conflicts: vec![],
         resolution: None,
+        source_text: None,
     };
 
     // ConflictDetector.check takes (&ProcessedFact, &Graph)
@@ -708,307 +713,6 @@ fn language_detection_defaults_to_english() {
     assert_eq!(result.confidence, 0.0);
 }
 
-// ============================================================================
-// Test 18: GLiNER backend — zero-shot NER on CoNLL-style sentences
-// ============================================================================
+// Tests 18-19 removed: old GLiNER v1 backend was replaced by GLiNER2 unified NER+RE.
+// GLiNER2 tests live in crates/engram-ingest/src/gliner2_backend.rs.
 
-#[cfg(feature = "gliner")]
-#[test]
-fn gliner_extracts_persons_orgs_locations() {
-    use engram_ingest::gliner_backend::{GlinerBackend, find_ner_model, list_installed_models};
-
-    // Use first installed ONNX model
-    let model_name = match list_installed_models().into_iter().next() {
-        Some(name) => name,
-        None => {
-            eprintln!("SKIP: no GLiNER ONNX model installed in ~/.engram/models/ner/");
-            return;
-        }
-    };
-
-    let config = match find_ner_model(&model_name) {
-        Some(mut cfg) => {
-            cfg.entity_types = vec![
-                "person".into(), "organization".into(), "location".into(),
-            ];
-            cfg.min_confidence = 0.3;
-            cfg
-        }
-        None => {
-            eprintln!("SKIP: model {} not found", model_name);
-            return;
-        }
-    };
-
-    let backend = match GlinerBackend::new(config) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("SKIP: cannot create GlinerBackend: {e}");
-            return;
-        }
-    };
-
-    let lang = en_lang();
-
-    // CoNLL-2003 style sentences with known entities
-    let test_cases = vec![
-        (
-            "Tim Cook announced that Apple will open a new office in Berlin next year.",
-            vec![("Tim Cook", "person"), ("Apple", "organization"), ("Berlin", "location")],
-        ),
-        (
-            "The United Nations held a meeting in Geneva with Secretary General Antonio Guterres.",
-            vec![("United Nations", "organization"), ("Geneva", "location"), ("Antonio Guterres", "person")],
-        ),
-        (
-            "Elon Musk sold Tesla shares worth $5 billion in New York.",
-            vec![("Elon Musk", "person"), ("Tesla", "organization"), ("New York", "location")],
-        ),
-        (
-            "Microsoft CEO Satya Nadella visited the Google campus in Mountain View, California.",
-            vec![("Satya Nadella", "person"), ("Microsoft", "organization"), ("Google", "organization"), ("Mountain View", "location"), ("California", "location")],
-        ),
-    ];
-
-    let mut total_expected = 0;
-    let mut total_found = 0;
-
-    for (text, expected) in &test_cases {
-        let entities = backend.extract(text, &lang);
-        let found_texts: Vec<String> = entities.iter().map(|e| e.text.to_lowercase()).collect();
-
-        for (expected_text, expected_type) in expected {
-            total_expected += 1;
-            let needle = expected_text.to_lowercase();
-            if found_texts.iter().any(|f| f.contains(&needle) || needle.contains(f.as_str())) {
-                total_found += 1;
-            } else {
-                eprintln!(
-                    "  MISS: '{}' ({}) not found in {:?}",
-                    expected_text, expected_type,
-                    entities.iter().map(|e| format!("{}:{}", e.text, e.entity_type)).collect::<Vec<_>>()
-                );
-            }
-        }
-
-        // All entities should be StatisticalModel method
-        for e in &entities {
-            assert_eq!(e.method, ExtractionMethod::StatisticalModel);
-            assert!(e.confidence > 0.0);
-        }
-    }
-
-    let recall = total_found as f64 / total_expected as f64;
-    eprintln!(
-        "GLiNER recall: {}/{} = {:.1}%",
-        total_found, total_expected, recall * 100.0
-    );
-    assert!(
-        recall >= 0.7,
-        "GLiNER recall should be at least 70%, got {:.1}% ({}/{})",
-        recall * 100.0, total_found, total_expected
-    );
-}
-
-// ============================================================================
-// Test 19: GLiNER + gazetteer learning — graph knowledge boosts NER
-//
-// This demonstrates the learning loop:
-// 1. Run GLiNER alone on text → gets some entities
-// 2. Store GLiNER results into graph (simulating ingest)
-// 3. Build gazetteer from enriched graph
-// 4. Run gazetteer + GLiNER chain on NEW text with same entities
-// 5. Gazetteer now finds entities instantly (from graph) with higher confidence
-//    and resolved node IDs — proving the system learned from prior extraction.
-// ============================================================================
-
-#[cfg(feature = "gliner")]
-#[test]
-fn gliner_learning_loop_gazetteer_improves_with_graph() {
-    use engram_ingest::gliner_backend::{GlinerBackend, find_ner_model, list_installed_models};
-
-    let model_name = match list_installed_models().into_iter().next() {
-        Some(name) => name,
-        None => {
-            eprintln!("SKIP: no GLiNER ONNX model installed in ~/.engram/models/ner/");
-            return;
-        }
-    };
-
-    let config = match find_ner_model(&model_name) {
-        Some(mut cfg) => {
-            cfg.entity_types = vec![
-                "person".into(), "organization".into(), "location".into(),
-            ];
-            cfg.min_confidence = 0.3;
-            cfg
-        }
-        None => {
-            eprintln!("SKIP: model {} not found", model_name);
-            return;
-        }
-    };
-
-    let backend = match GlinerBackend::new(config) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("SKIP: cannot create GlinerBackend: {e}");
-            return;
-        }
-    };
-
-    let lang = en_lang();
-    let (_dir, graph) = setup();
-
-    // ── Phase 1: GLiNER extracts entities from first document ──
-
-    let doc1 = "Angela Merkel met with Emmanuel Macron at the European Council in Brussels.";
-    let phase1_entities = backend.extract(doc1, &lang);
-
-    eprintln!("Phase 1 — GLiNER only:");
-    for e in &phase1_entities {
-        eprintln!("  {} [{}] conf={:.2} method={:?}", e.text, e.entity_type, e.confidence, e.method);
-    }
-
-    assert!(!phase1_entities.is_empty(), "GLiNER should extract entities from doc1");
-
-    // All from StatisticalModel, none resolved to graph yet
-    for e in &phase1_entities {
-        assert_eq!(e.method, ExtractionMethod::StatisticalModel);
-        assert!(e.resolved_to.is_none(), "phase 1 should have no graph resolution");
-    }
-
-    // ── Phase 2: Store GLiNER results into graph (simulating ingest) ──
-
-    {
-        let mut g = graph.write().unwrap();
-        let prov = engram_core::graph::Provenance::user("gliner-ingest");
-        for e in &phase1_entities {
-            g.store_with_confidence(&e.text, e.confidence, &prov).unwrap();
-        }
-    }
-
-    // ── Phase 3: Build gazetteer from enriched graph ──
-
-    let brain_path = {
-        let g = graph.read().unwrap();
-        g.path().to_path_buf()
-    };
-
-    let mut gaz = GraphGazetteer::new(&brain_path, 0.3);
-    {
-        let g = graph.read().unwrap();
-        gaz.build_from_graph(&g);
-    }
-    let gaz = Arc::new(tokio::sync::RwLock::new(gaz));
-    let gaz_extractor = GazetteerExtractor::new(gaz);
-
-    // ── Phase 4: Process a NEW document mentioning the same entities ──
-
-    let doc2 = "Emmanuel Macron addressed the European Council about relations with Angela Merkel. \
-                Brussels hosted the summit on EU defense policy.";
-
-    // Run gazetteer alone on doc2
-    let phase2_gaz = gaz_extractor.extract(doc2, &lang);
-
-    eprintln!("\nPhase 2 — Gazetteer (learned from graph):");
-    for e in &phase2_gaz {
-        eprintln!(
-            "  {} [{}] conf={:.2} method={:?} resolved={:?}",
-            e.text, e.entity_type, e.confidence, e.method, e.resolved_to
-        );
-    }
-
-    // Gazetteer should find entities it learned from the graph
-    let gaz_texts: Vec<String> = phase2_gaz.iter().map(|e| e.text.clone()).collect();
-
-    // At least some of the GLiNER-extracted entities should now be in the gazetteer
-    let phase1_texts: Vec<&str> = phase1_entities.iter().map(|e| e.text.as_str()).collect();
-    let mut learned_count = 0;
-    for p1 in &phase1_texts {
-        if gaz_texts.iter().any(|g| g == *p1) {
-            learned_count += 1;
-        }
-    }
-
-    eprintln!(
-        "\nLearning: gazetteer found {}/{} entities from GLiNER phase 1",
-        learned_count, phase1_texts.len()
-    );
-
-    assert!(
-        learned_count > 0,
-        "gazetteer should learn from graph — found 0 of {:?} in gazetteer results {:?}",
-        phase1_texts, gaz_texts
-    );
-
-    // Gazetteer hits should have resolved node IDs (proving graph integration)
-    for e in &phase2_gaz {
-        assert_eq!(e.method, ExtractionMethod::Gazetteer);
-        assert!(
-            e.resolved_to.is_some(),
-            "learned entity '{}' should resolve to graph node",
-            e.text
-        );
-    }
-
-    // ── Phase 5: MergeAll chain (gazetteer + GLiNER) should find MORE than either alone ──
-
-    // Clone the backend config for a new chain
-    let config2 = match find_ner_model(&model_name) {
-        Some(mut cfg) => {
-            cfg.entity_types = vec![
-                "person".into(), "organization".into(), "location".into(),
-            ];
-            cfg.min_confidence = 0.3;
-            cfg
-        }
-        None => return,
-    };
-    let backend2 = GlinerBackend::new(config2).unwrap();
-
-    // Rebuild gazetteer for the chain
-    let mut gaz2 = GraphGazetteer::new(&brain_path, 0.3);
-    {
-        let g = graph.read().unwrap();
-        gaz2.build_from_graph(&g);
-    }
-    let gaz2 = Arc::new(tokio::sync::RwLock::new(gaz2));
-    let gaz_extractor2 = GazetteerExtractor::new(gaz2);
-
-    let mut chain = NerChain::new(ChainStrategy::MergeAll);
-    chain.add_backend(Box::new(gaz_extractor2));
-    chain.add_backend(Box::new(backend2));
-
-    let chain_entities = chain.extract(doc2, &lang);
-
-    eprintln!("\nPhase 3 — MergeAll chain (gazetteer + GLiNER):");
-    for e in &chain_entities {
-        eprintln!(
-            "  {} [{}] conf={:.2} method={:?} resolved={:?}",
-            e.text, e.entity_type, e.confidence, e.method, e.resolved_to
-        );
-    }
-
-    // Chain should find at least as many unique entities as GLiNER alone
-    let gliner_only = backend.extract(doc2, &lang);
-    assert!(
-        chain_entities.len() >= gliner_only.len(),
-        "chain ({}) should find >= GLiNER alone ({})",
-        chain_entities.len(),
-        gliner_only.len()
-    );
-
-    // Chain should have resolved_to IDs from gazetteer merged into winning entities
-    let resolved_count = chain_entities.iter().filter(|e| e.resolved_to.is_some()).count();
-
-    eprintln!(
-        "\nChain: {} entities, {} with resolved node IDs (from gazetteer knowledge)",
-        chain_entities.len(), resolved_count
-    );
-
-    assert!(
-        resolved_count > 0,
-        "chain should carry resolved_to node IDs from gazetteer into deduped results"
-    );
-}

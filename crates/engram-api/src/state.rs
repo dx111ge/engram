@@ -94,6 +94,9 @@ pub struct EngineConfig {
     pub web_search_api_key: Option<String>,
     /// Web search URL (for SearXNG self-hosted)
     pub web_search_url: Option<String>,
+    /// Per-source-type initial trust overrides: { "web": 0.30, "x": 0.10, ... }
+    /// Merged with built-in defaults. User can adjust via config API or UI.
+    pub source_trust_defaults: Option<std::collections::HashMap<String, f32>>,
     /// Whether the onboarding wizard has been dismissed.
     #[serde(default)]
     pub wizard_dismissed: Option<bool>,
@@ -188,6 +191,9 @@ impl EngineConfig {
         }
         if other.web_search_url.is_some() {
             self.web_search_url = other.web_search_url.clone();
+        }
+        if other.source_trust_defaults.is_some() {
+            self.source_trust_defaults = other.source_trust_defaults.clone();
         }
         if other.wizard_dismissed.is_some() {
             self.wizard_dismissed = other.wizard_dismissed;

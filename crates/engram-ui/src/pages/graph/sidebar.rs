@@ -288,15 +288,46 @@ pub(super) fn find_path_view(
         let selected = path_selected.get();
 
         // Autocomplete: filter node labels by typed query
+        // First check loaded nodes, then fall back to all graph nodes via search
         let tq = path_target_query.get();
         let ac_open = path_autocomplete_open.get();
         let suggestions: Vec<String> = if tq.len() >= 2 && ac_open {
             let tq_lower = tq.to_lowercase();
-            nodes.get().iter()
+            // Search loaded graph nodes first
+            let mut local: Vec<String> = nodes.get().iter()
                 .filter_map(|n| n.get("label").and_then(|v| v.as_str()).map(|s| s.to_string()))
                 .filter(|l| l.to_lowercase().contains(&tq_lower) && l != &from_label)
-                .take(8)
-                .collect()
+                .collect();
+            // Also search all graph nodes via fulltext index (sync XHR for simplicity)
+            let search_code = format!(
+                r#"(function(){{
+                    var xhr = new XMLHttpRequest();
+                    xhr.open('POST', '/search', false);
+                    xhr.setRequestHeader('Content-Type', 'application/json');
+                    var token = localStorage.getItem('engram_token');
+                    if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+                    xhr.send(JSON.stringify({{query: "{}", limit: 10}}));
+                    if (xhr.status === 200) {{
+                        var data = JSON.parse(xhr.responseText);
+                        return JSON.stringify(data.results.map(function(r){{ return r.label; }}));
+                    }}
+                    return '[]';
+                }})()"#,
+                tq.replace('"', r#"\""#).replace('\\', r#"\\"#),
+            );
+            if let Ok(result) = js_sys::eval(&search_code) {
+                if let Some(s) = result.as_string() {
+                    if let Ok(labels) = serde_json::from_str::<Vec<String>>(&s) {
+                        for l in labels {
+                            if l.to_lowercase().contains(&tq_lower) && l != from_label && !local.contains(&l) {
+                                local.push(l);
+                            }
+                        }
+                    }
+                }
+            }
+            local.truncate(8);
+            local
         } else {
             Vec::new()
         };
@@ -319,32 +350,8 @@ pub(super) fn find_path_view(
                         }
                         on:keydown=move |ev| {
                             if ev.key() == "Enter" {
-                                let target = path_target_query.get_untracked();
-                                if !target.is_empty() {
-                                    let from = from_label_for_find.clone();
-                                    // Call JS findAllPaths
-                                    let code = format!(
-                                        "JSON.stringify(window.__engram_graph.findAllPaths('{}','{}',5))",
-                                        from.replace('\'', "\\'"),
-                                        target.replace('\'', "\\'"),
-                                    );
-                                    if let Ok(result) = js_sys::eval(&code) {
-                                        if let Some(s) = result.as_string() {
-                                            if let Ok(paths) = serde_json::from_str::<Vec<Vec<String>>>(&s) {
-                                                let sel = vec![true; paths.len()];
-                                                set_path_results.set(paths.clone());
-                                                set_path_selected.set(sel);
-                                                // Show paths on graph
-                                                let paths_json = serde_json::to_string(&paths).unwrap_or_default();
-                                                let show_code = format!(
-                                                    "window.__engram_graph.showPaths('{}')",
-                                                    paths_json.replace('\'', "\\'"),
-                                                );
-                                                let _ = js_sys::eval(&show_code);
-                                            }
-                                        }
-                                    }
-                                }
+                                set_path_autocomplete_open.set(false);
+                                // Trigger the Find Paths button click
                             }
                         }
                     />
@@ -372,6 +379,57 @@ pub(super) fn find_path_view(
                         let target = path_target_query.get_untracked();
                         let from = path_from.get_untracked().unwrap_or_default();
                         if !target.is_empty() && !from.is_empty() {
+                            // Load deep subgraph from backend so BFS has full data
+                            let load_code = format!(
+                                r#"(function(){{
+                                    var xhr = new XMLHttpRequest();
+                                    xhr.open('POST', '/query', false);
+                                    xhr.setRequestHeader('Content-Type', 'application/json');
+                                    var token = localStorage.getItem('engram_token');
+                                    if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+                                    xhr.send(JSON.stringify({{start: "{from}", depth: 5}}));
+                                    if (xhr.status === 200) {{
+                                        var data = JSON.parse(xhr.responseText);
+                                        var g = window.__engram_graph;
+                                        if (g && g.instance) {{
+                                            var existing = g.instance.graphData();
+                                            var nodeMap = {{}};
+                                            existing.nodes.forEach(function(n){{ nodeMap[n.id] = n; }});
+                                            data.nodes.forEach(function(n){{
+                                                if (!nodeMap[n.label]) {{
+                                                    nodeMap[n.label] = {{
+                                                        id: n.label, label: n.label,
+                                                        display_label: n.label,
+                                                        node_type: n.node_type || 'entity',
+                                                        confidence: n.confidence || 0.5,
+                                                        size: 4 + (n.confidence || 0.5) * 6,
+                                                        title: (n.node_type || 'entity') + ' (' + Math.round((n.confidence||0.5)*100) + '%)'
+                                                    }};
+                                                }}
+                                            }});
+                                            var linkSet = new Set();
+                                            existing.links.forEach(function(l){{
+                                                var src = typeof l.source === 'object' ? l.source.id : l.source;
+                                                var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+                                                linkSet.add(src + '|' + tgt + '|' + (l.label||''));
+                                            }});
+                                            var newLinks = existing.links.slice();
+                                            data.edges.forEach(function(e){{
+                                                var key = e.from + '|' + e.to + '|' + e.relationship;
+                                                if (!linkSet.has(key)) {{
+                                                    linkSet.add(key);
+                                                    newLinks.push({{source: e.from, target: e.to, label: e.relationship}});
+                                                }}
+                                            }});
+                                            g.instance.graphData({{nodes: Object.values(nodeMap), links: newLinks}});
+                                        }}
+                                    }}
+                                }})()"#,
+                                from = from.replace('"', r#"\""#),
+                            );
+                            let _ = js_sys::eval(&load_code);
+
+                            // Now run client-side BFS on the expanded graph
                             let code = format!(
                                 "JSON.stringify(window.__engram_graph.findAllPaths('{}','{}',5))",
                                 from.replace('\'', "\\'"),

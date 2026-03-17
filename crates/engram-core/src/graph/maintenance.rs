@@ -31,6 +31,51 @@ impl Graph {
         Ok(())
     }
 
+    /// Deduplicate edges: for each (from, to, edge_type) triplet,
+    /// keep the highest-confidence edge and soft-delete the rest.
+    /// Returns the number of duplicate edges removed.
+    pub fn dedup_edges(&mut self) -> u32 {
+        let (_, edge_count) = self.brain.stats();
+        if edge_count == 0 {
+            return 0;
+        }
+
+        // Collect all active edges grouped by (from, to, edge_type)
+        let mut groups: HashMap<(u64, u64, u32), Vec<(u64, f32)>> = HashMap::new();
+        for slot in 0..edge_count {
+            if let Ok(edge) = self.brain.read_edge(slot) {
+                if edge.is_active() {
+                    groups
+                        .entry((edge.from_node, edge.to_node, edge.edge_type))
+                        .or_default()
+                        .push((slot, edge.confidence));
+                }
+            }
+        }
+
+        let prov = Provenance {
+            source_type: SourceType::Derived,
+            source_id: "dedup-edges".to_string(),
+        };
+
+        let mut removed = 0u32;
+        for (_, mut slots) in groups {
+            if slots.len() <= 1 {
+                continue;
+            }
+            // Sort by confidence desc -- keep highest
+            slots.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            // Delete all but the first (highest confidence)
+            for &(slot, _) in &slots[1..] {
+                if self.delete_edge_by_slot(slot, &prov).unwrap_or(false) {
+                    removed += 1;
+                }
+            }
+        }
+
+        removed
+    }
+
     /// Flush and checkpoint everything: mmap, WAL, types, properties, vectors, co-occurrence.
     pub fn checkpoint(&mut self) -> Result<()> {
         self.brain.checkpoint()?;

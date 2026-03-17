@@ -71,6 +71,8 @@ pub fn OnboardingWizard(
     let (quant_choice, set_quant_choice) = signal("int8".to_string());
     let (kb_wikidata, set_kb_wikidata) = signal(true);
     let (kb_dbpedia, set_kb_dbpedia) = signal(false);
+    // Source trust defaults: Vec<(type_key, value_0_100)>
+    let source_trust_values = RwSignal::new(Vec::<(String, u32)>::new());
     let (seed_text, set_seed_text) = signal(String::new());
     // Web search step
     let (web_search_provider, set_web_search_provider) = signal("duckduckgo".to_string());
@@ -387,6 +389,17 @@ pub fn OnboardingWizard(
                         })).await;
                         if r.is_err() { ok = false; }
                     }
+                    // Save source trust defaults if any were customized
+                    let trust_vals = source_trust_values.get_untracked();
+                    if !trust_vals.is_empty() {
+                        let mut trust_map = serde_json::Map::new();
+                        for (key, val) in &trust_vals {
+                            trust_map.insert(key.clone(), serde_json::json!((*val as f64) / 100.0));
+                        }
+                        let _ = api.post_text("/config", &serde_json::json!({
+                            "source_trust_defaults": trust_map,
+                        })).await;
+                    }
                     if ok { Ok("ok".into()) } else { Err(crate::api::ApiError::Network("KB config failed".into())) }
                 }
                 STEP_WEB_SEARCH => {
@@ -655,6 +668,7 @@ pub fn OnboardingWizard(
                         STEP_KB_SOURCES => steps_config::render_step_kb_sources(
                             kb_wikidata, set_kb_wikidata,
                             kb_dbpedia, set_kb_dbpedia,
+                            source_trust_values,
                         ),
                         STEP_WEB_SEARCH => steps_config::render_step_web_search(
                             web_search_provider, set_web_search_provider,
@@ -662,6 +676,7 @@ pub fn OnboardingWizard(
                             web_search_url, set_web_search_url,
                             web_search_test_result, web_search_testing,
                             do_web_search_test,
+                            source_trust_values,
                         ),
                         STEP_SEED => steps_config::render_step_seed(
                             seed_text, set_seed_text,

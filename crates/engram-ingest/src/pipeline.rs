@@ -21,6 +21,77 @@ struct ParsedSegment {
     metadata: HashMap<String, String>,
 }
 
+/// Snap a byte index to the nearest valid UTF-8 char boundary (rounding down).
+fn snap_to_char_boundary(text: &str, idx: usize) -> usize {
+    let idx = idx.min(text.len());
+    if text.is_char_boundary(idx) { return idx; }
+    // Walk backwards to find the nearest char boundary
+    let mut i = idx;
+    while i > 0 && !text.is_char_boundary(i) { i -= 1; }
+    i
+}
+
+/// Extract the sentence containing an entity span.
+/// Finds the nearest sentence boundaries (. ! ? or newline) around the span.
+/// Uses char-boundary-safe slicing to handle multi-byte UTF-8 (curly quotes, etc.).
+fn extract_snippet(text: &str, span: (usize, usize), max_chars: usize) -> String {
+    // Snap span to valid char boundaries
+    let span_start = snap_to_char_boundary(text, span.0);
+    let span_end = snap_to_char_boundary(text, span.1);
+
+    // Find sentence start: look backwards from entity start
+    let snippet_start = text[..span_start]
+        .rfind(|c: char| c == '.' || c == '!' || c == '?' || c == '\n')
+        .map(|i| {
+            // Advance past the delimiter to the next char boundary
+            let next = i + 1;
+            snap_to_char_boundary(text, next)
+        })
+        .unwrap_or(0);
+    // Find sentence end: look forwards from entity end
+    let snippet_end = text[span_end..]
+        .find(|c: char| c == '.' || c == '!' || c == '?' || c == '\n')
+        .map(|i| {
+            let end = span_end + i + 1;
+            snap_to_char_boundary(text, end)
+        })
+        .unwrap_or(text.len().min(span_end + max_chars));
+    let snippet_end = snap_to_char_boundary(text, snippet_end.min(text.len()));
+
+    let result = text[snippet_start..snippet_end].trim();
+    // Clamp to max_chars at a char boundary
+    if result.len() > max_chars {
+        let cut = snap_to_char_boundary(result, max_chars);
+        result[..cut].trim().to_string()
+    } else {
+        result.to_string()
+    }
+}
+
+/// Generate a dedup-safe label for a Fact node: `Fact:{summary}-{hash4}`.
+/// Uses the first ~50 chars of the claim as a readable summary slug.
+fn make_fact_label(_entity: &str, source_text: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    // Build a readable slug from the claim text (first ~50 chars, words only)
+    let words: Vec<&str> = source_text.split_whitespace().collect();
+    let mut slug = String::new();
+    for w in &words {
+        let clean: String = w.chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-')
+            .collect();
+        if clean.is_empty() { continue; }
+        if !slug.is_empty() { slug.push('-'); }
+        slug.push_str(&clean.to_lowercase());
+        if slug.len() >= 50 { break; }
+    }
+    slug.truncate(50);
+    let mut hasher = DefaultHasher::new();
+    source_text.hash(&mut hasher);
+    let hash = hasher.finish();
+    format!("Fact:{}-{:04x}", slug, hash & 0xFFFF)
+}
+
 /// The ingest pipeline executor.
 ///
 /// Owns the stage implementations and orchestrates execution across
@@ -183,6 +254,8 @@ impl Pipeline {
                         .cloned()
                         .collect();
 
+                    let snippet = extract_snippet(&seg.text, entity.span, 200);
+
                     facts.push(ProcessedFact {
                         entity: entity.text.clone(),
                         entity_type: Some(entity.entity_type.clone()),
@@ -201,6 +274,7 @@ impl Pipeline {
                         relations: entity_relations,
                         conflicts: Vec::new(),
                         resolution: entity.resolved_to.map(crate::types::ResolutionResult::Matched),
+                        source_text: Some(snippet),
                     });
 
                     let _ = eidx; // suppress unused warning
@@ -232,6 +306,7 @@ impl Pipeline {
                     relations: Vec::new(),
                     conflicts: Vec::new(),
                     resolution: None,
+                    source_text: None,
                 });
             }
         }
@@ -342,6 +417,8 @@ impl Pipeline {
                                 .cloned()
                                 .collect();
 
+                            let snippet = extract_snippet(&seg.text, entity.span, 200);
+
                             ProcessedFact {
                                 entity: entity.text.clone(),
                                 entity_type: Some(entity.entity_type.clone()),
@@ -362,6 +439,7 @@ impl Pipeline {
                                 resolution: entity
                                     .resolved_to
                                     .map(crate::types::ResolutionResult::Matched),
+                                source_text: Some(snippet),
                             }
                         })
                         .collect::<Vec<_>>()
@@ -403,6 +481,7 @@ impl Pipeline {
                         relations: Vec::new(),
                         conflicts: Vec::new(),
                         resolution: None,
+                        source_text: None,
                     }
                 })
                 .collect()
@@ -688,6 +767,7 @@ impl Pipeline {
                         rel_type: candidate.rel_type,
                         confidence: candidate.confidence,
                         method: candidate.method,
+                        source_text: None,
                     });
                 }
             }
@@ -836,6 +916,71 @@ impl Pipeline {
             // Write lock drops here — readers can interleave between chunks
         }
 
+        // Pass 1.5: Create Fact nodes for entities that have source_text.
+        {
+            let mut graph = self.graph.write().map_err(|_| IngestError::Graph("graph write lock poisoned".into()))?;
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+
+            for fact in &facts {
+                if let Some(ref source_text) = fact.source_text {
+                    let fact_label = make_fact_label(&fact.entity, source_text);
+
+                    // Dedup: skip if fact node already exists
+                    if let Ok(Some(_)) = graph.find_node_id(&fact_label) {
+                        continue;
+                    }
+
+                    let prov = engram_core::graph::Provenance {
+                        source_type: engram_core::graph::SourceType::Derived,
+                        source_id: format!("ingest:{}", self.config.name),
+                    };
+
+                    // Create the fact node
+                    if let Ok(_nid) = graph.store_with_confidence(&fact_label, fact.confidence, &prov) {
+                        let _ = graph.set_node_type(&fact_label, "Fact");
+                        let _ = graph.set_property(&fact_label, "claim", source_text);
+                        let _ = graph.set_property(&fact_label, "status", "active");
+                        let _ = graph.set_property(&fact_label, "extracted_at", &now_ts.to_string());
+                        let _ = graph.set_property(
+                            &fact_label,
+                            "extraction_method",
+                            &format!("{:?}", fact.extraction_method),
+                        );
+                        if let Some(ref url) = fact.provenance.source_url {
+                            let _ = graph.set_property(&fact_label, "source_url", url);
+                        }
+
+                        // Edge: entity -> fact node (mentioned_in)
+                        // Only link if the entity is actually mentioned in the claim text
+                        let entity_lower = fact.entity.to_lowercase();
+                        let claim_lower = source_text.to_lowercase();
+                        if claim_lower.contains(&entity_lower) {
+                            let _ = graph.relate_upsert(&fact.entity, &fact_label, "mentioned_in", &prov);
+                        }
+
+                        // Edge: fact -> Source node (sourced_from)
+                        let source_label = if let Some(ref url) = fact.provenance.source_url {
+                            let (stype, sid) = crate::learned_trust::extract_source_from_url(url);
+                            format!("Source:{}:{}", stype, sid)
+                        } else {
+                            format!("Source:web:{}", fact.provenance.source)
+                        };
+                        // Ensure source node exists
+                        if graph.find_node_id(&source_label).ok().flatten().is_none() {
+                            let _ = graph.store_with_confidence(&source_label, 0.50, &prov);
+                            let _ = graph.set_node_type(&source_label, "Source");
+                        }
+                        let _ = graph.relate_upsert(&fact_label, &source_label, "sourced_from", &prov);
+
+                        result.facts_stored += 1;
+                    }
+                }
+            }
+        }
+
         // Pass 2: Create all deferred relations.
         // Auto-creates missing nodes (e.g., KB enrichment discovers "Lockheed Martin"
         // as manufacturer of HIMARS -- we create the node automatically).
@@ -853,13 +998,14 @@ impl Pipeline {
                         }
                     }
 
-                    match graph.relate(
+                    match graph.relate_upsert(
                         &rel.from,
                         &rel.to,
                         &rel.rel_type,
                         provenance,
                     ) {
-                        Ok(_) => result.relations_created += 1,
+                        Ok(r) if r.created => result.relations_created += 1,
+                        Ok(_) => result.relations_deduplicated += 1,
                         Err(e) => result.errors.push(format!(
                             "relation {}-[{}]->{}: {}",
                             rel.from, rel.rel_type, rel.to, e
@@ -1028,6 +1174,7 @@ mod tests {
                 relations: vec![],
                 conflicts: vec![],
                 resolution: None,
+                source_text: None,
             },
             ProcessedFact {
                 entity: "Acme Corp".into(),
@@ -1050,9 +1197,11 @@ mod tests {
                     rel_type: "works_at".into(),
                     confidence: 0.8,
                     method: ExtractionMethod::Manual,
+                    source_text: None,
                 }],
                 conflicts: vec![],
                 resolution: None,
+                source_text: None,
             },
         ];
 

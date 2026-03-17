@@ -171,6 +171,13 @@ dynamically generated from Google's Discovery Service.
 | SE.6 | Web search fallback for entities not in Wikidata | Medium | LOW | For entities with no Wikipedia/Wikidata match, use web search to find factual text, then run GLiNER2 RE on discovered text to extract relations. |
 | SE.7 | LLM seed expansion | Medium | LOW | If LLM configured, ask it to generate factual statements from entity list. Run GLiNER2 RE on output. Store with `method: LlmFallback` and lower confidence. |
 
+### Fact Intelligence (requires Fact Nodes + Source Identity)
+
+| # | Task | Priority | Notes |
+|---|------|----------|-------|
+| FI.1 | **Wrong fact / contradiction detection** | HIGH | Automated detection of contradicting Fact nodes in the graph. When facts make conflicting claims (e.g. "Germany imported 12Mt" vs "Germany imported 8Mt"), flag the contradiction, present both to analyst for resolution, adjust confidence. Feeds into assessment system via `contested` / `superseded` fact status. |
+| FI.2 | **Fact spreading network detection** | HIGH | Insights-layer analysis of how claims propagate across sources. Detects coordinated inauthentic behavior (bot networks): many social Source nodes linking to the same Fact node within a short time window, same claim across low-trust accounts simultaneously. Graph topology query on fact/source subgraph using typed Source identity (Source:x:@handle, Source:tg:@channel) with per-source timestamps. |
+
 ### Other Planned Integrations
 
 | Integration | Priority | Notes |

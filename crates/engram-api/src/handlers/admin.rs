@@ -607,6 +607,22 @@ fn strip_prefix(s: &str) -> String {
     }
 }
 
+// ── POST /admin/dedup-edges ──
+
+pub async fn admin_dedup_edges(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+    let removed = g.dedup_edges();
+    drop(g);
+    if removed > 0 {
+        state.mark_dirty();
+    }
+    Ok(Json(serde_json::json!({
+        "duplicates_removed": removed,
+    })))
+}
+
 // ── POST /admin/reset ──
 
 pub async fn admin_reset(

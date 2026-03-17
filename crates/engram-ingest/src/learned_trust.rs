@@ -20,7 +20,7 @@ use crate::types::ProcessedFact;
 /// Learned trust configuration.
 #[derive(Debug, Clone)]
 pub struct LearnedTrustConfig {
-    /// Initial trust for new sources.
+    /// Initial trust for new sources (fallback when type not in per-type map).
     pub initial_source_trust: f32,
     /// Initial trust for new authors.
     pub initial_author_trust: f32,
@@ -32,10 +32,21 @@ pub struct LearnedTrustConfig {
     pub max_trust: f32,
     /// Minimum trust score (never goes below this).
     pub min_trust: f32,
+    /// Per-type initial trust: "web" -> 0.30, "x" -> 0.10, etc.
+    pub initial_trust_by_type: std::collections::HashMap<String, f32>,
 }
 
 impl Default for LearnedTrustConfig {
     fn default() -> Self {
+        let mut by_type = std::collections::HashMap::new();
+        by_type.insert("web".into(), 0.30);
+        by_type.insert("x".into(), 0.10);
+        by_type.insert("tg".into(), 0.10);
+        by_type.insert("reddit".into(), 0.10);
+        by_type.insert("doc".into(), 0.40);
+        by_type.insert("person".into(), 0.50);
+        by_type.insert("mesh".into(), 0.25);
+        by_type.insert("llm".into(), 0.08);
         Self {
             initial_source_trust: 0.30,
             initial_author_trust: 0.30,
@@ -43,8 +54,72 @@ impl Default for LearnedTrustConfig {
             contradiction_penalty: 0.10,
             max_trust: 0.95,
             min_trust: 0.05,
+            initial_trust_by_type: by_type,
         }
     }
+}
+
+impl LearnedTrustConfig {
+    /// Resolve initial trust for a source type prefix (e.g. "web", "x", "tg").
+    /// Falls back to `initial_source_trust` if the type is not in the map.
+    pub fn trust_for_type(&self, source_type: &str) -> f32 {
+        self.initial_trust_by_type
+            .get(source_type)
+            .copied()
+            .unwrap_or(self.initial_source_trust)
+    }
+}
+
+/// Extract source type and identifier from a URL.
+/// Returns (source_type, identifier) for known platforms.
+pub fn extract_source_from_url(url: &str) -> (String, String) {
+    // Strip scheme
+    let after_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+
+    // Split host and path
+    let (host_port, path) = match after_scheme.find('/') {
+        Some(i) => (&after_scheme[..i], &after_scheme[i..]),
+        None => (after_scheme, ""),
+    };
+    let host = host_port.split(':').next().unwrap_or(host_port);
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    // X (Twitter)
+    if host == "x.com" || host == "twitter.com" {
+        if let Some(handle) = segments.first() {
+            if *handle != "status" && *handle != "search" && *handle != "i" {
+                return ("x".into(), format!("@{handle}"));
+            }
+        }
+    }
+
+    // Telegram
+    if host == "t.me" || host == "telegram.me" {
+        if let Some(channel) = segments.first() {
+            return ("tg".into(), format!("@{channel}"));
+        }
+    }
+
+    // Reddit
+    if host == "reddit.com" || host == "www.reddit.com" || host == "old.reddit.com" {
+        if segments.len() >= 2 && (segments[0] == "u" || segments[0] == "user") {
+            return ("reddit".into(), format!("u/{}", segments[1]));
+        }
+        if segments.len() >= 2 && segments[0] == "r" {
+            return ("reddit".into(), format!("r/{}", segments[1]));
+        }
+    }
+
+    // Default: web domain
+    let domain = host.strip_prefix("www.").unwrap_or(host);
+    if !domain.is_empty() {
+        return ("web".into(), domain.to_string());
+    }
+
+    ("web".into(), url.to_string())
 }
 
 /// Manages source and author trust nodes in the graph.
@@ -59,7 +134,7 @@ impl TrustManager {
     }
 
     /// Ensure Source and Author nodes exist for a fact.
-    /// Creates them with initial trust if they don't exist yet.
+    /// Creates typed source nodes (e.g. `Source:web:reuters.com`) with per-type initial trust.
     /// Creates `from_source` and `authored_by` edges.
     pub fn ensure_trust_nodes(&self, fact: &ProcessedFact) -> Result<(), String> {
         let mut graph = self.graph.write().map_err(|_| "graph lock poisoned".to_string())?;
@@ -68,16 +143,28 @@ impl TrustManager {
             source_id: "trust-manager".to_string(),
         };
 
-        // Ensure Source node
-        let source_label = format!("Source:{}", fact.provenance.source);
+        // Derive typed source label from URL if available, else use source name
+        let (source_type, source_id) = if let Some(ref url) = fact.provenance.source_url {
+            extract_source_from_url(url)
+        } else {
+            ("web".into(), fact.provenance.source.clone())
+        };
+
+        let source_label = format!("Source:{}:{}", source_type, source_id);
+        let initial_trust = self.config.trust_for_type(&source_type);
+
         if graph.find_node_id(&source_label).ok().flatten().is_none() {
             let _ = graph.store_with_confidence(
                 &source_label,
-                self.config.initial_source_trust,
+                initial_trust,
                 &prov,
             );
             let _ = graph.set_node_type(&source_label, "Source");
-            tracing::debug!(source = %source_label, "created source trust node");
+            let _ = graph.set_property(&source_label, "source_type", &source_type);
+            if let Some(ref url) = fact.provenance.source_url {
+                let _ = graph.set_property(&source_label, "url", url);
+            }
+            tracing::debug!(source = %source_label, trust = initial_trust, "created typed source trust node");
         }
 
         // Create from_source edge
@@ -192,6 +279,68 @@ impl TrustManager {
         Ok(new_trust)
     }
 
+    /// Confirm a fact: boost fact confidence and the source's trust.
+    /// Returns (new_fact_confidence, new_source_trust).
+    pub fn confirm_fact(&self, fact_label: &str) -> Result<(f32, f32), String> {
+        let mut graph = self.graph.write().map_err(|_| "graph lock poisoned".to_string())?;
+        let prov = engram_core::graph::Provenance {
+            source_type: engram_core::graph::SourceType::Derived,
+            source_id: "fact-confirm".to_string(),
+        };
+
+        // Boost fact confidence
+        let fact_conf = graph.node_confidence(fact_label)
+            .ok().flatten().unwrap_or(0.5);
+        let new_fact_conf = (fact_conf + self.config.corroboration_boost).min(self.config.max_trust);
+        let _ = graph.set_node_confidence(fact_label, new_fact_conf);
+        let _ = graph.set_property(fact_label, "status", "confirmed");
+
+        // Follow sourced_from edge to boost source trust
+        let mut new_source_trust = 0.0;
+        let edges = graph.edges_from(fact_label).unwrap_or_default();
+        for edge in &edges {
+            if edge.relationship == "sourced_from" {
+                let src_conf = graph.node_confidence(&edge.to)
+                    .ok().flatten().unwrap_or(self.config.initial_source_trust);
+                new_source_trust = (src_conf + self.config.corroboration_boost).min(self.config.max_trust);
+                let _ = graph.store_with_confidence(&edge.to, new_source_trust, &prov);
+            }
+        }
+
+        Ok((new_fact_conf, new_source_trust))
+    }
+
+    /// Debunk a fact: lower fact confidence and penalize the source's trust.
+    /// Returns (new_fact_confidence, new_source_trust).
+    pub fn debunk_fact(&self, fact_label: &str) -> Result<(f32, f32), String> {
+        let mut graph = self.graph.write().map_err(|_| "graph lock poisoned".to_string())?;
+        let prov = engram_core::graph::Provenance {
+            source_type: engram_core::graph::SourceType::Derived,
+            source_id: "fact-debunk".to_string(),
+        };
+
+        // Lower fact confidence
+        let fact_conf = graph.node_confidence(fact_label)
+            .ok().flatten().unwrap_or(0.5);
+        let new_fact_conf = (fact_conf - self.config.contradiction_penalty).max(self.config.min_trust);
+        let _ = graph.set_node_confidence(fact_label, new_fact_conf);
+        let _ = graph.set_property(fact_label, "status", "debunked");
+
+        // Follow sourced_from edge to penalize source trust
+        let mut new_source_trust = 0.0;
+        let edges = graph.edges_from(fact_label).unwrap_or_default();
+        for edge in &edges {
+            if edge.relationship == "sourced_from" {
+                let src_conf = graph.node_confidence(&edge.to)
+                    .ok().flatten().unwrap_or(self.config.initial_source_trust);
+                new_source_trust = (src_conf - self.config.contradiction_penalty).max(self.config.min_trust);
+                let _ = graph.store_with_confidence(&edge.to, new_source_trust, &prov);
+            }
+        }
+
+        Ok((new_fact_conf, new_source_trust))
+    }
+
     /// Process a batch of facts: ensure trust nodes, detect corroboration.
     ///
     /// Corroboration detection: if the same entity is provided by multiple
@@ -277,6 +426,7 @@ mod tests {
             relations: vec![],
             conflicts: vec![],
             resolution: None,
+            source_text: None,
         }
     }
 
@@ -296,7 +446,8 @@ mod tests {
         manager.ensure_trust_nodes(&fact).unwrap();
 
         let g = graph.read().unwrap();
-        let node = g.get_node("Source:reuters.com").unwrap();
+        // Source label is now typed: Source:web:reuters.com
+        let node = g.get_node("Source:web:reuters.com").unwrap();
         assert!(node.is_some());
         assert!((node.unwrap().confidence - 0.30).abs() < 0.001);
     }
@@ -316,7 +467,8 @@ mod tests {
         manager.ensure_trust_nodes(&fact).unwrap();
 
         let g = graph.read().unwrap();
-        assert!(g.get_node("Source:x.com").unwrap().is_some());
+        // Source label is now typed: Source:web:x.com
+        assert!(g.get_node("Source:web:x.com").unwrap().is_some());
         assert!(g.get_node("Author:@analyst").unwrap().is_some());
     }
 
@@ -400,5 +552,64 @@ mod tests {
         let report = manager.process_batch(&facts).unwrap();
         assert_eq!(report.corroborations, 1);
         assert_eq!(report.sources_seen.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_source_from_url_reuters() {
+        let (stype, ident) = extract_source_from_url("https://www.reuters.com/article/xyz");
+        assert_eq!(stype, "web");
+        assert_eq!(ident, "reuters.com");
+    }
+
+    #[test]
+    fn test_extract_source_from_url_x() {
+        let (stype, ident) = extract_source_from_url("https://x.com/Reuters/status/123");
+        assert_eq!(stype, "x");
+        assert_eq!(ident, "@Reuters");
+    }
+
+    #[test]
+    fn test_extract_source_from_url_telegram() {
+        let (stype, ident) = extract_source_from_url("https://t.me/intel_channel/42");
+        assert_eq!(stype, "tg");
+        assert_eq!(ident, "@intel_channel");
+    }
+
+    #[test]
+    fn test_extract_source_from_url_reddit() {
+        let (stype, ident) = extract_source_from_url("https://reddit.com/u/analyst/comments/abc");
+        assert_eq!(stype, "reddit");
+        assert_eq!(ident, "u/analyst");
+    }
+
+    #[test]
+    fn test_trust_for_type() {
+        let config = LearnedTrustConfig::default();
+        assert!((config.trust_for_type("web") - 0.30).abs() < 0.001);
+        assert!((config.trust_for_type("x") - 0.10).abs() < 0.001);
+        // Unknown type falls back to initial_source_trust (0.30)
+        assert!((config.trust_for_type("unknown") - 0.30).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_typed_source_node_creation() {
+        let (_dir, graph) = test_graph();
+        let manager = TrustManager::new(graph.clone(), LearnedTrustConfig::default());
+
+        // Store the entity first
+        {
+            let mut g = graph.write().unwrap();
+            let prov = engram_core::graph::Provenance::user("test");
+            g.store("SomeEntity", &prov).unwrap();
+        }
+
+        let mut fact = make_fact("SomeEntity", "reuters.com", None);
+        fact.provenance.source_url = Some("https://reuters.com/article".into());
+
+        manager.ensure_trust_nodes(&fact).unwrap();
+
+        let g = graph.read().unwrap();
+        let node = g.get_node("Source:web:reuters.com").unwrap();
+        assert!(node.is_some(), "Source:web:reuters.com node should exist");
     }
 }

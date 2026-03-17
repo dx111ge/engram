@@ -12,7 +12,7 @@
   <!-- Leptos mounts here -->
   <script type="module">
     import SpriteText from "https://esm.sh/three-spritetext";
-    import { Group, LOD } from "https://esm.sh/three";
+    import { Group, LOD, Mesh, MeshLambertMaterial, OctahedronGeometry, TetrahedronGeometry } from "https://esm.sh/three";
 
     // Type-based node color with known overrides + consistent hash fallback
     var TYPE_COLORS = {
@@ -22,7 +22,9 @@
       'location': '#42a5f5',
       'event': '#ffa726',
       'product': '#ab47bc',
-      'position': '#78909c'
+      'position': '#78909c',
+      'fact': '#ffa726',
+      'source': '#78909c'
     };
 
     // Display names for legend
@@ -33,7 +35,15 @@
       'location': 'Location',
       'event': 'Event',
       'product': 'Product',
-      'position': 'Position'
+      'position': 'Position',
+      'fact': 'Fact',
+      'source': 'Source'
+    };
+
+    // Shape overrides for special node types
+    var TYPE_SHAPES = {
+      'fact': 'diamond',
+      'source': 'triangle'
     };
 
     function typeColor(nodeType) {
@@ -116,6 +126,9 @@
             return color;
           })
           .nodeVal(function(n) {
+            // Custom-shaped nodes: hide default sphere (custom mesh in nodeThreeObject)
+            var nt = (n.node_type || '').toLowerCase();
+            if (TYPE_SHAPES[nt]) return 0.01;
             // Start node slightly larger
             if (self._startNodeId && n.id === self._startNodeId) {
               return (n.size || 5) * 1.5;
@@ -142,20 +155,41 @@
               color = '#ffd700';
             }
 
+            var nt = (node.node_type || '').toLowerCase();
+            var shape = TYPE_SHAPES[nt] || null;
+            var displayLabel = node.display_label || node.label;
+
             // ── LOD: Level of Detail (Step C) ──
             // Labels always visible. Type tag only at close range.
             var lod = new LOD();
 
-            // Level 0 (close < 300): full detail - label + type tag
+            // Level 0 (close < 300): full detail - label + type tag + optional shape mesh
             var groupFull = new Group();
-            var label = new SpriteText(node.label);
+
+            // Custom shape mesh for Fact (diamond) and Source (triangle)
+            if (shape) {
+              var geomSize = (node.size || 4) * 1.2;
+              var geom, mat;
+              mat = new MeshLambertMaterial({ color: color, transparent: true, opacity: 0.85 });
+              if (shape === 'diamond') {
+                geom = new OctahedronGeometry(geomSize);
+              } else if (shape === 'triangle') {
+                geom = new TetrahedronGeometry(geomSize * 1.2);
+              }
+              if (geom) {
+                var mesh = new Mesh(geom, mat);
+                groupFull.add(mesh);
+              }
+            }
+
+            var label = new SpriteText(displayLabel);
             label.material.depthWrite = false;
             label.color = '#ffffff';
-            label.textHeight = 5;
+            label.textHeight = shape ? 4 : 5;
             label.fontWeight = 'bold';
             label.strokeWidth = 0.5;
             label.strokeColor = '#111111';
-            label.position.y = 14;
+            label.position.y = shape ? 12 : 14;
             groupFull.add(label);
 
             var typeName = node.node_type || 'Entity';
@@ -171,16 +205,32 @@
             groupFull.add(tag);
             lod.addLevel(groupFull, 0);
 
-            // Level 1 (far > 300): label only, no type tag
+            // Level 1 (far > 300): label only (+ shape mesh if special node)
             var groupFar = new Group();
-            var labelFar = new SpriteText(node.label);
+
+            if (shape) {
+              var geomSizeFar = (node.size || 4) * 1.2;
+              var geomFar, matFar;
+              matFar = new MeshLambertMaterial({ color: color, transparent: true, opacity: 0.85 });
+              if (shape === 'diamond') {
+                geomFar = new OctahedronGeometry(geomSizeFar);
+              } else if (shape === 'triangle') {
+                geomFar = new TetrahedronGeometry(geomSizeFar * 1.2);
+              }
+              if (geomFar) {
+                var meshFar = new Mesh(geomFar, matFar);
+                groupFar.add(meshFar);
+              }
+            }
+
+            var labelFar = new SpriteText(displayLabel);
             labelFar.material.depthWrite = false;
             labelFar.color = '#ffffff';
-            labelFar.textHeight = 5;
+            labelFar.textHeight = shape ? 4 : 5;
             labelFar.fontWeight = 'bold';
             labelFar.strokeWidth = 0.5;
             labelFar.strokeColor = '#111111';
-            labelFar.position.y = 14;
+            labelFar.position.y = shape ? 12 : 14;
             groupFar.add(labelFar);
             lod.addLevel(groupFar, 300);
 
@@ -190,7 +240,7 @@
             if (link._bundled) {
               return link._children.map(function(c) { return c.label || 'related_to'; }).join(', ');
             }
-            return '';
+            return link.label || '';
           })
           .linkColor(function(link) {
             // Path highlight
@@ -510,7 +560,9 @@
           var displayName = TYPE_LABELS[key] || typesInGraph[key];
           var row = document.createElement('div');
           row.className = 'engram-legend-item';
-          row.innerHTML = '<span class="engram-legend-dot" style="background:' + color + '"></span>' + displayName;
+          var shape = TYPE_SHAPES[key] || null;
+          var shapeClass = shape === 'diamond' ? ' engram-legend-diamond' : (shape === 'triangle' ? ' engram-legend-triangle' : '');
+          row.innerHTML = '<span class="engram-legend-dot' + shapeClass + '" style="background:' + color + '"></span>' + displayName;
           legend.appendChild(row);
         });
 

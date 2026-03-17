@@ -35,6 +35,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod store;
+pub use store::RelateResult;
 mod search;
 mod learning;
 mod reasoning;
@@ -1822,5 +1823,107 @@ then flag(node, "low confidence")
         let (nodes, edges) = g.stats();
         assert_eq!(nodes, 0);
         assert_eq!(edges, 0);
+    }
+
+    #[test]
+    fn test_relate_dedup_same_edge() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("Alice", &prov).unwrap();
+        g.store("Acme", &prov).unwrap();
+        g.relate("Alice", "Acme", "works_at", &prov).unwrap();
+        g.relate("Alice", "Acme", "works_at", &prov).unwrap();
+
+        let edges = g.edges_from("Alice").unwrap();
+        assert_eq!(edges.len(), 1, "duplicate edge should be deduped");
+    }
+
+    #[test]
+    fn test_relate_dedup_confidence_max() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("Alice", &prov).unwrap();
+        g.store("Acme", &prov).unwrap();
+        g.relate_with_confidence("Alice", "Acme", "works_at", 0.5, &prov).unwrap();
+        g.relate_with_confidence("Alice", "Acme", "works_at", 0.8, &prov).unwrap();
+
+        let edges = g.edges_from("Alice").unwrap();
+        assert_eq!(edges.len(), 1);
+        assert!(
+            (edges[0].confidence - 0.8).abs() < 0.001,
+            "confidence should be max(0.5, 0.8) = 0.8, got {}",
+            edges[0].confidence
+        );
+    }
+
+    #[test]
+    fn test_relate_different_type_no_dedup() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("Alice", &prov).unwrap();
+        g.store("Acme", &prov).unwrap();
+        g.relate("Alice", "Acme", "works_at", &prov).unwrap();
+        g.relate("Alice", "Acme", "manages", &prov).unwrap();
+
+        let edges = g.edges_from("Alice").unwrap();
+        assert_eq!(edges.len(), 2, "different edge types should not be deduped");
+    }
+
+    #[test]
+    fn test_relate_upsert_returns_existing_slot() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("Alice", &prov).unwrap();
+        g.store("Acme", &prov).unwrap();
+
+        let r1 = g.relate_upsert("Alice", "Acme", "works_at", &prov).unwrap();
+        assert!(r1.created, "first relate_upsert should return created: true");
+
+        let r2 = g.relate_upsert("Alice", "Acme", "works_at", &prov).unwrap();
+        assert!(!r2.created, "second relate_upsert should return created: false");
+    }
+
+    #[test]
+    fn test_dedup_edges_cleanup() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        let from_id = g.store("Alice", &prov).unwrap();
+        let to_id = g.store("Acme", &prov).unwrap();
+        let edge_type = g.type_registry.get_or_create("works_at");
+
+        // Bypass dedup by calling brain.store_edge directly 3 times
+        for _ in 0..3 {
+            let _eid = g.brain.store_edge(from_id, to_id, edge_type).unwrap();
+            let (_, ec) = g.brain.stats();
+            let slot = ec - 1;
+            g.adj_out.entry(from_id).or_default().push(slot);
+            g.adj_in.entry(to_id).or_default().push(slot);
+        }
+
+        // Verify 3 edges exist before dedup
+        let (_, edge_count_before) = g.brain.stats();
+        assert_eq!(edge_count_before, 3);
+
+        let removed = g.dedup_edges();
+        assert_eq!(removed, 2, "dedup should remove 2 duplicate edges");
+
+        // Only 1 active edge should remain
+        let edges = g.edges_from("Alice").unwrap();
+        assert_eq!(edges.len(), 1, "only 1 active edge should remain after dedup");
     }
 }

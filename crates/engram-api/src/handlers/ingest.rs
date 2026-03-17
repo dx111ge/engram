@@ -240,6 +240,13 @@ pub async fn ingest(
                 .as_secs() as i64;
 
             match item {
+                IngestItem::WithUrl { content, source_url } => engram_ingest::types::RawItem {
+                    content: engram_ingest::types::Content::Text(content),
+                    source_url,
+                    source_name: source.clone(),
+                    fetched_at: now,
+                    metadata: Default::default(),
+                },
                 IngestItem::Text(text) => engram_ingest::types::RawItem {
                     content: engram_ingest::types::Content::Text(text),
                     source_url: None,
@@ -279,6 +286,7 @@ pub async fn ingest(
     Ok(Json(IngestResponse {
         facts_stored: result.facts_stored,
         relations_created: result.relations_created,
+        relations_deduplicated: result.relations_deduplicated,
         facts_resolved: result.facts_resolved,
         facts_deduped: result.facts_deduped,
         conflicts_detected: result.conflicts_detected,
@@ -459,6 +467,7 @@ pub async fn ingest_file(
     Ok(Json(IngestResponse {
         facts_stored: result.facts_stored,
         relations_created: result.relations_created,
+        relations_deduplicated: result.relations_deduplicated,
         facts_resolved: result.facts_resolved,
         facts_deduped: result.facts_deduped,
         conflicts_detected: result.conflicts_detected,

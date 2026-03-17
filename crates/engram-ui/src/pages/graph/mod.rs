@@ -163,14 +163,45 @@ pub fn GraphPage() -> impl IntoView {
                             let vis_nodes: Vec<serde_json::Value> = result.nodes.iter().map(|n| {
                                 let conf = n.confidence.unwrap_or(0.5);
                                 let ntype = n.node_type.as_deref().unwrap_or("Entity");
-                                serde_json::json!({
+                                let ntype_lower = ntype.to_lowercase();
+                                let base_size = 4.0 + (conf as f64 * 6.0);
+                                let (size, color, shape, display_label) = match ntype_lower.as_str() {
+                                    "fact" => {
+                                        let claim = if n.label.starts_with("Fact:") {
+                                            let trimmed = n.label.trim_start_matches("Fact:").trim();
+                                            if trimmed.chars().count() > 40 { format!("{}...", trimmed.chars().take(40).collect::<String>()) } else { trimmed.to_string() }
+                                        } else {
+                                            let l = &n.label;
+                                            if l.chars().count() > 40 { format!("{}...", l.chars().take(40).collect::<String>()) } else { l.to_string() }
+                                        };
+                                        (base_size * 0.5, Some("#ffa726"), Some("diamond"), claim)
+                                    },
+                                    "source" => {
+                                        let short = if n.label.starts_with("Source:") {
+                                            n.label.trim_start_matches("Source:").trim().to_string()
+                                        } else {
+                                            n.label.clone()
+                                        };
+                                        (base_size * 0.75, Some("#78909c"), Some("triangle"), short)
+                                    },
+                                    _ => (base_size, None, None, n.label.clone()),
+                                };
+                                let mut node = serde_json::json!({
                                     "id": n.label,
                                     "label": n.label,
+                                    "display_label": display_label,
                                     "title": format!("{} ({:.0}%)", ntype, conf * 100.0),
                                     "node_type": ntype,
                                     "confidence": conf,
-                                    "size": 4.0 + (conf as f64 * 6.0),
-                                })
+                                    "size": size,
+                                });
+                                if let Some(c) = color {
+                                    node.as_object_mut().unwrap().insert("color".into(), serde_json::Value::String(c.into()));
+                                }
+                                if let Some(s) = shape {
+                                    node.as_object_mut().unwrap().insert("shape".into(), serde_json::Value::String(s.into()));
+                                }
+                                node
                             }).collect();
 
                             let vis_edges: Vec<serde_json::Value> = result.edges.iter().map(|e| {
@@ -249,14 +280,44 @@ pub fn GraphPage() -> impl IntoView {
                     for n in &result.nodes {
                         let conf = n.confidence.unwrap_or(0.5);
                         let ntype = n.node_type.as_deref().unwrap_or("Entity");
-                        let new_node = serde_json::json!({
+                        let ntype_lower = ntype.to_lowercase();
+                        let base_size = 4.0 + (conf as f64 * 6.0);
+                        let (size, color, shape, display_label) = match ntype_lower.as_str() {
+                            "fact" => {
+                                let claim = if n.label.starts_with("Fact:") {
+                                    let trimmed = n.label.trim_start_matches("Fact:").trim();
+                                    if trimmed.chars().count() > 40 { format!("{}...", trimmed.chars().take(40).collect::<String>()) } else { trimmed.to_string() }
+                                } else {
+                                    let l = &n.label;
+                                    if l.chars().count() > 40 { format!("{}...", l.chars().take(40).collect::<String>()) } else { l.to_string() }
+                                };
+                                (base_size * 0.5, Some("#ffa726"), Some("diamond"), claim)
+                            },
+                            "source" => {
+                                let short = if n.label.starts_with("Source:") {
+                                    n.label.trim_start_matches("Source:").trim().to_string()
+                                } else {
+                                    n.label.clone()
+                                };
+                                (base_size * 0.75, Some("#78909c"), Some("triangle"), short)
+                            },
+                            _ => (base_size, None, None, n.label.clone()),
+                        };
+                        let mut new_node = serde_json::json!({
                             "id": n.label,
                             "label": n.label,
+                            "display_label": display_label,
                             "title": format!("{} ({:.0}%)", ntype, conf * 100.0),
                             "node_type": ntype,
                             "confidence": conf,
-                            "size": 4.0 + (conf as f64 * 6.0),
+                            "size": size,
                         });
+                        if let Some(c) = color {
+                            new_node.as_object_mut().unwrap().insert("color".into(), serde_json::Value::String(c.into()));
+                        }
+                        if let Some(s) = shape {
+                            new_node.as_object_mut().unwrap().insert("shape".into(), serde_json::Value::String(s.into()));
+                        }
                         if !existing.iter().any(|e| e.get("id") == new_node.get("id")) {
                             existing.push(new_node);
                         }

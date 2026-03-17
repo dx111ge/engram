@@ -1,5 +1,12 @@
 use super::*;
 
+/// Result of a relate() call, indicating whether the edge was created or deduplicated.
+pub struct RelateResult {
+    pub edge_id: u64,
+    pub edge_slot: u64,
+    pub created: bool,
+}
+
 impl Graph {
     /// Store a new node with a label. Returns node ID.
     /// Confidence is automatically set based on the provenance source type.
@@ -84,20 +91,53 @@ impl Graph {
         Ok(node_id)
     }
 
-    /// Create a relationship between two nodes. Returns edge ID.
-    pub fn relate(
+    /// Find an existing active edge by node IDs and edge type.
+    /// Internal helper for deduplication -- avoids label lookups when IDs are known.
+    fn find_edge_slot_by_ids(&self, from_id: u64, to_id: u64, edge_type: u32) -> Result<Option<u64>> {
+        if let Some(edge_slots) = self.adj_out.get(&from_id) {
+            for &s in edge_slots {
+                let edge = self.brain.read_edge(s)?;
+                if edge.is_active()
+                    && edge.from_node == from_id
+                    && edge.to_node == to_id
+                    && edge.edge_type == edge_type
+                {
+                    return Ok(Some(s));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Create a relationship between two nodes, deduplicating by (from, to, type).
+    /// If a matching active edge already exists, updates its source and returns it.
+    /// Returns a `RelateResult` indicating whether the edge was created or reused.
+    pub fn relate_upsert(
         &mut self,
         from_label: &str,
         to_label: &str,
         relationship: &str,
         provenance: &Provenance,
-    ) -> Result<u64> {
+    ) -> Result<RelateResult> {
         let from_node = self.find_node_id(from_label)?
             .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
         let to_node = self.find_node_id(to_label)?
             .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
 
         let edge_type = self.type_registry.get_or_create(relationship);
+
+        // Dedup: check for existing edge
+        if let Some(existing_slot) = self.find_edge_slot_by_ids(from_node, to_node, edge_type)? {
+            let edge_id = self.brain.read_edge(existing_slot)?.id;
+            self.brain
+                .update_edge_field(existing_slot, |e| e.source_id = provenance.to_source_hash())?;
+            return Ok(RelateResult {
+                edge_id,
+                edge_slot: existing_slot,
+                created: false,
+            });
+        }
+
         let edge_id = self.brain.store_edge(from_node, to_node, edge_type)?;
 
         let (_, edge_count) = self.brain.stats();
@@ -131,10 +171,28 @@ impl Graph {
             confidence: edge.confidence,
         });
 
-        Ok(edge_id)
+        Ok(RelateResult {
+            edge_id,
+            edge_slot,
+            created: true,
+        })
+    }
+
+    /// Create a relationship between two nodes. Returns edge ID.
+    /// Deduplicates: if a matching active edge exists, returns it instead of creating a duplicate.
+    pub fn relate(
+        &mut self,
+        from_label: &str,
+        to_label: &str,
+        relationship: &str,
+        provenance: &Provenance,
+    ) -> Result<u64> {
+        let r = self.relate_upsert(from_label, to_label, relationship, provenance)?;
+        Ok(r.edge_id)
     }
 
     /// Create a relationship with explicit confidence.
+    /// On dedup, takes the max of old and new confidence.
     pub fn relate_with_confidence(
         &mut self,
         from_label: &str,
@@ -143,17 +201,27 @@ impl Graph {
         confidence: f32,
         provenance: &Provenance,
     ) -> Result<u64> {
-        let edge_id = self.relate(from_label, to_label, relationship, provenance)?;
-        let (_, edge_count) = self.brain.stats();
-        let edge_slot = edge_count - 1;
-        self.brain.update_edge_field(edge_slot, |e| {
-            e.confidence = confidence.clamp(0.0, 1.0);
-        })?;
-        Ok(edge_id)
+        let r = self.relate_upsert(from_label, to_label, relationship, provenance)?;
+        let clamped = confidence.clamp(0.0, 1.0);
+        if r.created {
+            self.brain.update_edge_field(r.edge_slot, |e| {
+                e.confidence = clamped;
+            })?;
+        } else {
+            // On dedup: take max confidence
+            let old_conf = self.brain.read_edge(r.edge_slot)?.confidence;
+            if clamped > old_conf {
+                self.brain.update_edge_field(r.edge_slot, |e| {
+                    e.confidence = clamped;
+                })?;
+            }
+        }
+        Ok(r.edge_id)
     }
 
     /// Create a relationship with explicit confidence and temporal bounds.
     /// `valid_from` and `valid_to` are date strings like "2000-05-07" (parsed to unix seconds).
+    /// Only deduplicates when temporal bounds match or both are unset.
     pub fn relate_with_temporal(
         &mut self,
         from_label: &str,
@@ -164,18 +232,82 @@ impl Graph {
         valid_to: Option<&str>,
         provenance: &Provenance,
     ) -> Result<u64> {
-        let edge_id = self.relate(from_label, to_label, relationship, provenance)?;
+        let from_node = self.find_node_id(from_label)?
+            .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
+        let to_node = self.find_node_id(to_label)?
+            .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
+        let edge_type = self.type_registry.get_or_create(relationship);
+
+        let new_vf = valid_from.map(parse_date_to_unix).unwrap_or(0);
+        let new_vt = valid_to.map(parse_date_to_unix).unwrap_or(0);
+
+        // Check for existing edge with matching temporal bounds
+        if let Some(edge_slots) = self.adj_out.get(&from_node) {
+            let slots_copy: Vec<u64> = edge_slots.clone();
+            for s in slots_copy {
+                let edge = self.brain.read_edge(s)?;
+                if edge.is_active()
+                    && edge.from_node == from_node
+                    && edge.to_node == to_node
+                    && edge.edge_type == edge_type
+                    && edge.valid_from == new_vf
+                    && edge.valid_to == new_vt
+                {
+                    // Dedup: take max confidence
+                    let clamped = confidence.clamp(0.0, 1.0);
+                    let old_conf = edge.confidence;
+                    let edge_id = edge.id;
+                    let source_hash = provenance.to_source_hash();
+                    if clamped > old_conf {
+                        self.brain.update_edge_field(s, |e| {
+                            e.confidence = clamped;
+                            e.source_id = source_hash;
+                        })?;
+                    } else {
+                        self.brain
+                            .update_edge_field(s, |e| e.source_id = source_hash)?;
+                    }
+                    return Ok(edge_id);
+                }
+            }
+        }
+
+        // No match -- create new edge
+        let edge_id = self.brain.store_edge(from_node, to_node, edge_type)?;
         let (_, edge_count) = self.brain.stats();
         let edge_slot = edge_count - 1;
-        self.brain.update_edge_field(edge_slot, |e| {
-            e.confidence = confidence.clamp(0.0, 1.0);
-            if let Some(vf) = valid_from {
-                e.valid_from = parse_date_to_unix(vf);
-            }
-            if let Some(vt) = valid_to {
-                e.valid_to = parse_date_to_unix(vt);
-            }
-        })?;
+
+        self.brain
+            .update_edge_field(edge_slot, |e| {
+                e.source_id = provenance.to_source_hash();
+                e.confidence = confidence.clamp(0.0, 1.0);
+                e.valid_from = new_vf;
+                e.valid_to = new_vt;
+            })?;
+
+        self.adj_out.entry(from_node).or_default().push(edge_slot);
+        self.adj_in.entry(to_node).or_default().push(edge_slot);
+
+        if let Some(from_slot) = self.find_slot_by_id(from_node) {
+            self.brain.update_node_field(from_slot, |n| {
+                n.edge_out_count += 1;
+            })?;
+        }
+        if let Some(to_slot) = self.find_slot_by_id(to_node) {
+            self.brain.update_node_field(to_slot, |n| {
+                n.edge_in_count += 1;
+            })?;
+        }
+
+        let edge = self.brain.read_edge(edge_slot)?;
+        self.emit(GraphEvent::EdgeCreated {
+            edge_id,
+            from: from_node,
+            to: to_node,
+            rel_type: Arc::from(relationship),
+            confidence: edge.confidence,
+        });
+
         Ok(edge_id)
     }
 
