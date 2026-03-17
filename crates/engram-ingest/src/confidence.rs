@@ -140,6 +140,7 @@ mod tests {
             conflicts: vec![],
             resolution: None,
             source_text: None,
+            entity_span: None,
         }
     }
 

@@ -166,6 +166,8 @@ pub struct ProcessedFact {
     pub resolution: Option<ResolutionResult>,
     /// Source text snippet for fact node creation.
     pub source_text: Option<String>,
+    /// Original character span of the entity in source text.
+    pub entity_span: Option<(usize, usize)>,
 }
 
 // ── Pipeline configuration ──

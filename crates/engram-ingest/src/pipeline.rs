@@ -275,6 +275,7 @@ impl Pipeline {
                         conflicts: Vec::new(),
                         resolution: entity.resolved_to.map(crate::types::ResolutionResult::Matched),
                         source_text: Some(snippet),
+                        entity_span: Some(entity.span),
                     });
 
                     let _ = eidx; // suppress unused warning
@@ -307,6 +308,7 @@ impl Pipeline {
                     conflicts: Vec::new(),
                     resolution: None,
                     source_text: None,
+                    entity_span: None,
                 });
             }
         }
@@ -440,6 +442,7 @@ impl Pipeline {
                                     .resolved_to
                                     .map(crate::types::ResolutionResult::Matched),
                                 source_text: Some(snippet),
+                                entity_span: Some(entity.span),
                             }
                         })
                         .collect::<Vec<_>>()
@@ -482,6 +485,7 @@ impl Pipeline {
                         conflicts: Vec::new(),
                         resolution: None,
                         source_text: None,
+                        entity_span: None,
                     }
                 })
                 .collect()
@@ -954,11 +958,23 @@ impl Pipeline {
                         }
 
                         // Edge: entity -> fact node (mentioned_in)
-                        // Only link if the entity is actually mentioned in the claim text
-                        let entity_lower = fact.entity.to_lowercase();
-                        let claim_lower = source_text.to_lowercase();
-                        if claim_lower.contains(&entity_lower) {
-                            let _ = graph.relate_upsert(&fact.entity, &fact_label, "mentioned_in", &prov);
+                        // Only link if the entity name (3+ chars) actually appears in the claim text
+                        if fact.entity.len() >= 3 {
+                            let entity_lower = fact.entity.to_lowercase();
+                            let claim_lower = source_text.to_lowercase();
+                            if claim_lower.contains(&entity_lower) {
+                                let _ = graph.relate_upsert(&fact.entity, &fact_label, "mentioned_in", &prov);
+                            }
+                        } else {
+                            // Short entity names (e.g., "EU", "UN") -- require exact word match
+                            let entity_lower = fact.entity.to_lowercase();
+                            let claim_lower = source_text.to_lowercase();
+                            // Check for word boundary match (space/punctuation before and after)
+                            let has_word_match = claim_lower.split(|c: char| !c.is_alphanumeric())
+                                .any(|word| word == entity_lower);
+                            if has_word_match {
+                                let _ = graph.relate_upsert(&fact.entity, &fact_label, "mentioned_in", &prov);
+                            }
                         }
 
                         // Edge: fact -> Source node (sourced_from)
@@ -986,6 +1002,8 @@ impl Pipeline {
         // as manufacturer of HIMARS -- we create the node automatically).
         if !deferred_relations.is_empty() {
             let mut graph = self.graph.write().map_err(|_| IngestError::Graph("graph write lock poisoned".into()))?;
+            let mut auto_created_count = 0u32;
+            let mut skipped_existing_count = 0u32;
             for (provenance, relations) in &deferred_relations {
                 for rel in relations {
                     // Auto-create missing nodes (KB enrichment discovers new entities)
@@ -995,6 +1013,9 @@ impl Pipeline {
                                 label, 0.70, provenance,
                             );
                             result.facts_stored += 1;
+                            auto_created_count += 1;
+                        } else {
+                            skipped_existing_count += 1;
                         }
                     }
 
@@ -1013,6 +1034,12 @@ impl Pipeline {
                     }
                 }
             }
+            tracing::info!(
+                auto_created = auto_created_count,
+                skipped_existing = skipped_existing_count,
+                relations = deferred_relations.iter().map(|(_, r)| r.len()).sum::<usize>(),
+                "Pass 2: relation deferred write complete"
+            );
         }
 
         Ok(())
@@ -1175,6 +1202,7 @@ mod tests {
                 conflicts: vec![],
                 resolution: None,
                 source_text: None,
+                entity_span: None,
             },
             ProcessedFact {
                 entity: "Acme Corp".into(),
@@ -1202,6 +1230,7 @@ mod tests {
                 conflicts: vec![],
                 resolution: None,
                 source_text: None,
+                entity_span: None,
             },
         ];
 
@@ -1363,5 +1392,26 @@ mod tests {
         assert!(skipped.contains(&"ner"));
         assert!(skipped.contains(&"conflict"));
         assert!(enabled.contains(&"parse"));
+    }
+
+    #[test]
+    fn test_extract_snippet_utf8_curly_quotes() {
+        // Curly quotes are multi-byte UTF-8 (\u{201c} = 3 bytes each)
+        let text = "\u{201c}Berlin is the capital of Germany,\u{201d} he said. Munich is in Bavaria.";
+        // Entity "Berlin" spans bytes 3..9 (after opening curly quote which is 3 bytes)
+        let span = (3, 9);
+        let result = extract_snippet(text, span, 200);
+        assert!(!result.is_empty(), "snippet should not be empty");
+        assert!(result.contains("Berlin"), "snippet should contain the entity");
+    }
+
+    #[test]
+    fn test_extract_snippet_utf8_boundary_edge_case() {
+        // Entity span that lands in the middle of a multi-byte character
+        let text = "Gro\u{00df}britannien and France signed the treaty.";
+        // Intentionally put span end at a non-char-boundary (byte 4 is mid-character for \u{00df} which is 2 bytes at pos 3-4)
+        let span = (0, 4);
+        let result = extract_snippet(text, span, 200);
+        assert!(!result.is_empty(), "snippet should not be empty even with non-boundary span");
     }
 }

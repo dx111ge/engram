@@ -328,6 +328,7 @@ fn confidence_calculation() {
         conflicts: vec![],
         resolution: None,
         source_text: None,
+        entity_span: None,
     };
 
     let high = calc.calculate(&high_fact, &g);
@@ -352,6 +353,7 @@ fn confidence_calculation() {
         conflicts: vec![],
         resolution: None,
         source_text: None,
+        entity_span: None,
     };
 
     let low = calc.calculate(&low_fact, &g);
@@ -485,6 +487,7 @@ fn content_dedup_by_hash() {
         conflicts: vec![],
         resolution: None,
         source_text: None,
+        entity_span: None,
     };
 
     // Same entity = duplicate
@@ -538,6 +541,7 @@ fn conflict_detection_flags_contradictions() {
         conflicts: vec![],
         resolution: None,
         source_text: None,
+        entity_span: None,
     };
 
     let incoming = ProcessedFact {
@@ -559,6 +563,7 @@ fn conflict_detection_flags_contradictions() {
         conflicts: vec![],
         resolution: None,
         source_text: None,
+        entity_span: None,
     };
 
     // ConflictDetector.check takes (&ProcessedFact, &Graph)

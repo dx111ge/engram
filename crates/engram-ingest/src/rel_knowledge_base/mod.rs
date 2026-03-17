@@ -521,6 +521,49 @@ impl RelationExtractor for KbRelationExtractor {
             }
         }
 
+        // --- Post-process: upgrade "related_to" to typed relations ---
+        // If SPARQL (Step 3) discovered a typed relation for the same entity pair,
+        // upgrade the co-occurrence's "related_to" to the typed relation.
+        {
+            // Build map of (min_idx, max_idx) -> typed_rel_type from non-related_to relations
+            let typed_map: HashMap<(usize, usize), String> = all_relations.iter()
+                .filter(|r| r.rel_type != "related_to")
+                .map(|r| ((r.head_idx.min(r.tail_idx), r.head_idx.max(r.tail_idx)), r.rel_type.clone()))
+                .collect();
+
+            if !typed_map.is_empty() {
+                let mut upgraded = 0u32;
+                for rel in &mut all_relations {
+                    if rel.rel_type == "related_to" {
+                        let key = (rel.head_idx.min(rel.tail_idx), rel.head_idx.max(rel.tail_idx));
+                        if let Some(typed) = typed_map.get(&key) {
+                            rel.rel_type = typed.clone();
+                            upgraded += 1;
+                        }
+                    }
+                }
+                if upgraded > 0 {
+                    tracing::info!(upgraded, "upgraded co-occurrence relations with SPARQL types");
+                }
+            }
+
+            // Dedup: keep highest confidence relation per (head, tail, type) triple
+            let mut seen: HashMap<(usize, usize, String), usize> = HashMap::new();
+            let mut deduped: Vec<CandidateRelation> = Vec::with_capacity(all_relations.len());
+            for rel in all_relations.drain(..) {
+                let key = (rel.head_idx.min(rel.tail_idx), rel.head_idx.max(rel.tail_idx), rel.rel_type.clone());
+                if let Some(&existing_idx) = seen.get(&key) {
+                    if rel.confidence > deduped[existing_idx].confidence {
+                        deduped[existing_idx] = rel;
+                    }
+                } else {
+                    seen.insert(key, deduped.len());
+                    deduped.push(rel);
+                }
+            }
+            all_relations = deduped;
+        }
+
         total_stats.lookup_ms = start.elapsed().as_millis() as u64;
         *self.last_stats.lock().unwrap() = Some(total_stats);
 
