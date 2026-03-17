@@ -247,12 +247,70 @@ pub struct SeedEntityLink {
     pub qid: String,
 }
 
+/// Review tier for relation triage.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionTier {
+    /// SPARQL >= 0.70 OR GLiNER2 >= 0.70 -- auto-accepted, pre-checked
+    Confirmed,
+    /// GLiNER2 0.50-0.70 -- quick confirm/reject
+    Likely,
+    /// GLiNER2 < 0.50 -- careful review needed
+    Uncertain,
+    /// GLiNER2 NO_RELATION -- human assigns type or skips
+    NoRelation,
+}
+
+impl ConnectionTier {
+    pub fn from_confidence(confidence: f32, is_sparql: bool) -> Self {
+        if is_sparql && confidence >= 0.70 {
+            Self::Confirmed
+        } else if confidence >= 0.70 {
+            Self::Confirmed
+        } else if confidence >= 0.50 {
+            Self::Likely
+        } else if confidence > 0.0 {
+            Self::Uncertain
+        } else {
+            Self::NoRelation
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SeedConnection {
     pub from: String,
     pub to: String,
     pub rel_type: String,
     pub source: String,
+    pub confidence: f32,
+    pub tier: ConnectionTier,
+}
+
+/// An ingest review session: stores pipeline results for human review before committing.
+#[derive(Clone, Debug)]
+pub struct IngestSession {
+    pub session_id: String,
+    pub entities: Vec<IngestPreviewEntity>,
+    pub relations: Vec<IngestPreviewRelation>,
+    pub created_at: std::time::Instant,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct IngestPreviewEntity {
+    pub label: String,
+    pub entity_type: String,
+    pub confidence: f32,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct IngestPreviewRelation {
+    pub from: String,
+    pub to: String,
+    pub rel_type: String,
+    pub confidence: f32,
+    pub method: String,
+    pub tier: ConnectionTier,
 }
 
 /// Thread-safe shared graph state for the HTTP server.
@@ -309,6 +367,8 @@ pub struct AppState {
     pub cached_rel: Arc<RwLock<Option<Arc<dyn engram_ingest::RelationExtractor>>>>,
     /// Active seed enrichment sessions (interactive multi-phase flow).
     pub seed_sessions: Arc<RwLock<HashMap<String, SeedSession>>>,
+    /// Active ingest review sessions (review=true mode).
+    pub ingest_sessions: Arc<RwLock<HashMap<String, IngestSession>>>,
 }
 
 impl AppState {
@@ -359,6 +419,7 @@ impl AppState {
             #[cfg(feature = "ingest")]
             cached_rel: Arc::new(RwLock::new(None)),
             seed_sessions: Arc::new(RwLock::new(HashMap::new())),
+            ingest_sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

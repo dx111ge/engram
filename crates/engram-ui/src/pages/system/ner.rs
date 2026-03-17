@@ -3,6 +3,71 @@ use leptos::prelude::*;
 use crate::api::ApiClient;
 use super::presets::NER_PRESETS;
 
+/// Component: learned relation types as clickable badge chips.
+#[component]
+fn LearnedTypesChips(
+    api: ApiClient,
+    relation_templates_json: ReadSignal<String>,
+    set_relation_templates_json: WriteSignal<String>,
+) -> impl IntoView {
+    let (learned_types, set_learned_types) = signal(Vec::<String>::new());
+
+    // Fetch learned types on mount
+    let api_fetch = api.clone();
+    Effect::new(move || {
+        let api = api_fetch.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(text) = api.get_text("/config/relation-templates/export").await {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    let types: Vec<String> = json.get("learned_relation_types")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default();
+                    set_learned_types.set(types);
+                }
+            }
+        });
+    });
+
+    view! {
+        {move || {
+            let types = learned_types.get();
+            (!types.is_empty()).then(|| view! {
+                <div style="margin-top: 0.75rem;">
+                    <label style="font-size: 0.85rem;"><i class="fa-solid fa-graduation-cap"></i>" Learned from Graph"</label>
+                    <p style="font-size: 0.75rem; color: rgba(255,255,255,0.4); margin: 2px 0 6px;">
+                        "Click to add to your custom templates."
+                    </p>
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                        {types.into_iter().map(|t| {
+                            let t_click = t.clone();
+                            let t_display = t.clone();
+                            view! {
+                                <span
+                                    style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; background: rgba(79,195,247,0.1); border: 1px solid rgba(79,195,247,0.25); border-radius: 12px; font-size: 0.75rem; color: #4fc3f7; cursor: pointer;"
+                                    title="Click to add to custom templates"
+                                    on:click=move |_| {
+                                        let cur = relation_templates_json.get_untracked();
+                                        let mut obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&cur).unwrap_or_default();
+                                        if !obj.contains_key(&t_click) {
+                                            let template = format!("{{head}} {} {{tail}}", t_click);
+                                            obj.insert(t_click.clone(), serde_json::json!(template));
+                                            set_relation_templates_json.set(serde_json::to_string_pretty(&obj).unwrap_or_default());
+                                        }
+                                    }
+                                >
+                                    <i class="fa-solid fa-plus" style="font-size: 0.6rem;"></i>
+                                    {t_display}
+                                </span>
+                            }
+                        }).collect::<Vec<_>>()}
+                    </div>
+                </div>
+            })
+        }}
+    }
+}
+
 pub(crate) fn render_ner_modal(
     api: ApiClient,
     ner_provider: ReadSignal<String>,
@@ -164,8 +229,11 @@ pub(crate) fn render_ner_modal(
         }}
 
         // ── Relation Extraction section (like wizard STEP_REL) ──
-        {move || {
+        {
+            let api_rel_section = api.clone();
+            move || {
             let is_gliner = ner_provider.get() == "gliner";
+            let api_sec = api_rel_section.clone();
             is_gliner.then(|| view! {
                 <div style="margin-top: 1rem;">
                     <h4><i class="fa-solid fa-link"></i>" Relation Extraction"</h4>
@@ -221,24 +289,112 @@ pub(crate) fn render_ner_modal(
 
                     // Custom relation types (shown when "custom" selected)
                     {move || {
-                        (rel_templates_mode.get() == "custom").then(|| view! {
+                        (rel_templates_mode.get() == "custom").then(|| {
+                            // Parse JSON into table rows
+                            let json_str = relation_templates_json.get();
+                            let rows: Vec<(String, String)> = serde_json::from_str::<serde_json::Value>(&json_str)
+                                .ok()
+                                .and_then(|v| v.as_object().map(|o| {
+                                    o.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect()
+                                }))
+                                .unwrap_or_default();
+
+                            view! {
                             <div class="form-group" style="margin-top: 0.75rem;">
-                                <label>"Custom relation types JSON"</label>
-                                <textarea
-                                    class="form-control"
-                                    style="width: 100%; min-height: 120px; font-family: monospace; font-size: 0.8rem; background: rgba(0,0,0,0.2); color: inherit; border: 1px solid rgba(255,255,255,0.1);"
-                                    prop:value=relation_templates_json
-                                    on:input=move |ev| {
-                                        set_relation_templates_json.set(event_target_value(&ev));
+                                <label><i class="fa-solid fa-table"></i>" Relation Types"</label>
+                                <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem;">
+                                    <thead>
+                                        <tr style="border-bottom: 1px solid rgba(255,255,255,0.15);">
+                                            <th style="text-align: left; padding: 6px;">"Relation Type"</th>
+                                            <th style="text-align: left; padding: 6px;">"Description Template"</th>
+                                            <th style="width: 40px;"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {rows.into_iter().map(|(rel_type, desc)| {
+                                            let rt_for_rename = rel_type.clone();
+                                            let rt_for_desc = rel_type.clone();
+                                            let rt_for_delete = rel_type.clone();
+                                            let desc_display = desc.clone();
+                                            view! {
+                                                <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                                                    <td style="padding: 4px 6px;">
+                                                        <input type="text" class="form-control"
+                                                            style="font-size:0.8rem; padding:2px 6px; background:rgba(255,255,255,0.05);"
+                                                            prop:value=rt_for_rename.clone()
+                                                            on:change=move |ev| {
+                                                                let val = event_target_value(&ev);
+                                                                let cur = relation_templates_json.get_untracked();
+                                                                if let Ok(mut obj) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&cur) {
+                                                                    if let Some(old_val) = obj.remove(&rt_for_rename) {
+                                                                        let new_key = val.trim().to_lowercase().replace(' ', "_");
+                                                                        if !new_key.is_empty() { obj.insert(new_key, old_val); }
+                                                                    }
+                                                                    set_relation_templates_json.set(serde_json::to_string_pretty(&obj).unwrap_or_default());
+                                                                }
+                                                            }
+                                                        />
+                                                    </td>
+                                                    <td style="padding: 4px 6px;">
+                                                        <input type="text" class="form-control"
+                                                            style="font-size:0.8rem; padding:2px 6px; background:rgba(255,255,255,0.05);"
+                                                            prop:value=desc_display
+                                                            on:change=move |ev| {
+                                                                let val = event_target_value(&ev);
+                                                                let cur = relation_templates_json.get_untracked();
+                                                                if let Ok(mut obj) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&cur) {
+                                                                    obj.insert(rt_for_desc.clone(), serde_json::json!(val));
+                                                                    set_relation_templates_json.set(serde_json::to_string_pretty(&obj).unwrap_or_default());
+                                                                }
+                                                            }
+                                                        />
+                                                    </td>
+                                                    <td style="padding: 4px; text-align: center;">
+                                                        <button class="btn btn-xs" style="color:rgba(239,83,80,0.7); background:none; border:none; cursor:pointer;"
+                                                            on:click=move |_| {
+                                                                let cur = relation_templates_json.get_untracked();
+                                                                if let Ok(mut obj) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&cur) {
+                                                                    obj.remove(&rt_for_delete);
+                                                                    set_relation_templates_json.set(serde_json::to_string_pretty(&obj).unwrap_or_default());
+                                                                }
+                                                            }
+                                                        >
+                                                            <i class="fa-solid fa-trash" style="font-size:0.7rem;"></i>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        }).collect::<Vec<_>>()}
+                                    </tbody>
+                                </table>
+                                <button class="btn btn-sm btn-secondary" style="margin-top: 0.5rem;"
+                                    on:click=move |_| {
+                                        let cur = relation_templates_json.get_untracked();
+                                        let mut obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&cur).unwrap_or_default();
+                                        obj.insert("new_relation".to_string(), serde_json::json!("{head} new_relation {tail}"));
+                                        set_relation_templates_json.set(serde_json::to_string_pretty(&obj).unwrap_or_default());
                                     }
-                                    placeholder=r#"{"treats": "{head} treats {tail}", "manufactures": "{head} manufactures {tail}", "regulates": "{head} regulates {tail}"}"#
-                                ></textarea>
+                                >
+                                    <i class="fa-solid fa-plus"></i>" Add Relation"
+                                </button>
+
+                                // E2: Learned relation types (from graph gazetteer)
+                                // Note: Learned types are fetched inline from the exported JSON.
+                                // The rows variable already parsed the current templates. Learned
+                                // types show from the /export endpoint but that requires an async
+                                // fetch. We render a placeholder that fetches on mount.
+                                <LearnedTypesChips
+                                    api=api_sec.clone()
+                                    set_relation_templates_json=set_relation_templates_json
+                                    relation_templates_json=relation_templates_json
+                                />
+
                                 <div class="wizard-info-box" style="margin-top: 0.5rem; font-size: 0.8rem;">
                                     <i class="fa-solid fa-circle-info" style="margin-right: 0.25rem;"></i>
-                                    " Format: {\"relation_type\": \"description\"}. GLiNER2 uses the relation name as a zero-shot label. Custom types are merged with defaults."
+                                    " GLiNER2 uses the relation name as a zero-shot label. Custom types are merged with defaults."
                                 </div>
                             </div>
-                        })
+                        }})
                     }}
                 </div>
             })

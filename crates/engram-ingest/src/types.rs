@@ -55,6 +55,8 @@ pub enum ExtractionMethod {
     Manual,
     /// Knowledge base lookup (SPARQL endpoint).
     KnowledgeBase,
+    /// Neural zero-shot classification (GLiNER2 RE on specific entity pair).
+    NeuralZeroShot,
 }
 
 /// An entity extracted from text by NER or other means.

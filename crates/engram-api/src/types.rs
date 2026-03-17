@@ -333,6 +333,9 @@ pub struct IngestRequest {
     pub skip: Option<String>,
     /// Use parallel execution (rayon) for large batches.
     pub parallel: Option<bool>,
+    /// Review mode: run pipeline but don't commit. Returns session_id for review.
+    #[serde(default)]
+    pub review: Option<bool>,
 }
 
 /// A single item in an ingest request.
@@ -517,6 +520,39 @@ pub struct SeedCommitResponse {
     pub duration_ms: u64,
 }
 
+// ── Relation review types ──
+
+/// Request body for `POST /ingest/seed/confirm-relations`.
+#[derive(Deserialize)]
+pub struct SeedConfirmRelationsRequest {
+    pub session_id: String,
+    /// Indices of accepted connections.
+    pub accepted: Vec<usize>,
+    /// Connections with modified rel_type.
+    #[serde(default)]
+    pub modified: Vec<SeedModifiedRelation>,
+    /// Indices of skipped connections.
+    #[serde(default)]
+    pub skipped: Vec<usize>,
+}
+
+#[derive(Deserialize)]
+pub struct SeedModifiedRelation {
+    pub idx: usize,
+    pub new_rel_type: String,
+}
+
+/// Request body for `POST /ingest/review/confirm`.
+#[derive(Deserialize)]
+pub struct IngestReviewConfirmRequest {
+    pub session_id: String,
+    pub accepted: Vec<usize>,
+    #[serde(default)]
+    pub modified: Vec<SeedModifiedRelation>,
+    #[serde(default)]
+    pub skipped: Vec<usize>,
+}
+
 /// Response for ingest endpoints.
 #[derive(Serialize)]
 pub struct IngestResponse {
@@ -556,6 +592,25 @@ pub struct RenameEdgeResponse {
     pub new_rel_type: String,
 }
 
+// ── Edge delete types ──
+
+/// Request body for `POST /edge/delete`.
+#[derive(Deserialize)]
+pub struct DeleteEdgeRequest {
+    pub from: String,
+    pub to: String,
+    pub rel_type: String,
+}
+
+/// Response for `POST /edge/delete`.
+#[derive(Serialize)]
+pub struct DeleteEdgeResponse {
+    pub deleted: bool,
+    pub from: String,
+    pub to: String,
+    pub rel_type: String,
+}
+
 // ── Path finding types ──
 
 /// Request body for `POST /paths`.
@@ -566,6 +621,7 @@ pub struct PathsRequest {
     pub max_depth: Option<u32>,
     pub via: Option<String>,
     pub min_depth: Option<u32>,
+    pub skip_types: Option<Vec<String>>,
 }
 
 /// Response for `POST /paths`.

@@ -345,8 +345,13 @@ pub async fn find_paths(
     let g = state.graph.read().map_err(|_| read_lock_err())?;
     let max_depth = req.max_depth.unwrap_or(5).min(8); // Cap at 8 to prevent explosion
 
+    // Default to skipping Fact/Source nodes (intelligence noise), unless caller overrides
+    let skip_types_owned: Vec<String> = req.skip_types.unwrap_or_else(|| vec!["fact".into(), "source".into()]);
+    let skip_refs: Vec<&str> = skip_types_owned.iter().map(|s| s.as_str()).collect();
+    let skip = if skip_refs.is_empty() { None } else { Some(skip_refs.as_slice()) };
+
     let paths = g
-        .find_all_paths(&req.from, &req.to, max_depth, req.min_depth, req.via.as_deref())
+        .find_all_paths(&req.from, &req.to, max_depth, req.min_depth, req.via.as_deref(), skip)
         .map_err(|e| api_err(StatusCode::NOT_FOUND, e.to_string()))?;
 
     let count = paths.len();

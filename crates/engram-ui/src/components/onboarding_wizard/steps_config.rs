@@ -126,7 +126,7 @@ pub(crate) fn render_step_kb_sources(
                         <span class="wc-label">"Quality"</span><span>"Excellent \u{2014} curated, structured"</span>
                         <span class="wc-label">"License"</span><span>"CC0 (public domain)"</span>
                     </div>
-                    {trust_slider_inline(source_trust_values, "wikidata", 80)}
+                    {trust_slider_inline(source_trust_values, "wikidata", 95)}
                 </div>
                 <div
                     class=move || if kb_dbpedia.get() { "wizard-card wizard-card-selected" } else { "wizard-card" }
@@ -138,7 +138,7 @@ pub(crate) fn render_step_kb_sources(
                         <span class="wc-label">"Quality"</span><span>"Good for well-known entities"</span>
                         <span class="wc-label">"License"</span><span>"CC-BY-SA"</span>
                     </div>
-                    {trust_slider_inline(source_trust_values, "dbpedia", 70)}
+                    {trust_slider_inline(source_trust_values, "dbpedia", 95)}
                 </div>
             </div>
         </div>
@@ -225,7 +225,7 @@ pub(crate) fn render_step_web_search(
             {move || (web_search_provider.get() == "searxng").then(|| view! {
                 <div class="form-group mt-1">
                     <label><i class="fa-solid fa-link"></i>" SearXNG URL"</label>
-                    <input type="text" class="form-control" placeholder="http://localhost:8080/search"
+                    <input type="text" class="form-control" placeholder="http://localhost:8090"
                         prop:value=web_search_url
                         on:input=move |ev| set_web_search_url.set(event_target_value(&ev))
                     />
@@ -240,7 +240,14 @@ pub(crate) fn render_step_web_search(
             // SearXNG URL hint
             {move || (web_search_provider.get() == "searxng" && web_search_url.get().is_empty()).then(|| view! {
                 <p class="text-secondary" style="font-size: 0.85rem; margin-top: 0.5rem;">
-                    <i class="fa-solid fa-info-circle"></i>" Enter your SearXNG instance URL (e.g. http://192.168.1.100:8080/search)"
+                    <i class="fa-solid fa-info-circle"></i>" Enter your SearXNG base URL (e.g. http://192.168.1.100:8090)"
+                </p>
+            })}
+            // SearXNG JSON format hint
+            {move || (web_search_provider.get() == "searxng").then(|| view! {
+                <p class="text-secondary" style="font-size: 0.8rem; margin-top: 0.25rem;">
+                    <i class="fa-solid fa-gear"></i>
+                    " Ensure "<code>"format: json"</code>" is enabled in your SearXNG "<code>"settings.yml"</code>" under "<code>"search: formats:"</code>
                 </p>
             })}
             // Test connection button (for Brave and SearXNG)
@@ -279,6 +286,20 @@ pub(crate) fn render_step_web_search(
     }.into_any()
 }
 
+/// A seed connection for the review UI.
+#[derive(Clone, Debug)]
+pub(crate) struct ReviewConnection {
+    pub idx: usize,
+    pub from: String,
+    pub to: String,
+    pub rel_type: String,
+    pub confidence: f32,
+    pub source: String,
+    pub tier: String,
+    pub accepted: bool,
+    pub new_rel_type: Option<String>,
+}
+
 /// Step 9: Seed
 pub(crate) fn render_step_seed(
     seed_text: ReadSignal<String>,
@@ -287,6 +308,7 @@ pub(crate) fn render_step_seed(
     set_seed_phase: WriteSignal<u32>,
     seed_aoi: ReadSignal<String>,
     set_seed_aoi: WriteSignal<String>,
+    seed_session_id: ReadSignal<String>,
     set_seed_session_id: WriteSignal<String>,
     seed_entities: ReadSignal<Vec<(String, String, f32, bool)>>,
     set_seed_entities: WriteSignal<Vec<(String, String, f32, bool)>>,
@@ -300,6 +322,12 @@ pub(crate) fn render_step_seed(
     do_analyze: Action<(), ()>,
     do_ingest: Action<(), ()>,
     set_step: WriteSignal<u32>,
+    seed_review_connections: ReadSignal<Vec<crate::components::relation_review::ReviewConnection>>,
+    set_seed_review_connections: WriteSignal<Vec<crate::components::relation_review::ReviewConnection>>,
+    seed_known_rel_types: ReadSignal<Vec<String>>,
+    set_seed_known_rel_types: WriteSignal<Vec<String>>,
+    seed_review_submitting: ReadSignal<bool>,
+    set_seed_review_submitting: WriteSignal<bool>,
 ) -> AnyView {
     view! {
         <div class="wizard-step">
@@ -474,12 +502,57 @@ pub(crate) fn render_step_seed(
                 </div>
             })}
 
-            // Commit / Start Over buttons
-            {move || (seed_phase.get() >= 1 && !analyzing.get()).then(|| view! {
+            // Phase 1 -> Phase 2 transition: "Review Relations" button
+            {move || (seed_phase.get() == 1 && !analyzing.get()).then(|| {
+                let api = use_context::<crate::api::ApiClient>().expect("ApiClient");
+                let api2 = api.clone();
+                view! {
                 <div class="flex gap-sm mt-1">
-                    <button class="btn btn-primary" on:click=move |_| { do_ingest.dispatch(()); }
+                    <button class="btn btn-primary" on:click=move |_| {
+                        // Fetch tiered connections from API
+                        let api = api.clone();
+                        let sid = seed_session_id.get_untracked();
+                        wasm_bindgen_futures::spawn_local(async move {
+                            // Fetch connections
+                            let url = format!("/ingest/seed/connections?session_id={}", sid);
+                            if let Ok(text) = api.get_text(&url).await {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                    let mut conns = Vec::new();
+                                    if let Some(groups) = json.get("groups").and_then(|g| g.as_array()) {
+                                        for group in groups {
+                                            let tier = group.get("tier").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                                            if let Some(arr) = group.get("connections").and_then(|c| c.as_array()) {
+                                                for c in arr {
+                                                    conns.push(crate::components::relation_review::ReviewConnection {
+                                                        idx: c.get("idx").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                                                        from: c.get("from").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                                        to: c.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                                        rel_type: c.get("rel_type").and_then(|v| v.as_str()).unwrap_or("related_to").to_string(),
+                                                        confidence: c.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                                                        source: c.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                                        tier: tier.clone(),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                    set_seed_review_connections.set(conns);
+                                }
+                            }
+                            // Fetch known relation types
+                            if let Ok(text) = api.get_text("/config/relation-types").await {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                    let types: Vec<String> = json.get("types").and_then(|t| t.as_array())
+                                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                        .unwrap_or_default();
+                                    set_seed_known_rel_types.set(types);
+                                }
+                            }
+                            set_seed_phase.set(2);
+                        });
+                    }
                         disabled=move || analyzing.get()>
-                        <i class="fa-solid fa-seedling"></i>" Commit to Graph"
+                        <i class="fa-solid fa-check-double"></i>" Review Relations"
                     </button>
                     <button class="btn btn-secondary" on:click=move |_| {
                         set_seed_phase.set(0);
@@ -491,6 +564,83 @@ pub(crate) fn render_step_seed(
                         <i class="fa-solid fa-rotate-left"></i>" Start Over"
                     </button>
                 </div>
+            }})}
+
+            // Phase 2: Relation Review with RelationReviewPanel
+            {move || (seed_phase.get() == 2).then(|| {
+                let api = use_context::<crate::api::ApiClient>().expect("ApiClient");
+                let on_confirm = Callback::new(move |decisions: crate::components::relation_review::ReviewDecisions| {
+                    let api = api.clone();
+                    let sid = seed_session_id.get_untracked();
+                    set_seed_review_submitting.set(true);
+                    wasm_bindgen_futures::spawn_local(async move {
+                        // POST confirm-relations
+                        let body = serde_json::json!({
+                            "session_id": sid,
+                            "accepted": decisions.accepted,
+                            "modified": decisions.modified.iter().map(|(idx, rt)| {
+                                serde_json::json!({"idx": idx, "new_rel_type": rt})
+                            }).collect::<Vec<_>>(),
+                            "skipped": decisions.skipped,
+                        });
+                        let _ = api.post_text("/ingest/seed/confirm-relations", &body).await;
+
+                        // POST commit
+                        let commit_body = serde_json::json!({ "session_id": sid });
+                        match api.post_text("/ingest/seed/commit", &commit_body).await {
+                            Ok(resp) => {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
+                                    let facts = json.get("facts_stored").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let rels = json.get("relations_created").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let ms = json.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    set_seed_result.set(Some(format!(
+                                        "Seeded! {} facts, {} relations ({}ms)", facts, rels, ms
+                                    )));
+                                }
+                                set_step.set(STEP_READY);
+                            }
+                            Err(e) => {
+                                set_seed_result.set(Some(format!("Commit failed: {e}")));
+                            }
+                        }
+                        set_seed_review_submitting.set(false);
+                    });
+                });
+
+                view! {
+                    <div class="mt-1">
+                        <h4><i class="fa-solid fa-check-double"></i>" Review Relations"</h4>
+                        <p class="wizard-desc" style="margin-bottom: 0.5rem;">
+                            "Relations classified by SPARQL (Wikidata) and GLiNER2. Confirmed are auto-accepted. Review the rest."
+                        </p>
+
+                        {move || {
+                            let conns = seed_review_connections.get();
+                            if conns.is_empty() {
+                                view! {
+                                    <div class="wizard-info-box">
+                                        <p><i class="fa-solid fa-circle-info"></i>" No relations discovered yet. The enrichment may still be running. Wait for it to complete, then click Review Relations again."</p>
+                                    </div>
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <crate::components::relation_review::RelationReviewPanel
+                                        connections=seed_review_connections
+                                        known_rel_types=seed_known_rel_types
+                                        on_confirm=on_confirm
+                                        submitting=seed_review_submitting
+                                    />
+                                }.into_any()
+                            }
+                        }}
+
+                        <button class="btn btn-secondary mt-1" on:click=move |_| {
+                            set_seed_phase.set(1);
+                        }>
+                            <i class="fa-solid fa-arrow-left"></i>" Back to Entities"
+                        </button>
+                    </div>
+                }
             })}
 
             <button class="btn btn-secondary mt-1" on:click=move |_| set_step.set(STEP_READY)>

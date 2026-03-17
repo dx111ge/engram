@@ -196,8 +196,8 @@ pub fn GraphPage() -> impl IntoView {
                                 let base_size = 4.0 + (conf as f64 * 6.0);
                                 let (size, color, shape, display_label) = match ntype_lower.as_str() {
                                     "fact" => {
-                                        let claim = if n.label.starts_with("Fact:") {
-                                            humanize_fact_slug(n.label.trim_start_matches("Fact:").trim())
+                                        let claim = if n.label.len() > 5 && n.label[..5].eq_ignore_ascii_case("fact:") {
+                                            humanize_fact_slug(n.label[5..].trim())
                                         } else {
                                             let l = &n.label;
                                             if l.chars().count() > 40 { format!("{}...", l.chars().take(40).collect::<String>()) } else { l.to_string() }
@@ -205,8 +205,8 @@ pub fn GraphPage() -> impl IntoView {
                                         (base_size * 0.5, Some("#ffa726"), Some("diamond"), claim)
                                     },
                                     "source" => {
-                                        let short = if n.label.starts_with("Source:") {
-                                            n.label.trim_start_matches("Source:").trim().to_string()
+                                        let short = if n.label.len() > 7 && n.label[..7].eq_ignore_ascii_case("source:") {
+                                            n.label[7..].trim().to_string()
                                         } else {
                                             n.label.clone()
                                         };
@@ -264,10 +264,15 @@ pub fn GraphPage() -> impl IntoView {
                 set_start_node.set(None);
             }
 
-            // Clear filters and highlight on new search
+            // Clear filters, highlight, and path state on new search
             set_hidden_types.set(Vec::new());
             set_hidden_rels.set(Vec::new());
             set_highlighted_node.set(None);
+            set_path_from.set(None);
+            set_path_results.set(Vec::new());
+            set_path_selected.set(Vec::new());
+            set_path_target_query.set(String::new());
+            set_path_via_query.set(String::new());
             set_loading.set(false);
         }
     });
@@ -312,8 +317,8 @@ pub fn GraphPage() -> impl IntoView {
                         let base_size = 4.0 + (conf as f64 * 6.0);
                         let (size, color, shape, display_label) = match ntype_lower.as_str() {
                             "fact" => {
-                                let claim = if n.label.starts_with("Fact:") {
-                                    humanize_fact_slug(n.label.trim_start_matches("Fact:").trim())
+                                let claim = if n.label.len() > 5 && n.label[..5].eq_ignore_ascii_case("fact:") {
+                                    humanize_fact_slug(n.label[5..].trim())
                                 } else {
                                     let l = &n.label;
                                     if l.chars().count() > 40 { format!("{}...", l.chars().take(40).collect::<String>()) } else { l.to_string() }
@@ -321,8 +326,8 @@ pub fn GraphPage() -> impl IntoView {
                                 (base_size * 0.5, Some("#ffa726"), Some("diamond"), claim)
                             },
                             "source" => {
-                                let short = if n.label.starts_with("Source:") {
-                                    n.label.trim_start_matches("Source:").trim().to_string()
+                                let short = if n.label.len() > 7 && n.label[..7].eq_ignore_ascii_case("source:") {
+                                    n.label[7..].trim().to_string()
                                 } else {
                                     n.label.clone()
                                 };

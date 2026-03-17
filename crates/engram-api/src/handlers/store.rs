@@ -311,6 +311,34 @@ pub async fn batch_stream(
     }))
 }
 
+// ── POST /edge/delete ──
+
+pub async fn delete_edge(
+    State(state): State<AppState>,
+    Json(req): Json<DeleteEdgeRequest>,
+) -> ApiResult<DeleteEdgeResponse> {
+    let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+    let prov = Provenance::user("api");
+
+    let deleted = g
+        .delete_edge(&req.from, &req.to, &req.rel_type, &prov)
+        .map_err(|e| api_err(StatusCode::NOT_FOUND, e.to_string()))?;
+
+    if deleted {
+        drop(g);
+        state.mark_dirty();
+    } else {
+        drop(g);
+    }
+
+    Ok(Json(DeleteEdgeResponse {
+        deleted,
+        from: req.from,
+        to: req.to,
+        rel_type: req.rel_type,
+    }))
+}
+
 // ── PATCH /edge ──
 
 pub async fn rename_edge(

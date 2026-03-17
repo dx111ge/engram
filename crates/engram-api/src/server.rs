@@ -78,7 +78,12 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/ingest/seed/confirm-aoi", post(handlers::seed_confirm_aoi))
         .route("/ingest/seed/confirm-entities", post(handlers::seed_confirm_entities))
         .route("/ingest/seed/commit", post(handlers::seed_commit))
+        .route("/ingest/seed/connections", get(handlers::seed_connections))
+        .route("/ingest/seed/confirm-relations", post(handlers::seed_confirm_relations))
         .route("/ingest/seed/stream", get(handlers::seed_stream))
+        // Ingest review mode (review=true)
+        .route("/ingest/review", get(handlers::ingest_review))
+        .route("/ingest/review/confirm", post(handlers::ingest_review_confirm))
         // Streaming
         .route("/events/stream", get(handlers::event_stream))
         .route("/ingest/webhook/{pipeline_id}", post(handlers::webhook_receive))
@@ -138,8 +143,10 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/rel-model", get(handlers::check_rel_model))
         .route("/config/relation-templates/export", get(handlers::export_relation_templates))
         .route("/config/relation-templates/import", post(handlers::import_relation_templates))
+        .route("/config/relation-types", get(handlers::list_relation_types))
         // Edge operations
         .route("/edge", patch(handlers::rename_edge))
+        .route("/edge/delete", post(handlers::delete_edge))
         // Admin
         .route("/admin/reset", post(handlers::admin_reset))
         .route("/admin/dedup-edges", post(handlers::admin_dedup_edges))
@@ -335,6 +342,10 @@ pub async fn serve_with_frontend(state: AppState, addr: &str, frontend_dir: Opti
             if cleanup_counter >= 12 {
                 cleanup_counter = 0;
                 auth::cleanup_sessions(&checkpoint_state.sessions);
+                // Clean up expired ingest review sessions (30 min TTL)
+                if let Ok(mut sessions) = checkpoint_state.ingest_sessions.write() {
+                    sessions.retain(|_, s| s.created_at.elapsed().as_secs() < 1800);
+                }
             }
         }
     });

@@ -129,6 +129,7 @@ pub(crate) fn build_pipeline(
     let mut rel_chain = engram_ingest::RelationChain::new(0.15);
 
     // 0. Knowledge Base (SPARQL) -- bootstraps empty graphs
+    //    Wire GLiNER2 backend into KB extractor for classifying unresolved co-occurrence pairs.
     if let Some(ref endpoints) = kb_endpoints {
         let enabled: Vec<engram_ingest::KbEndpoint> = endpoints
             .iter()
@@ -146,9 +147,15 @@ pub(crate) fn build_pipeline(
 
         if !enabled.is_empty() {
             tracing::info!(count = enabled.len(), "KB relation extractor enabled");
-            rel_chain.add_backend(Box::new(
-                engram_ingest::KbRelationExtractor::new(enabled, graph.clone()),
-            ));
+            let mut kb_ext = engram_ingest::KbRelationExtractor::new(enabled, graph.clone());
+            // Wire GLiNER2 for co-occurrence pair classification (discovery -> typed)
+            #[cfg(feature = "gliner2")]
+            if let Some(ref arc) = gliner2_arc {
+                let re_arc: std::sync::Arc<dyn engram_ingest::RelationExtractor> = arc.clone();
+                kb_ext.set_gliner2_backend(re_arc);
+                tracing::info!("KB extractor: GLiNER2 wired for co-occurrence classification");
+            }
+            rel_chain.add_backend(Box::new(kb_ext));
         }
     }
 
@@ -265,8 +272,69 @@ pub async fn ingest(
         })
         .collect();
 
-    // Run build_pipeline + execute in spawn_blocking to avoid tokio runtime panic
-    // from reqwest::blocking (KbRelationExtractor)
+    let review_mode = req.review.unwrap_or(false);
+
+    if review_mode {
+        // Review mode: run analyze (NER + RE) but don't commit to graph.
+        // Store results in IngestSession for later review + selective commit.
+        let result = tokio::task::spawn_blocking(move || {
+            let pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
+                relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+            pipeline.analyze(items)
+        })
+        .await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let session_id = format!("ingest-{:016x}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos() as u64);
+
+        let entities: Vec<crate::state::IngestPreviewEntity> = result.entities.iter().map(|e| {
+            crate::state::IngestPreviewEntity {
+                label: e.text.clone(),
+                entity_type: e.entity_type.clone(),
+                confidence: e.confidence,
+            }
+        }).collect();
+
+        let relations: Vec<crate::state::IngestPreviewRelation> = result.relations.iter().map(|r| {
+            let is_sparql = r.confidence >= 0.70 && matches!(r.method, engram_ingest::ExtractionMethod::KnowledgeBase);
+            crate::state::IngestPreviewRelation {
+                from: r.from.clone(),
+                to: r.to.clone(),
+                rel_type: r.rel_type.clone(),
+                confidence: r.confidence,
+                method: format!("{:?}", r.method),
+                tier: crate::state::ConnectionTier::from_confidence(r.confidence, is_sparql),
+            }
+        }).collect();
+
+        let session = crate::state::IngestSession {
+            session_id: session_id.clone(),
+            entities,
+            relations,
+            created_at: std::time::Instant::now(),
+        };
+
+        state.ingest_sessions.write().unwrap().insert(session_id.clone(), session);
+
+        // Return a response with session_id. facts_stored=0 since nothing committed yet.
+        return Ok(Json(IngestResponse {
+            facts_stored: 0,
+            relations_created: 0,
+            relations_deduplicated: 0,
+            facts_resolved: 0,
+            facts_deduped: 0,
+            conflicts_detected: 0,
+            errors: Vec::new(),
+            duration_ms: result.duration_ms,
+            stages_skipped: skipped_names,
+            warnings: vec![format!("review_session:{}", session_id)],
+            kb_stats: None,
+        }));
+    }
+
+    // Normal mode: run pipeline and commit to graph.
     let parallel = req.parallel.unwrap_or(false);
     let result = tokio::task::spawn_blocking(move || {
         let pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
@@ -643,6 +711,199 @@ pub async fn event_stream(
 
     axum::response::Sse::new(stream)
         .keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+// ── Ingest review mode ────────────────────────────────────────────────
+
+/// GET /ingest/review?session=xxx -- get tiered relation groups for review.
+#[cfg(feature = "ingest")]
+pub async fn ingest_review(
+    State(state): State<AppState>,
+    query: axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<serde_json::Value> {
+    let session_id = query.get("session")
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "session query param required"))?;
+
+    let sessions = state.ingest_sessions.read().unwrap();
+    let session = sessions.get(session_id)
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "ingest session not found"))?;
+
+    let mut confirmed = Vec::new();
+    let mut likely = Vec::new();
+    let mut uncertain = Vec::new();
+    let mut no_relation = Vec::new();
+
+    for (idx, rel) in session.relations.iter().enumerate() {
+        let entry = serde_json::json!({
+            "idx": idx,
+            "from": rel.from,
+            "to": rel.to,
+            "rel_type": rel.rel_type,
+            "confidence": rel.confidence,
+            "method": rel.method,
+            "tier": rel.tier,
+        });
+        match rel.tier {
+            crate::state::ConnectionTier::Confirmed => confirmed.push(entry),
+            crate::state::ConnectionTier::Likely => likely.push(entry),
+            crate::state::ConnectionTier::Uncertain => uncertain.push(entry),
+            crate::state::ConnectionTier::NoRelation => no_relation.push(entry),
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "session_id": session_id,
+        "entities": session.entities,
+        "groups": [
+            { "tier": "confirmed", "label": "Confirmed", "connections": confirmed },
+            { "tier": "likely", "label": "Likely (needs confirmation)", "connections": likely },
+            { "tier": "uncertain", "label": "Uncertain (careful review)", "connections": uncertain },
+            { "tier": "no_relation", "label": "Co-occurred but unclassified", "connections": no_relation },
+        ]
+    })))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn ingest_review() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled".into() }))
+}
+
+/// POST /ingest/review/confirm -- commit accepted relations from an ingest review session.
+#[cfg(feature = "ingest")]
+pub async fn ingest_review_confirm(
+    State(state): State<AppState>,
+    Json(req): Json<IngestReviewConfirmRequest>,
+) -> ApiResult<IngestResponse> {
+    let start = std::time::Instant::now();
+
+    let session = {
+        let sessions = state.ingest_sessions.read().unwrap();
+        sessions.get(&req.session_id)
+            .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "ingest session not found"))?
+            .clone()
+    };
+
+    let accepted_set: std::collections::HashSet<usize> = req.accepted.iter().copied().collect();
+    let modified_map: std::collections::HashMap<usize, String> = req.modified.iter()
+        .map(|m| (m.idx, m.new_rel_type.clone()))
+        .collect();
+    let skipped_set: std::collections::HashSet<usize> = req.skipped.iter().copied().collect();
+
+    let mut facts_stored = 0u32;
+    let mut relations_created = 0u32;
+
+    {
+        let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+        let prov = engram_core::graph::Provenance {
+            source_type: engram_core::graph::SourceType::Api,
+            source_id: "ingest-review".to_string(),
+        };
+
+        // Store all entities
+        for ent in &session.entities {
+            match g.store_with_confidence(&ent.label, ent.confidence, &prov) {
+                Ok(_) => {
+                    let _ = g.set_node_type(&ent.label, &ent.entity_type);
+                    facts_stored += 1;
+                }
+                Err(_) => {}
+            }
+        }
+
+        // Store only accepted/modified relations (skip confirmed-tier auto-accepted by default)
+        for (idx, rel) in session.relations.iter().enumerate() {
+            if skipped_set.contains(&idx) { continue; }
+
+            let accept = accepted_set.contains(&idx) || modified_map.contains_key(&idx)
+                || rel.tier == crate::state::ConnectionTier::Confirmed;
+
+            if accept {
+                let rel_type = modified_map.get(&idx).unwrap_or(&rel.rel_type);
+                if g.find_node_id(&rel.from).ok().flatten().is_none() {
+                    let _ = g.store_with_confidence(&rel.from, 0.60, &prov);
+                }
+                if g.find_node_id(&rel.to).ok().flatten().is_none() {
+                    let _ = g.store_with_confidence(&rel.to, 0.60, &prov);
+                }
+                match g.relate(&rel.from, &rel.to, rel_type, &prov) {
+                    Ok(_) => relations_created += 1,
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
+    state.mark_dirty();
+
+    // Clean up session
+    state.ingest_sessions.write().unwrap().remove(&req.session_id);
+
+    Ok(Json(IngestResponse {
+        facts_stored,
+        relations_created,
+        relations_deduplicated: 0,
+        facts_resolved: 0,
+        facts_deduped: 0,
+        conflicts_detected: 0,
+        errors: Vec::new(),
+        duration_ms: start.elapsed().as_millis() as u64,
+        stages_skipped: Vec::new(),
+        warnings: Vec::new(),
+        kb_stats: None,
+    }))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn ingest_review_confirm() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled".into() }))
+}
+
+/// GET /config/relation-types -- flat list of all known relation types.
+pub async fn list_relation_types(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let cfg = state.config.read().map_err(|_| read_lock_err())?;
+    let mut types: Vec<String> = Vec::new();
+
+    // Configured templates
+    if let Some(ref templates) = cfg.relation_templates {
+        types.extend(templates.keys().cloned());
+    } else {
+        types.extend(["works_at", "headquartered_in", "located_in", "founded", "leads", "supports"]
+            .iter().map(|s| s.to_string()));
+    }
+    drop(cfg);
+
+    // Default type templates
+    let defaults = engram_ingest::rel_type_templates::default_type_templates();
+    for rels in defaults.values() {
+        for r in rels {
+            if !types.contains(r) {
+                types.push(r.clone());
+            }
+        }
+    }
+
+    // Learned from graph's relation gazetteer
+    if let Some(ref config_path) = state.config_path {
+        let brain_path = config_path.with_extension("");
+        let relgaz_path = brain_path.with_extension("relgaz");
+        if relgaz_path.exists() {
+            if let Ok(gaz) = engram_ingest::RelationGazetteer::load(&brain_path) {
+                for rt in gaz.known_relation_types() {
+                    if !types.contains(rt) {
+                        types.push(rt.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    types.sort();
+    types.dedup();
+    Ok(Json(serde_json::json!({ "types": types })))
 }
 
 fn event_type_name(event: &engram_core::events::GraphEvent) -> &'static str {

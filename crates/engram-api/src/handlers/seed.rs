@@ -212,9 +212,9 @@ pub async fn seed_confirm_aoi(
             })
             .collect();
 
-        let extractor = engram_ingest::KbRelationExtractor::with_config(
+        let mut extractor = engram_ingest::KbRelationExtractor::with_config(
             kb_endpoints,
-            graph,
+            graph.clone(),
             config_snap.llm_endpoint,
             config_snap.llm_model,
             Some(event_bus),
@@ -222,6 +222,36 @@ pub async fn seed_confirm_aoi(
             config_snap.web_search_api_key,
             config_snap.web_search_url,
         );
+
+        // Wire GLiNER2 for co-occurrence pair classification
+        #[cfg(feature = "gliner2")]
+        {
+            use engram_ingest::gliner2_backend::{Gliner2Backend, find_gliner2_model};
+            if let Some(cfg) = find_gliner2_model() {
+                if let Ok(backend) = Gliner2Backend::load(&cfg.model_dir, "fp16") {
+                    let relation_types: Vec<String> = config_snap.relation_templates
+                        .as_ref()
+                        .map(|t| t.keys().cloned().collect())
+                        .unwrap_or_else(|| vec![
+                            "works_at".into(), "headquartered_in".into(),
+                            "located_in".into(), "founded".into(),
+                            "leads".into(), "supports".into(),
+                        ]);
+                    let threshold = config_snap.rel_threshold.unwrap_or(0.85);
+                    let pb = engram_ingest::gliner2_backend::Gliner2PipelineBackend::new(
+                        backend,
+                        vec!["person".into(), "organization".into(), "location".into(),
+                             "date".into(), "event".into(), "product".into()],
+                        relation_types,
+                        0.5,
+                        threshold,
+                    );
+                    let re_arc: std::sync::Arc<dyn engram_ingest::RelationExtractor> = std::sync::Arc::new(pb);
+                    extractor.set_gliner2_backend(re_arc);
+                    tracing::info!("Seed KB extractor: GLiNER2 wired for co-occurrence classification");
+                }
+            }
+        }
 
         // Build RelationExtractionInput from session entities
         let extracted: Vec<engram_ingest::ExtractedEntity> = entities.iter().map(|e| {
@@ -250,11 +280,14 @@ pub async fn seed_confirm_aoi(
             if let Some(session) = sessions.get_mut(&sid) {
                 for rel in &relations {
                     if rel.head_idx < session.entities.len() && rel.tail_idx < session.entities.len() {
+                        let is_sparql = rel.confidence >= 0.70 && rel.rel_type != "related_to";
                         session.connections.push(crate::state::SeedConnection {
                             from: session.entities[rel.head_idx].label.clone(),
                             to: session.entities[rel.tail_idx].label.clone(),
                             rel_type: rel.rel_type.clone(),
-                            source: "kb".into(),
+                            source: format!("{:?}", rel.method),
+                            confidence: rel.confidence,
+                            tier: crate::state::ConnectionTier::from_confidence(rel.confidence, is_sparql),
                         });
                     }
                 }
@@ -394,6 +427,113 @@ pub async fn seed_commit(
 
 #[cfg(not(feature = "ingest"))]
 pub async fn seed_commit() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled".into() }))
+}
+
+/// GET /ingest/seed/connections?session_id=xxx -- get tiered connections for review.
+#[cfg(feature = "ingest")]
+pub async fn seed_connections(
+    State(state): State<AppState>,
+    query: axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<serde_json::Value> {
+    let session_id = query.get("session_id")
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "session_id required"))?;
+
+    let sessions = state.seed_sessions.read().unwrap();
+    let session = sessions.get(session_id)
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "session not found"))?;
+
+    // Group connections by tier
+    let mut confirmed = Vec::new();
+    let mut likely = Vec::new();
+    let mut uncertain = Vec::new();
+    let mut no_relation = Vec::new();
+
+    for (idx, conn) in session.connections.iter().enumerate() {
+        let entry = serde_json::json!({
+            "idx": idx,
+            "from": conn.from,
+            "to": conn.to,
+            "rel_type": conn.rel_type,
+            "confidence": conn.confidence,
+            "source": conn.source,
+            "tier": conn.tier,
+        });
+        match conn.tier {
+            crate::state::ConnectionTier::Confirmed => confirmed.push(entry),
+            crate::state::ConnectionTier::Likely => likely.push(entry),
+            crate::state::ConnectionTier::Uncertain => uncertain.push(entry),
+            crate::state::ConnectionTier::NoRelation => no_relation.push(entry),
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "session_id": session_id,
+        "groups": [
+            { "tier": "confirmed", "label": "Confirmed (SPARQL + high-confidence GLiNER2)", "connections": confirmed },
+            { "tier": "likely", "label": "Likely (GLiNER2 50-70%)", "connections": likely },
+            { "tier": "uncertain", "label": "Uncertain (GLiNER2 < 50%)", "connections": uncertain },
+            { "tier": "no_relation", "label": "Co-occurred but unclassified", "connections": no_relation },
+        ]
+    })))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn seed_connections() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled".into() }))
+}
+
+/// POST /ingest/seed/confirm-relations -- review and confirm relations before commit.
+#[cfg(feature = "ingest")]
+pub async fn seed_confirm_relations(
+    State(state): State<AppState>,
+    Json(req): Json<SeedConfirmRelationsRequest>,
+) -> ApiResult<serde_json::Value> {
+    let mut sessions = state.seed_sessions.write().unwrap();
+    let session = sessions.get_mut(&req.session_id)
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "session not found"))?;
+
+    // Apply modifications
+    for m in &req.modified {
+        if m.idx < session.connections.len() {
+            session.connections[m.idx].rel_type = m.new_rel_type.clone();
+            session.connections[m.idx].tier = crate::state::ConnectionTier::Confirmed;
+        }
+    }
+
+    // Build set of accepted + modified indices
+    let mut keep: std::collections::HashSet<usize> = req.accepted.iter().copied().collect();
+    for m in &req.modified {
+        keep.insert(m.idx);
+    }
+    // Also keep all Confirmed tier that weren't explicitly skipped
+    let skipped: std::collections::HashSet<usize> = req.skipped.iter().copied().collect();
+    for (idx, conn) in session.connections.iter().enumerate() {
+        if conn.tier == crate::state::ConnectionTier::Confirmed && !skipped.contains(&idx) {
+            keep.insert(idx);
+        }
+    }
+
+    // Filter connections to only kept ones
+    let filtered: Vec<crate::state::SeedConnection> = session.connections.iter().enumerate()
+        .filter(|(idx, _)| keep.contains(idx))
+        .map(|(_, c)| c.clone())
+        .collect();
+
+    let count = filtered.len();
+    session.connections = filtered;
+
+    Ok(Json(serde_json::json!({
+        "status": "relations_confirmed",
+        "session_id": req.session_id,
+        "accepted_count": count,
+    })))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn seed_confirm_relations() -> impl axum::response::IntoResponse {
     (StatusCode::NOT_IMPLEMENTED,
      Json(ErrorResponse { error: "ingest feature not enabled".into() }))
 }

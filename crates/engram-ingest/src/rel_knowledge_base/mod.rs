@@ -21,6 +21,16 @@ use engram_core::graph::Graph;
 use crate::rel_traits::{CandidateRelation, RelationExtractionInput, RelationExtractor};
 use crate::types::{ExtractionMethod, KbStats};
 
+/// A discovered entity pair from co-occurrence (NO relation type assigned).
+/// Classification is deferred to SPARQL (ground truth) or GLiNER2 (text understanding).
+#[derive(Debug, Clone)]
+pub struct DiscoveredPair {
+    pub head_idx: usize,
+    pub tail_idx: usize,
+    pub source: String,        // "aoi_article", "web_search", "co-extracted"
+    pub confidence: f32,       // co-occurrence confidence (0.45-0.60)
+}
+
 mod entity_link;
 mod sparql;
 #[cfg(test)]
@@ -57,6 +67,8 @@ pub struct KbRelationExtractor {
     web_search_api_key: Option<String>,
     /// Web search URL (for SearXNG self-hosted)
     web_search_url: Option<String>,
+    /// Optional GLiNER2 backend for classifying unresolved co-occurrence pairs.
+    gliner2_backend: Option<Arc<dyn RelationExtractor>>,
 }
 
 impl KbRelationExtractor {
@@ -77,6 +89,7 @@ impl KbRelationExtractor {
             web_search_provider: None,
             web_search_api_key: None,
             web_search_url: None,
+            gliner2_backend: None,
         }
     }
 
@@ -101,6 +114,11 @@ impl KbRelationExtractor {
         ext
     }
 
+    /// Set the GLiNER2 backend for classifying unresolved co-occurrence pairs.
+    pub fn set_gliner2_backend(&mut self, backend: Arc<dyn RelationExtractor>) {
+        self.gliner2_backend = Some(backend);
+    }
+
     /// Publish a seed enrichment event if event_bus is configured.
     fn emit(&self, event: engram_core::events::GraphEvent) {
         if let Some(ref bus) = self.event_bus {
@@ -116,7 +134,8 @@ impl RelationExtractor for KbRelationExtractor {
         }
 
         let start = Instant::now();
-        let mut all_relations = Vec::new();
+        let mut all_relations: Vec<CandidateRelation> = Vec::new();
+        let mut discovered_pairs: Vec<DiscoveredPair> = Vec::new();
         let mut total_stats = KbStats::default();
         let entity_labels: Vec<String> = input.entities.iter().map(|e| e.text.clone()).collect();
         let session_id: Arc<str> = Arc::from("pipeline");
@@ -204,31 +223,27 @@ impl RelationExtractor for KbRelationExtractor {
                 relations_found: 0,
             });
 
-            // --- Step 2: Area-of-interest article co-occurrence ---
-            // Fetch the AoI article and find which seed entities co-occur in paragraphs
-            let mut cooccurrence_relations = 0u32;
+            // --- Step 2: Area-of-interest article co-occurrence (DISCOVERY ONLY) ---
+            // Co-occurrence finds entity PAIRS but does NOT assign relation types.
+            // Classification is deferred to SPARQL (Step 3) and GLiNER2 (Step 5).
+            let mut cooccurrence_count = 0u32;
 
             if let Some(article) = self.fetch_area_of_interest_article(&area_of_interest, &input.language) {
                 let cooccurrences = self.find_cooccurrences(&article, &entity_labels);
                 for (a, b) in &cooccurrences {
-                    let inferred = crate::rel_type_templates::infer_from_types(
-                        &input.entities[*a].entity_type,
-                        &input.entities[*b].entity_type,
-                    );
-                    all_relations.push(CandidateRelation {
+                    discovered_pairs.push(DiscoveredPair {
                         head_idx: *a,
                         tail_idx: *b,
-                        rel_type: inferred.clone(),
+                        source: "aoi_article".to_string(),
                         confidence: 0.60,
-                        method: ExtractionMethod::KnowledgeBase,
                     });
-                    cooccurrence_relations += 1;
+                    cooccurrence_count += 1;
 
                     self.emit(engram_core::events::GraphEvent::SeedConnectionFound {
                         session_id: session_id.clone(),
                         from: Arc::from(entity_labels[*a].as_str()),
                         to: Arc::from(entity_labels[*b].as_str()),
-                        rel_type: Arc::from(inferred.as_str()),
+                        rel_type: Arc::from("discovered"),
                         source: Arc::from("area_of_interest_article"),
                     });
                 }
@@ -246,24 +261,19 @@ impl RelationExtractor for KbRelationExtractor {
                         &unmentioned, &entity_labels, &area_of_interest, &input.language,
                     );
                     for (a, b) in &extra_pairs {
-                        let inferred = crate::rel_type_templates::infer_from_types(
-                            &input.entities[*a].entity_type,
-                            &input.entities[*b].entity_type,
-                        );
-                        all_relations.push(CandidateRelation {
+                        discovered_pairs.push(DiscoveredPair {
                             head_idx: *a,
                             tail_idx: *b,
-                            rel_type: inferred.clone(),
+                            source: "entity_context_search".to_string(),
                             confidence: 0.55,
-                            method: ExtractionMethod::KnowledgeBase,
                         });
-                        cooccurrence_relations += 1;
+                        cooccurrence_count += 1;
 
                         self.emit(engram_core::events::GraphEvent::SeedConnectionFound {
                             session_id: session_id.clone(),
                             from: Arc::from(entity_labels[*a].as_str()),
                             to: Arc::from(entity_labels[*b].as_str()),
-                            rel_type: Arc::from(inferred.as_str()),
+                            rel_type: Arc::from("discovered"),
                             source: Arc::from("entity_context_search"),
                         });
                     }
@@ -272,9 +282,15 @@ impl RelationExtractor for KbRelationExtractor {
 
             // --- Step 2c: Web search fallback for still-unconnected entities ---
             if self.web_search_provider.is_some() {
-                let connected_so_far: std::collections::HashSet<usize> = all_relations.iter()
-                    .flat_map(|r| vec![r.head_idx, r.tail_idx])
-                    .collect();
+                let mut connected_so_far: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                for p in &discovered_pairs {
+                    connected_so_far.insert(p.head_idx);
+                    connected_so_far.insert(p.tail_idx);
+                }
+                for r in &all_relations {
+                    connected_so_far.insert(r.head_idx);
+                    connected_so_far.insert(r.tail_idx);
+                }
                 let still_unconnected: Vec<usize> = (0..entity_labels.len())
                     .filter(|i| !connected_so_far.contains(i))
                     .collect();
@@ -290,36 +306,29 @@ impl RelationExtractor for KbRelationExtractor {
                         let search_query = format!("{} {}", &entity_labels[uidx], &area_of_interest);
                         let web_results = self.web_search(&search_query);
 
-                        // Scan snippets for mentions of other seed entities
                         for (_title, snippet) in &web_results {
                             let snippet_lower = snippet.to_lowercase();
                             for (oidx, other_label) in entity_labels.iter().enumerate() {
                                 if oidx == uidx { continue; }
                                 if snippet_lower.contains(&other_label.to_lowercase()) {
-                                    // Avoid duplicate relations
-                                    let already = all_relations.iter().any(|r|
-                                        (r.head_idx == uidx && r.tail_idx == oidx) ||
-                                        (r.head_idx == oidx && r.tail_idx == uidx)
+                                    let already = discovered_pairs.iter().any(|p|
+                                        (p.head_idx == uidx && p.tail_idx == oidx) ||
+                                        (p.head_idx == oidx && p.tail_idx == uidx)
                                     );
                                     if !already {
-                                        let inferred = crate::rel_type_templates::infer_from_types(
-                                            &input.entities[uidx].entity_type,
-                                            &input.entities[oidx].entity_type,
-                                        );
-                                        all_relations.push(CandidateRelation {
+                                        discovered_pairs.push(DiscoveredPair {
                                             head_idx: uidx,
                                             tail_idx: oidx,
-                                            rel_type: inferred.clone(),
+                                            source: "web_search".to_string(),
                                             confidence: 0.50,
-                                            method: ExtractionMethod::KnowledgeBase,
                                         });
-                                        cooccurrence_relations += 1;
+                                        cooccurrence_count += 1;
 
                                         self.emit(engram_core::events::GraphEvent::SeedConnectionFound {
                                             session_id: session_id.clone(),
                                             from: Arc::from(entity_labels[uidx].as_str()),
                                             to: Arc::from(entity_labels[oidx].as_str()),
-                                            rel_type: Arc::from(inferred.as_str()),
+                                            rel_type: Arc::from("discovered"),
                                             source: Arc::from("web_search"),
                                         });
                                     }
@@ -334,7 +343,7 @@ impl RelationExtractor for KbRelationExtractor {
                 session_id: session_id.clone(),
                 phase: 2,
                 entities_processed: entity_labels.len() as u32,
-                relations_found: cooccurrence_relations,
+                relations_found: cooccurrence_count,
             });
 
             // --- Step 3: Batch SPARQL + property expansion + shortest path ---
@@ -483,23 +492,32 @@ impl RelationExtractor for KbRelationExtractor {
 
         // --- Step 4: Fix disconnected islands ---
         // Any seed entity with NO edge to any other seed entity gets a
-        // "related_to" edge back to the area_of_interest context. This ensures
+        // discovery pair back to the most-connected entity. This ensures
         // the graph has no orphaned subgraphs from the same seed text.
         {
-            let connected_entities: std::collections::HashSet<usize> = all_relations.iter()
-                .flat_map(|r| vec![r.head_idx, r.tail_idx])
-                .collect();
+            let mut connected_entities: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for r in &all_relations {
+                connected_entities.insert(r.head_idx);
+                connected_entities.insert(r.tail_idx);
+            }
+            for p in &discovered_pairs {
+                connected_entities.insert(p.head_idx);
+                connected_entities.insert(p.tail_idx);
+            }
 
             let disconnected: Vec<usize> = (0..entity_labels.len())
                 .filter(|i| !connected_entities.contains(i))
                 .collect();
 
             if !disconnected.is_empty() {
-                // Find the most-connected seed entity to anchor disconnected ones
                 let mut connection_counts = vec![0usize; entity_labels.len()];
                 for r in &all_relations {
                     connection_counts[r.head_idx] += 1;
                     connection_counts[r.tail_idx] += 1;
+                }
+                for p in &discovered_pairs {
+                    connection_counts[p.head_idx] += 1;
+                    connection_counts[p.tail_idx] += 1;
                 }
                 let anchor_idx = connection_counts.iter().enumerate()
                     .max_by_key(|(_, c)| *c)
@@ -514,25 +532,117 @@ impl RelationExtractor for KbRelationExtractor {
 
                 for &idx in &disconnected {
                     if idx == anchor_idx { continue; }
-                    let inferred = crate::rel_type_templates::infer_from_types(
-                        &input.entities[idx].entity_type,
-                        &input.entities[anchor_idx].entity_type,
-                    );
-                    all_relations.push(CandidateRelation {
+                    discovered_pairs.push(DiscoveredPair {
                         head_idx: idx,
                         tail_idx: anchor_idx,
-                        rel_type: inferred.clone(),
+                        source: "co-extracted".to_string(),
                         confidence: 0.45,
-                        method: ExtractionMethod::KnowledgeBase,
                     });
 
                     self.emit(engram_core::events::GraphEvent::SeedConnectionFound {
                         session_id: session_id.clone(),
                         from: Arc::from(entity_labels[idx].as_str()),
                         to: Arc::from(entity_labels[anchor_idx].as_str()),
-                        rel_type: Arc::from(inferred.as_str()),
+                        rel_type: Arc::from("discovered"),
                         source: Arc::from("co-extracted_seed_text"),
                     });
+                }
+            }
+        }
+
+        // --- Step 5: Classify unresolved co-occurrence pairs ---
+        // Compare discovered pairs against SPARQL-typed relations.
+        // Pairs with SPARQL types are done; remaining go to GLiNER2.
+        {
+            let sparql_pairs: std::collections::HashSet<(usize, usize)> = all_relations.iter()
+                .map(|r| (r.head_idx.min(r.tail_idx), r.head_idx.max(r.tail_idx)))
+                .collect();
+
+            let unresolved: Vec<DiscoveredPair> = discovered_pairs.into_iter()
+                .filter(|p| {
+                    let key = (p.head_idx.min(p.tail_idx), p.head_idx.max(p.tail_idx));
+                    !sparql_pairs.contains(&key)
+                })
+                .collect();
+
+            if !unresolved.is_empty() {
+                if let Some(ref gliner2) = self.gliner2_backend {
+                    tracing::info!(
+                        unresolved = unresolved.len(),
+                        "Step 5: GLiNER2 classifying unresolved co-occurrence pairs"
+                    );
+
+                    // Build a synthetic input with the same entities for GLiNER2
+                    let gliner_input = RelationExtractionInput {
+                        text: input.text.clone(),
+                        entities: input.entities.clone(),
+                        language: input.language.clone(),
+                        area_of_interest: input.area_of_interest.clone(),
+                    };
+                    let gliner_results = gliner2.extract_relations(&gliner_input);
+
+                    // Index GLiNER2 results by (min_idx, max_idx)
+                    let gliner_map: HashMap<(usize, usize), &CandidateRelation> = gliner_results.iter()
+                        .map(|r| ((r.head_idx.min(r.tail_idx), r.head_idx.max(r.tail_idx)), r))
+                        .collect();
+
+                    for pair in &unresolved {
+                        let key = (pair.head_idx.min(pair.tail_idx), pair.head_idx.max(pair.tail_idx));
+                        if let Some(gliner_rel) = gliner_map.get(&key) {
+                            // GLiNER2 found a typed relation for this pair
+                            all_relations.push(CandidateRelation {
+                                head_idx: gliner_rel.head_idx,
+                                tail_idx: gliner_rel.tail_idx,
+                                rel_type: gliner_rel.rel_type.clone(),
+                                confidence: gliner_rel.confidence,
+                                method: ExtractionMethod::NeuralZeroShot,
+                            });
+
+                            self.emit(engram_core::events::GraphEvent::SeedConnectionFound {
+                                session_id: session_id.clone(),
+                                from: Arc::from(entity_labels[pair.head_idx].as_str()),
+                                to: Arc::from(entity_labels[pair.tail_idx].as_str()),
+                                rel_type: Arc::from(gliner_rel.rel_type.as_str()),
+                                source: Arc::from("gliner2"),
+                            });
+                        } else {
+                            // GLiNER2 found NO_RELATION -- use "related_to" as fallback
+                            all_relations.push(CandidateRelation {
+                                head_idx: pair.head_idx,
+                                tail_idx: pair.tail_idx,
+                                rel_type: "related_to".to_string(),
+                                confidence: pair.confidence * 0.5,
+                                method: ExtractionMethod::KnowledgeBase,
+                            });
+
+                            self.emit(engram_core::events::GraphEvent::SeedConnectionFound {
+                                session_id: session_id.clone(),
+                                from: Arc::from(entity_labels[pair.head_idx].as_str()),
+                                to: Arc::from(entity_labels[pair.tail_idx].as_str()),
+                                rel_type: Arc::from("related_to"),
+                                source: Arc::from("no_relation"),
+                            });
+                        }
+                    }
+                } else {
+                    // No GLiNER2 available -- all unresolved become "related_to" with downgraded confidence
+                    for pair in &unresolved {
+                        all_relations.push(CandidateRelation {
+                            head_idx: pair.head_idx,
+                            tail_idx: pair.tail_idx,
+                            rel_type: "related_to".to_string(),
+                            confidence: pair.confidence * 0.5,
+                            method: ExtractionMethod::KnowledgeBase,
+                        });
+
+                        self.emit(engram_core::events::GraphEvent::SeedConnectionFound {
+                            session_id: session_id.clone(),
+                            from: Arc::from(entity_labels[pair.head_idx].as_str()),
+                            to: Arc::from(entity_labels[pair.tail_idx].as_str()),
+                            rel_type: Arc::from("related_to"),
+                            source: Arc::from("unresolved_cooccurrence"),
+                        });
+                    }
                 }
             }
         }
@@ -542,10 +652,10 @@ impl RelationExtractor for KbRelationExtractor {
         // upgrade the co-occurrence's "related_to" to the typed relation.
         {
             // Build map of (min_idx, max_idx) -> typed_rel_type from non-related_to relations
-            let typed_map: HashMap<(usize, usize), String> = all_relations.iter()
-                .filter(|r| r.rel_type != "related_to")
-                .map(|r| ((r.head_idx.min(r.tail_idx), r.head_idx.max(r.tail_idx)), r.rel_type.clone()))
-                .collect();
+            let mut typed_map: HashMap<(usize, usize), String> = HashMap::new();
+            for r in all_relations.iter().filter(|r| r.rel_type != "related_to") {
+                typed_map.insert((r.head_idx.min(r.tail_idx), r.head_idx.max(r.tail_idx)), r.rel_type.clone());
+            }
 
             if !typed_map.is_empty() {
                 let mut upgraded = 0u32;

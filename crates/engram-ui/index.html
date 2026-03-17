@@ -298,6 +298,8 @@
               var rel = (link.label || '').toLowerCase();
               if (self._hiddenRels.has(rel)) return false;
             }
+            // Hide expired temporal edges when "Current relations only" is on
+            if (self._temporalCurrentOnly && link.valid_to) return false;
             return true;
           })
           .linkThreeObjectExtend(true)
@@ -384,6 +386,60 @@
             node.fy = node.y;
             node.fz = node.z;
           })
+          // ── Autocomplete helper for edge rename inputs ──
+          var _relTypesCache = null;
+          function fetchRelTypes(cb) {
+            if (_relTypesCache) return cb(_relTypesCache);
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/config/relation-types');
+            var token = localStorage.getItem('engram_token');
+            if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+            xhr.onload = function() {
+              try { _relTypesCache = JSON.parse(xhr.responseText).types || []; }
+              catch(e) { _relTypesCache = []; }
+              cb(_relTypesCache);
+            };
+            xhr.onerror = function() { cb([]); };
+            xhr.send();
+          }
+          function attachAutocomplete(inputEl) {
+            var dropdown = null;
+            function show(matches) {
+              hide();
+              if (!matches.length) return;
+              dropdown = document.createElement('div');
+              dropdown.style.cssText = 'position:absolute;background:#2a2a2e;border:1px solid rgba(255,255,255,0.15);border-radius:4px;max-height:150px;overflow-y:auto;z-index:10001;min-width:' + inputEl.offsetWidth + 'px;';
+              var rect = inputEl.getBoundingClientRect();
+              dropdown.style.left = rect.left + 'px';
+              dropdown.style.top = (rect.bottom + 2) + 'px';
+              matches.slice(0, 10).forEach(function(m) {
+                var opt = document.createElement('div');
+                opt.textContent = m;
+                opt.style.cssText = 'padding:4px 8px;font-size:0.75rem;cursor:pointer;color:#e0e0e0;';
+                opt.onmouseenter = function() { opt.style.background = 'rgba(255,255,255,0.08)'; };
+                opt.onmouseleave = function() { opt.style.background = 'none'; };
+                opt.addEventListener('mousedown', function(ev) { ev.preventDefault(); inputEl.value = m; hide(); });
+                dropdown.appendChild(opt);
+              });
+              document.body.appendChild(dropdown);
+            }
+            function hide() { if (dropdown) { dropdown.remove(); dropdown = null; } }
+            function normalize(s) { return s.toLowerCase().replace(/[\s-]/g, '_'); }
+            inputEl.addEventListener('focus', function() { fetchRelTypes(function(){}); });
+            inputEl.addEventListener('input', function() {
+              var val = inputEl.value.trim().toLowerCase();
+              if (!val || !_relTypesCache) { hide(); return; }
+              var matches = _relTypesCache.filter(function(t) {
+                return t.toLowerCase().indexOf(val) !== -1;
+              });
+              // Fuzzy dedup warning
+              var norm = normalize(val);
+              var similar = _relTypesCache.find(function(t) { return normalize(t) === norm && t !== val; });
+              if (similar && matches.indexOf(similar) === -1) matches.unshift(similar);
+              show(matches);
+            });
+            inputEl.addEventListener('blur', function() { setTimeout(hide, 200); });
+          }
           .onLinkClick(function(link, event) {
             // Dismiss any existing popup
             if (self._edgePopupEl) {
@@ -485,9 +541,50 @@
                     });
                     inp.addEventListener('blur', commitRename);
                     inp.addEventListener('click', function(ce) { ce.stopPropagation(); });
+                    attachAutocomplete(inp);
                   };
                 })(child, labelSpan, row));
                 row.appendChild(editBtn);
+
+                var delBtn = document.createElement('span');
+                delBtn.innerHTML = '<i class="fa-solid fa-trash" style="font-size:0.6rem;"></i>';
+                delBtn.style.cssText = 'cursor:pointer; color:rgba(239,83,80,0.6); margin-left:4px; padding:2px;';
+                delBtn.title = 'Delete this relation';
+                delBtn.addEventListener('click', (function(child, row) {
+                  return function(ev) {
+                    ev.stopPropagation();
+                    var childSrc = typeof link.source === 'object' ? link.source.id : link.source;
+                    var childTgt = typeof link.target === 'object' ? link.target.id : link.target;
+                    var relType = child.label || 'related_to';
+                    if (!confirm('Delete "' + relType + '" between ' + childSrc + ' and ' + childTgt + '?')) return;
+                    var xhr = new XMLHttpRequest();
+                    xhr.open('POST', '/edge/delete', false);
+                    xhr.setRequestHeader('Content-Type', 'application/json');
+                    var token = localStorage.getItem('engram_token');
+                    if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+                    xhr.send(JSON.stringify({ from: childSrc, to: childTgt, rel_type: relType }));
+                    if (xhr.status === 200 && JSON.parse(xhr.responseText).deleted) {
+                      row.remove();
+                      // Remove from _originalLinks
+                      if (self._originalLinks) {
+                        self._originalLinks = self._originalLinks.filter(function(ol) {
+                          var olSrc = typeof ol.source === 'object' ? ol.source.id : ol.source;
+                          var olTgt = typeof ol.target === 'object' ? ol.target.id : ol.target;
+                          return !(olSrc === childSrc && olTgt === childTgt && (ol.label || 'related_to') === relType);
+                        });
+                      }
+                      // Remove child from bundle
+                      link._children = link._children.filter(function(c) { return c !== child; });
+                      if (link._children.length === 0) {
+                        var data = self.instance.graphData();
+                        data.links = data.links.filter(function(l) { return l !== link; });
+                        self.instance.graphData(data);
+                        if (popup) { popup.remove(); self._edgePopupEl = null; }
+                      }
+                    }
+                  };
+                })(child, row));
+                row.appendChild(delBtn);
 
                 popup.appendChild(row);
               });
@@ -585,9 +682,39 @@
                 e.stopPropagation();
               });
               renameInput.addEventListener('click', function(e) { e.stopPropagation(); });
+              attachAutocomplete(renameInput);
+
+              var deleteBtn = document.createElement('button');
+              deleteBtn.innerHTML = '<i class="fa-solid fa-trash"></i>';
+              deleteBtn.style.cssText = 'background:#ef5350; border:none; color:#fff; padding:3px 8px; border-radius:3px; cursor:pointer; font-size:0.7rem;';
+              deleteBtn.title = 'Delete this edge';
+              deleteBtn.addEventListener('click', function() {
+                if (!confirm('Delete edge "' + (link.label || 'related_to') + '" between ' + src + ' and ' + tgt + '?')) return;
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', '/edge/delete', false);
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                var token = localStorage.getItem('engram_token');
+                if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+                xhr.send(JSON.stringify({ from: src, to: tgt, rel_type: link.label || 'related_to' }));
+                if (xhr.status === 200 && JSON.parse(xhr.responseText).deleted) {
+                  // Remove from graph data
+                  var data = self.instance.graphData();
+                  data.links = data.links.filter(function(l) { return l !== link; });
+                  if (self._originalLinks) {
+                    self._originalLinks = self._originalLinks.filter(function(ol) {
+                      var olSrc = typeof ol.source === 'object' ? ol.source.id : ol.source;
+                      var olTgt = typeof ol.target === 'object' ? ol.target.id : ol.target;
+                      return !(olSrc === src && olTgt === tgt && (ol.label || 'related_to') === (link.label || 'related_to'));
+                    });
+                  }
+                  self.instance.graphData(data);
+                  if (tip) { tip.remove(); self._edgePopupEl = null; }
+                }
+              });
 
               renameRow.appendChild(renameInput);
               renameRow.appendChild(renameBtn);
+              renameRow.appendChild(deleteBtn);
               tip.appendChild(renameRow);
 
               document.body.appendChild(tip);
@@ -878,6 +1005,7 @@
       setTemporalMode: function(currentOnly) {
         this._temporalCurrentOnly = currentOnly;
         if (this.instance) {
+          this.instance.linkVisibility(this.instance.linkVisibility());
           this.instance.linkColor(this.instance.linkColor());
           this.instance.linkWidth(this.instance.linkWidth());
         }

@@ -7,8 +7,8 @@ use std::collections::HashMap;
 pub fn default_type_templates() -> HashMap<(String, String), Vec<String>> {
     let raw: Vec<(&str, &str, &[&str])> = vec![
         ("person", "organization", &["works_at", "leads", "founded", "member_of", "holds_position"]),
-        ("person", "location", &["born_in", "lives_in", "citizen_of", "based_in"]),
-        ("person", "person", &["married_to", "parent_of", "works_with", "succeeded_by"]),
+        ("person", "location", &["based_in", "lives_in", "citizen_of", "born_in"]),
+        ("person", "person", &["works_with", "succeeded_by", "parent_of", "married_to"]),
         ("person", "event", &["participated_in", "organized"]),
         ("person", "product", &["created", "invented", "uses"]),
         ("organization", "location", &["headquartered_in", "operates_in", "located_in"]),
@@ -17,6 +17,7 @@ pub fn default_type_templates() -> HashMap<(String, String), Vec<String>> {
         ("organization", "event", &["organized", "sponsored"]),
         ("product", "location", &["traded_in", "exported_to", "produced_in"]),
         ("product", "organization", &["manufactured_by", "developed_by", "sold_by"]),
+        ("product", "person", &["used_by", "invented_by", "associated_with"]),
         ("product", "product", &["component_of", "competes_with", "replaces"]),
         ("event", "location", &["occurred_in", "took_place_at"]),
         ("event", "event", &["preceded_by", "caused", "related_to"]),
@@ -48,7 +49,7 @@ fn reverse_relation(rel: &str) -> String {
         "born_in" => "birthplace_of".to_string(),
         "lives_in" => "residence_of".to_string(),
         "citizen_of" => "has_citizen".to_string(),
-        "based_in" => "base_of".to_string(),
+        "based_in" => "hosts".to_string(),
         "participated_in" => "had_participant".to_string(),
         "organized" => "organized_by".to_string(),
         "created" => "created_by".to_string(),
@@ -179,6 +180,12 @@ mod tests {
     }
 
     #[test]
+    fn test_product_person_not_created_by() {
+        let result = infer_from_types("product", "person");
+        assert_eq!(result, "used_by", "product->person should be 'used_by', not 'created_by'");
+    }
+
+    #[test]
     fn test_user_templates_override() {
         let mut user = HashMap::new();
         user.insert(
@@ -189,5 +196,19 @@ mod tests {
         let result =
             infer_from_types_with_user("person", "organization", Some(&user));
         assert_eq!(result, "employed_by");
+    }
+
+    #[test]
+    fn test_person_person_not_married_first() {
+        let result = infer_from_types("person", "person");
+        assert_ne!(result, "married_to", "person+person must NOT default to 'married_to'");
+        assert_eq!(result, "works_with", "person+person should default to 'works_with'");
+    }
+
+    #[test]
+    fn test_person_location_not_born_in_first() {
+        let result = infer_from_types("person", "location");
+        assert_ne!(result, "born_in", "person+location must NOT default to 'born_in'");
+        assert_eq!(result, "based_in", "person+location should default to 'based_in'");
     }
 }

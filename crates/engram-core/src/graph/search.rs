@@ -428,6 +428,7 @@ impl Graph {
         max_depth: u32,
         min_depth: Option<u32>,
         via_label: Option<&str>,
+        skip_types: Option<&[&str]>,
     ) -> Result<Vec<Vec<String>>> {
         let from_id = self.find_node_id(from_label)?
             .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
@@ -507,6 +508,18 @@ impl Graph {
                         return Ok(all_paths);
                     }
                 } else if !path.contains(&neighbor) && (path.len() as u32) < max_depth + 1 {
+                    // Skip intermediary nodes of excluded types (but never skip the destination)
+                    if let Some(types) = skip_types {
+                        if let Some(slot) = self.find_slot_by_id(neighbor) {
+                            if let Ok(node) = self.brain.read_node(slot) {
+                                if let Some(type_name) = self.node_type_names.get(node.node_type as usize) {
+                                    if types.iter().any(|t| t.eq_ignore_ascii_case(type_name)) {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let mut new_path = path.clone();
                     new_path.push(neighbor);
                     stack.push((neighbor, new_path));
@@ -543,7 +556,7 @@ mod path_tests {
         graph.relate("A", "D", "knows", &prov).unwrap();
         graph.relate("D", "C", "knows", &prov).unwrap();
 
-        let paths = graph.find_all_paths("A", "C", 5, None, None).unwrap();
+        let paths = graph.find_all_paths("A", "C", 5, None, None, None).unwrap();
         assert!(paths.len() >= 2, "should find at least 2 paths, got {}", paths.len());
         for path in &paths {
             assert_eq!(path.first().unwrap(), "A");
@@ -561,7 +574,7 @@ mod path_tests {
         graph.store("Y", &prov).unwrap();
         // No edges between X and Y
 
-        let paths = graph.find_all_paths("X", "Y", 5, None, None).unwrap();
+        let paths = graph.find_all_paths("X", "Y", 5, None, None, None).unwrap();
         assert!(paths.is_empty(), "disconnected nodes should return no paths");
     }
 
@@ -582,14 +595,14 @@ mod path_tests {
         graph.relate("D", "C", "knows", &prov).unwrap();
 
         // Via B should only return paths through B
-        let paths = graph.find_all_paths("A", "C", 5, None, Some("B")).unwrap();
+        let paths = graph.find_all_paths("A", "C", 5, None, Some("B"), None).unwrap();
         assert!(!paths.is_empty(), "should find at least 1 path via B");
         for path in &paths {
             assert!(path.contains(&"B".to_string()), "every path must contain B");
         }
 
         // Via D should only return paths through D
-        let paths_d = graph.find_all_paths("A", "C", 5, None, Some("D")).unwrap();
+        let paths_d = graph.find_all_paths("A", "C", 5, None, Some("D"), None).unwrap();
         assert!(!paths_d.is_empty(), "should find at least 1 path via D");
         for path in &paths_d {
             assert!(path.contains(&"D".to_string()), "every path must contain D");
@@ -611,15 +624,42 @@ mod path_tests {
         graph.relate("B", "C", "knows", &prov).unwrap();
 
         // Without min_depth, should find both 1-hop and 2-hop paths
-        let all_paths = graph.find_all_paths("A", "C", 5, None, None).unwrap();
+        let all_paths = graph.find_all_paths("A", "C", 5, None, None, None).unwrap();
         assert!(all_paths.len() >= 2, "should find at least 2 paths, got {}", all_paths.len());
 
         // min_depth=2 should skip the direct A->C path (1 hop)
-        let filtered = graph.find_all_paths("A", "C", 5, Some(2), None).unwrap();
+        let filtered = graph.find_all_paths("A", "C", 5, Some(2), None, None).unwrap();
         for path in &filtered {
             let hops = path.len() - 1;
             assert!(hops >= 2, "path should have at least 2 hops, got {}", hops);
         }
         assert!(!filtered.is_empty(), "should find at least 1 path with >= 2 hops");
+    }
+
+    #[test]
+    fn test_find_paths_skip_types() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut graph = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+        // Create A -> FactNode -> B  (FactNode is type "Fact")
+        graph.store("A", &prov).unwrap();
+        graph.store("FactNode", &prov).unwrap();
+        let _ = graph.set_node_type("FactNode", "Fact");
+        graph.store("B", &prov).unwrap();
+        graph.relate("A", "FactNode", "mentions", &prov).unwrap();
+        graph.relate("FactNode", "B", "about", &prov).unwrap();
+
+        // Without skip: should find path A -> FactNode -> B
+        let paths = graph.find_all_paths("A", "B", 5, None, None, None).unwrap();
+        assert!(!paths.is_empty(), "should find path without skip_types");
+
+        // With skip_types=["Fact"]: FactNode is intermediary, should be skipped -> no path
+        let paths_skip = graph.find_all_paths("A", "B", 5, None, None, Some(&["Fact"])).unwrap();
+        assert!(paths_skip.is_empty(), "should find no path when Fact nodes are skipped");
+
+        // skip_types should never skip the destination
+        let paths_to_fact = graph.find_all_paths("A", "FactNode", 5, None, None, Some(&["Fact"])).unwrap();
+        assert!(!paths_to_fact.is_empty(), "should still find path when destination is a Fact");
     }
 }

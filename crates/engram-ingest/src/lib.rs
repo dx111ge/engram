@@ -83,7 +83,7 @@ pub use ner_chain::{ChainStrategy, NerChain};
 pub use rel_chain::RelationChain;
 pub use rel_gazetteer::{RelationGazetteer, RelationGazetteerExtractor, RelGazetteerEntry};
 pub use rel_kge::{KgeConfig, KgeModel, KgeRelationExtractor, KgeTrainStats};
-pub use rel_knowledge_base::{KbEndpoint, KbRelationExtractor};
+pub use rel_knowledge_base::{DiscoveredPair, KbEndpoint, KbRelationExtractor};
 pub use rel_traits::{CandidateRelation, RelationExtractionInput, RelationExtractor};
 pub use resolver::{ConservativeResolver, ResolverConfig};
 pub use rules::RuleBasedNer;

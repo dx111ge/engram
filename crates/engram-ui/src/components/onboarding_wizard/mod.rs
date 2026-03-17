@@ -89,6 +89,12 @@ pub fn OnboardingWizard(
     // New entity input
     let (new_entity_label, set_new_entity_label) = signal(String::new());
     let (new_entity_type, set_new_entity_type) = signal("entity".to_string());
+    // Relation review state (seed phase 2)
+    let (seed_review_connections, set_seed_review_connections) = signal(
+        Vec::<crate::components::relation_review::ReviewConnection>::new()
+    );
+    let (seed_known_rel_types, set_seed_known_rel_types) = signal(Vec::<String>::new());
+    let (seed_review_submitting, set_seed_review_submitting) = signal(false);
 
     // Ollama model fetching
     let (ollama_embed_models, set_ollama_embed_models) = signal(Vec::<String>::new());
@@ -682,13 +688,16 @@ pub fn OnboardingWizard(
                             seed_text, set_seed_text,
                             seed_phase, set_seed_phase,
                             seed_aoi, set_seed_aoi,
-                            set_seed_session_id,
+                            seed_session_id, set_seed_session_id,
                             seed_entities, set_seed_entities,
                             new_entity_label, set_new_entity_label,
                             new_entity_type, set_new_entity_type,
                             analyzing, seed_result, set_seed_result,
                             do_analyze, do_ingest,
                             set_step,
+                            seed_review_connections, set_seed_review_connections,
+                            seed_known_rel_types, set_seed_known_rel_types,
+                            seed_review_submitting, set_seed_review_submitting,
                         ),
                         STEP_READY => steps_config::render_step_ready(
                             embed_choice, ner_choice, llm_choice, quant_choice,
