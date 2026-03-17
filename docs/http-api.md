@@ -532,6 +532,101 @@ Response:
 {"configured": true}
 ```
 
+#### POST /ingest (review mode) -- Analyze without committing
+
+When `review: true` is set, the pipeline runs NER + RE but does NOT commit to the graph. Instead, results are stored in a review session. Relations are tiered by confidence for human review before selective commit.
+
+```bash
+curl -X POST http://localhost:3030/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "items": [{"content": "Stoltenberg met Putin in Oslo to discuss NATO expansion."}],
+    "source": "analyst",
+    "review": true
+  }'
+```
+
+Response includes `review_session:<id>` in warnings:
+```json
+{"facts_stored": 0, "relations_created": 0, "duration_ms": 342, "warnings": ["review_session:ingest-00182a..."]}
+```
+
+#### GET /ingest/review?session=xxx -- Get tiered relation groups
+
+Returns entities and relations from a review session, grouped into 4 tiers:
+- **confirmed** -- SPARQL >= 0.70 or GLiNER2 >= 0.70 (auto-accepted)
+- **likely** -- GLiNER2 0.50-0.70 (quick confirm/reject)
+- **uncertain** -- GLiNER2 < 0.50 (careful review)
+- **no_relation** -- co-occurred but GLiNER2 found no relation type
+
+```bash
+curl http://localhost:3030/ingest/review?session=ingest-00182a...
+```
+
+#### POST /ingest/review/confirm -- Commit reviewed relations
+
+Accepts/rejects/modifies relations from a review session, then commits to graph.
+
+```bash
+curl -X POST http://localhost:3030/ingest/review/confirm \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "session_id": "ingest-00182a...",
+    "accepted": [0, 1, 3],
+    "modified": [{"idx": 2, "new_rel_type": "opposes"}],
+    "skipped": [4, 5]
+  }'
+```
+
+### Seed Enrichment (Interactive)
+
+Multi-phase interactive flow for seeding an empty graph with world knowledge.
+
+#### POST /ingest/seed/start -- Start seed session
+
+Runs NER + area-of-interest detection on seed text. Returns session ID, entities, and detected AoI.
+
+#### POST /ingest/seed/confirm-aoi -- Confirm area of interest
+
+Triggers entity linking (Wikipedia/Wikidata), co-occurrence discovery, SPARQL relation lookup, and GLiNER2 classification. Results streamed via SSE.
+
+#### POST /ingest/seed/confirm-entities -- Confirm entity matches
+
+User confirms/skips entities. Canonical names and QIDs stored.
+
+#### GET /ingest/seed/connections?session_id=xxx -- Get tiered connections for review
+
+Returns discovered connections grouped by confidence tier (same 4-tier structure as ingest review).
+
+#### POST /ingest/seed/confirm-relations -- Review relations before commit
+
+```bash
+curl -X POST http://localhost:3030/ingest/seed/confirm-relations \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "session_id": "seed-xxx",
+    "accepted": [0, 1, 3],
+    "modified": [{"idx": 2, "new_rel_type": "opposes"}],
+    "skipped": [4, 5]
+  }'
+```
+
+#### POST /ingest/seed/commit -- Write reviewed entities + relations to graph
+
+#### GET /ingest/seed/stream?session_id=xxx -- SSE stream for seed enrichment events
+
+#### GET /config/relation-types -- List all known relation types
+
+Returns flat array of all relation types: configured templates + built-in defaults + learned from graph gazetteer.
+
+```bash
+curl http://localhost:3030/config/relation-types
+```
+
+```json
+{"types": ["based_in", "born_in", "citizen_of", "founded", "headquartered_in", "leads", ...]}
+```
+
 #### POST /ingest/webhook/{pipeline_id} -- Webhook receiver for external data
 
 Receives data from external systems (CI/CD, monitoring, RSS aggregators) and routes it through the specified pipeline.
