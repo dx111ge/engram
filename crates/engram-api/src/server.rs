@@ -31,6 +31,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/query", post(handlers::query))
         .route("/similar", post(handlers::similar))
         .route("/search", post(handlers::search))
+        .route("/paths", post(handlers::find_paths))
         .route("/ask", post(handlers::ask))
         .route("/tell", post(handlers::tell))
         .route("/node/{label}", get(handlers::get_node))

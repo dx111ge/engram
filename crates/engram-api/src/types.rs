@@ -534,3 +534,20 @@ pub struct IngestResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kb_stats: Option<KbStatsResponse>,
 }
+
+// ── Path finding types ──
+
+/// Request body for `POST /paths`.
+#[derive(Deserialize)]
+pub struct PathsRequest {
+    pub from: String,
+    pub to: String,
+    pub max_depth: Option<u32>,
+}
+
+/// Response for `POST /paths`.
+#[derive(Serialize)]
+pub struct PathsResponse {
+    pub paths: Vec<Vec<String>>,
+    pub count: usize,
+}

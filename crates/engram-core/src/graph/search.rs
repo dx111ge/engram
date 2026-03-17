@@ -414,4 +414,126 @@ impl Graph {
             }
         }
     }
+
+    /// Find all paths between two nodes using BFS, up to max_depth hops.
+    /// Returns paths as vectors of node labels.
+    pub fn find_all_paths(
+        &self,
+        from_label: &str,
+        to_label: &str,
+        max_depth: u32,
+    ) -> Result<Vec<Vec<String>>> {
+        let from_id = self.find_node_id(from_label)?
+            .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
+        let to_id = self.find_node_id(to_label)?
+            .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
+
+        if from_id == to_id {
+            return Ok(vec![vec![from_label.to_string()]]);
+        }
+
+        let mut all_paths = Vec::new();
+        // DFS with path tracking (bounded by max_depth)
+        let mut stack: Vec<(u64, Vec<u64>)> = vec![(from_id, vec![from_id])];
+
+        while let Some((current, path)) = stack.pop() {
+            if path.len() as u32 > max_depth + 1 {
+                continue;
+            }
+
+            // Get neighbors (both directions)
+            let mut neighbors = Vec::new();
+            if let Some(edge_slots) = self.adj_out.get(&current) {
+                for &edge_slot in edge_slots {
+                    if let Ok(edge) = self.brain.read_edge(edge_slot) {
+                        if !edge.is_deleted() {
+                            neighbors.push(edge.to_node);
+                        }
+                    }
+                }
+            }
+            if let Some(edge_slots) = self.adj_in.get(&current) {
+                for &edge_slot in edge_slots {
+                    if let Ok(edge) = self.brain.read_edge(edge_slot) {
+                        if !edge.is_deleted() {
+                            neighbors.push(edge.from_node);
+                        }
+                    }
+                }
+            }
+
+            for neighbor in neighbors {
+                if neighbor == to_id {
+                    // Found a path!
+                    let mut full_path = path.clone();
+                    full_path.push(to_id);
+                    // Convert IDs to labels
+                    let label_path: Vec<String> = full_path.iter()
+                        .filter_map(|&id| self.label_for_id(id).ok())
+                        .collect();
+                    if label_path.len() == full_path.len() {
+                        all_paths.push(label_path);
+                    }
+                    // Cap at 20 paths to avoid combinatorial explosion
+                    if all_paths.len() >= 20 {
+                        return Ok(all_paths);
+                    }
+                } else if !path.contains(&neighbor) && (path.len() as u32) < max_depth + 1 {
+                    let mut new_path = path.clone();
+                    new_path.push(neighbor);
+                    stack.push((neighbor, new_path));
+                }
+            }
+        }
+
+        Ok(all_paths)
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_provenance() -> Provenance {
+        Provenance::user("test")
+    }
+
+    #[test]
+    fn test_find_all_paths_basic() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut graph = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+        // Create A -> B -> C and A -> D -> C
+        graph.store("A", &prov).unwrap();
+        graph.store("B", &prov).unwrap();
+        graph.store("C", &prov).unwrap();
+        graph.store("D", &prov).unwrap();
+        graph.relate("A", "B", "knows", &prov).unwrap();
+        graph.relate("B", "C", "knows", &prov).unwrap();
+        graph.relate("A", "D", "knows", &prov).unwrap();
+        graph.relate("D", "C", "knows", &prov).unwrap();
+
+        let paths = graph.find_all_paths("A", "C", 5).unwrap();
+        assert!(paths.len() >= 2, "should find at least 2 paths, got {}", paths.len());
+        for path in &paths {
+            assert_eq!(path.first().unwrap(), "A");
+            assert_eq!(path.last().unwrap(), "C");
+        }
+    }
+
+    #[test]
+    fn test_find_all_paths_no_path() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut graph = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+        graph.store("X", &prov).unwrap();
+        graph.store("Y", &prov).unwrap();
+        // No edges between X and Y
+
+        let paths = graph.find_all_paths("X", "Y", 5).unwrap();
+        assert!(paths.is_empty(), "disconnected nodes should return no paths");
+    }
 }

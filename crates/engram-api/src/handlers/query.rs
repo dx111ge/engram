@@ -335,3 +335,20 @@ pub async fn derive(
         flags_raised: result.flags_raised,
     }))
 }
+
+// ── POST /paths ──
+
+pub async fn find_paths(
+    State(state): State<AppState>,
+    Json(req): Json<PathsRequest>,
+) -> ApiResult<PathsResponse> {
+    let g = state.graph.read().map_err(|_| read_lock_err())?;
+    let max_depth = req.max_depth.unwrap_or(5).min(8); // Cap at 8 to prevent explosion
+
+    let paths = g
+        .find_all_paths(&req.from, &req.to, max_depth)
+        .map_err(|e| api_err(StatusCode::NOT_FOUND, e.to_string()))?;
+
+    let count = paths.len();
+    Ok(Json(PathsResponse { paths, count }))
+}
