@@ -60,7 +60,9 @@ fn trust_slider_inline(
     let key_write = key.to_string();
     let key_display = key.to_string();
     view! {
-        <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; padding: 0.4rem 0.6rem; background: rgba(255,255,255,0.03); border-radius: 4px;">
+        <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; padding: 0.4rem 0.6rem; background: rgba(255,255,255,0.03); border-radius: 4px;"
+            on:click=move |ev| ev.stop_propagation()
+        >
             <i class="fa-solid fa-shield-halved" style="font-size: 0.75rem; color: rgba(255,255,255,0.4);"></i>
             <span style="font-size: 0.75rem; color: rgba(255,255,255,0.5); white-space: nowrap;">"Trust:"</span>
             <input type="range" min="0" max="100" step="5"
@@ -69,8 +71,10 @@ fn trust_slider_inline(
                     let vals = source_trust_values.get();
                     vals.iter().find(|(k, _)| k == &key_read).map(|(_, v)| *v).unwrap_or(default_pct).to_string()
                 }
+                on:click=move |ev| ev.stop_propagation()
                 on:input=move |ev| {
                     use wasm_bindgen::JsCast;
+                    ev.stop_propagation();
                     let val = ev.target()
                         .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
                         .and_then(|el| el.value().parse::<u32>().ok())
