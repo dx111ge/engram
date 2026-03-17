@@ -138,6 +138,8 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/rel-model", get(handlers::check_rel_model))
         .route("/config/relation-templates/export", get(handlers::export_relation_templates))
         .route("/config/relation-templates/import", post(handlers::import_relation_templates))
+        // Edge operations
+        .route("/edge", patch(handlers::rename_edge))
         // Admin
         .route("/admin/reset", post(handlers::admin_reset))
         .route("/admin/dedup-edges", post(handlers::admin_dedup_edges))

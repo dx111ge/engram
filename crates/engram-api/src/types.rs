@@ -535,6 +535,27 @@ pub struct IngestResponse {
     pub kb_stats: Option<KbStatsResponse>,
 }
 
+// ── Edge rename types ──
+
+/// Request body for `PATCH /edge`.
+#[derive(Deserialize)]
+pub struct RenameEdgeRequest {
+    pub from: String,
+    pub to: String,
+    pub old_rel_type: String,
+    pub new_rel_type: String,
+}
+
+/// Response for `PATCH /edge`.
+#[derive(Serialize)]
+pub struct RenameEdgeResponse {
+    pub renamed: bool,
+    pub from: String,
+    pub to: String,
+    pub old_rel_type: String,
+    pub new_rel_type: String,
+}
+
 // ── Path finding types ──
 
 /// Request body for `POST /paths`.

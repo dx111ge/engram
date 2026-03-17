@@ -310,3 +310,47 @@ pub async fn batch_stream(
         errors: if errors.is_empty() { None } else { Some(errors) },
     }))
 }
+
+// ── PATCH /edge ──
+
+pub async fn rename_edge(
+    State(state): State<AppState>,
+    Json(req): Json<RenameEdgeRequest>,
+) -> ApiResult<RenameEdgeResponse> {
+    let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+
+    let renamed = g
+        .rename_edge(&req.from, &req.to, &req.old_rel_type, &req.new_rel_type)
+        .map_err(|e| api_err(StatusCode::NOT_FOUND, e.to_string()))?;
+
+    if renamed {
+        let brain_path = g.path().to_path_buf();
+        drop(g);
+        state.mark_dirty();
+
+        // Best-effort relation gazetteer update: teach future ingests the new type
+        #[cfg(feature = "ingest")]
+        {
+            if let Ok(mut gaz) = engram_ingest::RelationGazetteer::load(&brain_path) {
+                let normalized = req.new_rel_type.to_lowercase().replace(' ', "_").replace('-', "_");
+                gaz.insert(engram_ingest::RelGazetteerEntry {
+                    head: req.from.to_lowercase(),
+                    tail: req.to.to_lowercase(),
+                    rel_type: normalized,
+                    confidence: 0.95,
+                });
+                let _ = gaz.save();
+            }
+        }
+    } else {
+        drop(g);
+    }
+
+    Ok(Json(RenameEdgeResponse {
+        renamed,
+        from: req.from,
+        to: req.to,
+        old_rel_type: req.old_rel_type,
+        new_rel_type: req.new_rel_type,
+    }))
+}

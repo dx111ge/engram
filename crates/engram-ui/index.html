@@ -437,6 +437,58 @@
                   row.appendChild(confSpan);
                 }
 
+                var editBtn = document.createElement('span');
+                editBtn.innerHTML = '<i class="fa-solid fa-pen" style="font-size:0.65rem;"></i>';
+                editBtn.style.cssText = 'cursor:pointer; color:rgba(255,255,255,0.3); margin-left:6px; padding:2px;';
+                editBtn.title = 'Rename this relation';
+                editBtn.addEventListener('click', (function(child, labelSpan, row) {
+                  return function(ev) {
+                    ev.stopPropagation();
+                    var childSrc = typeof link.source === 'object' ? link.source.id : link.source;
+                    var childTgt = typeof link.target === 'object' ? link.target.id : link.target;
+                    var oldLabel = child.label || 'related_to';
+                    labelSpan.style.display = 'none';
+                    var inp = document.createElement('input');
+                    inp.type = 'text';
+                    inp.value = oldLabel;
+                    inp.style.cssText = 'flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:2px 4px; font-size:0.75rem; border-radius:2px;';
+                    row.insertBefore(inp, labelSpan.nextSibling);
+                    inp.focus();
+                    inp.select();
+
+                    function commitRename() {
+                      var nv = inp.value.trim();
+                      if (!nv || nv === oldLabel) {
+                        inp.remove();
+                        labelSpan.style.display = '';
+                        return;
+                      }
+                      var xhr = new XMLHttpRequest();
+                      xhr.open('PATCH', '/edge', false);
+                      xhr.setRequestHeader('Content-Type', 'application/json');
+                      var token = localStorage.getItem('engram_token');
+                      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+                      xhr.send(JSON.stringify({ from: childSrc, to: childTgt, old_rel_type: oldLabel, new_rel_type: nv }));
+                      if (xhr.status === 200 && JSON.parse(xhr.responseText).renamed) {
+                        var normalized = nv.toLowerCase().replace(/ /g, '_').replace(/-/g, '_');
+                        child.label = normalized;
+                        labelSpan.textContent = normalized;
+                      }
+                      inp.remove();
+                      labelSpan.style.display = '';
+                    }
+
+                    inp.addEventListener('keydown', function(ke) {
+                      ke.stopPropagation();
+                      if (ke.key === 'Enter') commitRename();
+                      if (ke.key === 'Escape') { inp.remove(); labelSpan.style.display = ''; }
+                    });
+                    inp.addEventListener('blur', commitRename);
+                    inp.addEventListener('click', function(ce) { ce.stopPropagation(); });
+                  };
+                })(child, labelSpan, row));
+                row.appendChild(editBtn);
+
                 popup.appendChild(row);
               });
 
@@ -472,6 +524,72 @@
               if (link.valid_from || link.valid_to) {
                 tip.innerHTML += '<br><span style="color:rgba(255,255,255,0.4);font-size:0.7rem;">' + (link.valid_from || '?') + ' \u2013 ' + (link.valid_to || 'present') + '</span>';
               }
+
+              // Rename row
+              var renameRow = document.createElement('div');
+              renameRow.style.marginTop = '6px';
+              renameRow.style.display = 'flex';
+              renameRow.style.alignItems = 'center';
+              renameRow.style.gap = '4px';
+
+              var renameInput = document.createElement('input');
+              renameInput.type = 'text';
+              renameInput.value = link.label || 'related_to';
+              renameInput.style.cssText = 'flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:3px 6px; font-size:0.75rem; border-radius:3px;';
+              renameInput.placeholder = 'New relation type...';
+
+              var renameBtn = document.createElement('button');
+              renameBtn.innerHTML = '<i class="fa-solid fa-check"></i>';
+              renameBtn.style.cssText = 'background:var(--accent-bright, #4fc3f7); border:none; color:#000; padding:3px 8px; border-radius:3px; cursor:pointer; font-size:0.7rem;';
+
+              function doRename() {
+                var newType = renameInput.value.trim();
+                if (!newType || newType === (link.label || 'related_to')) return;
+                var xhr = new XMLHttpRequest();
+                xhr.open('PATCH', '/edge', false);
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                var token = localStorage.getItem('engram_token');
+                if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+                xhr.send(JSON.stringify({
+                  from: src,
+                  to: tgt,
+                  old_rel_type: link.label || 'related_to',
+                  new_rel_type: newType
+                }));
+                if (xhr.status === 200) {
+                  var resp = JSON.parse(xhr.responseText);
+                  if (resp.renamed) {
+                    var normalized = newType.toLowerCase().replace(/ /g, '_').replace(/-/g, '_');
+                    link.label = normalized;
+                    if (self._originalLinks) {
+                      self._originalLinks.forEach(function(ol) {
+                        var olSrc = typeof ol.source === 'object' ? ol.source.id : ol.source;
+                        var olTgt = typeof ol.target === 'object' ? ol.target.id : ol.target;
+                        if (olSrc === src && olTgt === tgt && (ol.label || 'related_to') === (link.label || 'related_to')) {
+                          ol.label = normalized;
+                        }
+                      });
+                    }
+                    if (tip) { tip.remove(); self._edgePopupEl = null; }
+                    if (self.instance) {
+                      self.instance.linkThreeObject(self.instance.linkThreeObject());
+                      self.instance.linkLabel(self.instance.linkLabel());
+                    }
+                  }
+                }
+              }
+
+              renameBtn.addEventListener('click', doRename);
+              renameInput.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') doRename();
+                e.stopPropagation();
+              });
+              renameInput.addEventListener('click', function(e) { e.stopPropagation(); });
+
+              renameRow.appendChild(renameInput);
+              renameRow.appendChild(renameBtn);
+              tip.appendChild(renameRow);
+
               document.body.appendChild(tip);
               self._edgePopupEl = tip;
               setTimeout(function() {

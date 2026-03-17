@@ -450,6 +450,26 @@ impl Graph {
         Ok(None)
     }
 
+    /// Rename an edge's relationship type. Returns true if the edge was found and renamed.
+    pub fn rename_edge(
+        &mut self,
+        from_label: &str,
+        to_label: &str,
+        old_rel_type: &str,
+        new_rel_type: &str,
+    ) -> Result<bool> {
+        let slot = match self.find_edge_slot(from_label, to_label, old_rel_type)? {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        let normalized = normalize_rel_type(new_rel_type);
+        let new_type_id = self.type_registry.get_or_create(&normalized);
+        self.brain.update_edge_field(slot, |e| {
+            e.edge_type = new_type_id;
+        })?;
+        Ok(true)
+    }
+
     /// Update the confidence of an edge by slot index.
     pub fn update_edge_confidence(&mut self, slot: u64, confidence: f32) -> Result<()> {
         self.brain.update_edge_field(slot, |e| {

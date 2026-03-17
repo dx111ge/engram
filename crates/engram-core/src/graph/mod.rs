@@ -1940,4 +1940,26 @@ then flag(node, "low confidence")
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].relationship, "significant_event");
     }
+
+    #[test]
+    fn test_rename_edge() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+        g.store("Alice", &prov).unwrap();
+        g.store("Acme", &prov).unwrap();
+        g.relate("Alice", "Acme", "related_to", &prov).unwrap();
+
+        let renamed = g.rename_edge("Alice", "Acme", "related_to", "works at").unwrap();
+        assert!(renamed);
+
+        let edges = g.edges_from("Alice").unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].relationship, "works_at"); // normalized
+
+        // Old name should not be found
+        let slot = g.find_edge_slot("Alice", "Acme", "related_to").unwrap();
+        assert!(slot.is_none());
+    }
 }
