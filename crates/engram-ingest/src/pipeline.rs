@@ -85,7 +85,9 @@ fn make_fact_label(_entity: &str, source_text: &str) -> String {
         slug.push_str(&clean.to_lowercase());
         if slug.len() >= 50 { break; }
     }
-    slug.truncate(50);
+    // Safe truncate: snap to char boundary to avoid panic on multi-byte UTF-8
+    let cut = snap_to_char_boundary(&slug, 50);
+    slug.truncate(cut);
     let mut hasher = DefaultHasher::new();
     source_text.hash(&mut hasher);
     let hash = hasher.finish();
