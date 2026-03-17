@@ -34,7 +34,7 @@ pub fn GraphPage() -> impl IntoView {
     let (hidden_types, set_hidden_types) = signal(Vec::<String>::new());
     let (hidden_rels, set_hidden_rels) = signal(Vec::<String>::new());
     let (start_node, set_start_node) = signal(Option::<String>::None);
-    let (show_edge_labels, set_show_edge_labels) = signal(false);
+    let (show_edge_labels, set_show_edge_labels) = signal(true);
     let (edge_bundling, set_edge_bundling) = signal(false);
     let (temporal_current_only, set_temporal_current_only) = signal(false);
     let (highlighted_node, set_highlighted_node) = signal(Option::<String>::None);

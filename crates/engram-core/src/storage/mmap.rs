@@ -89,7 +89,10 @@ impl MmapFile {
 
     /// Get a mutable reference to the header.
     ///
-    /// SAFETY: Caller must ensure exclusive write access.
+    /// # Safety
+    /// Caller must ensure exclusive write access. The mmap region is
+    /// shared memory so `&self` -> `&mut` is correct here (interior mutability via raw pointer).
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn header_mut(&self) -> &mut Header {
         // SAFETY: Caller guarantees exclusive access
         unsafe { &mut *(self.ptr as *mut Header) }

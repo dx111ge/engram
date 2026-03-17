@@ -383,6 +383,107 @@
             node.fx = node.x;
             node.fy = node.y;
             node.fz = node.z;
+          })
+          .onLinkClick(function(link, event) {
+            // Dismiss any existing popup
+            if (self._edgePopupEl) {
+              self._edgePopupEl.remove();
+              self._edgePopupEl = null;
+            }
+            if (!link) return;
+
+            if (link._bundled && link._children) {
+              // Bundled edge: show popup listing individual edges
+              var popup = document.createElement('div');
+              popup.className = 'engram-context-menu';
+              popup.style.left = (event ? event.clientX : 200) + 'px';
+              popup.style.top = (event ? event.clientY : 200) + 'px';
+              popup.style.maxHeight = '300px';
+              popup.style.overflowY = 'auto';
+
+              var header = document.createElement('div');
+              header.style.padding = '6px 10px';
+              header.style.fontWeight = '600';
+              header.style.fontSize = '0.8rem';
+              header.style.borderBottom = '1px solid rgba(255,255,255,0.1)';
+              var src = typeof link.source === 'object' ? link.source.id : link.source;
+              var tgt = typeof link.target === 'object' ? link.target.id : link.target;
+              header.textContent = src + ' \u2194 ' + tgt + ' (' + link._children.length + ' relations)';
+              popup.appendChild(header);
+
+              link._children.forEach(function(child) {
+                var row = document.createElement('div');
+                row.style.padding = '5px 10px';
+                row.style.fontSize = '0.78rem';
+                row.style.display = 'flex';
+                row.style.justifyContent = 'space-between';
+                row.style.alignItems = 'center';
+                row.style.cursor = 'default';
+                row.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
+                row.onmouseenter = function() { row.style.background = 'rgba(255,255,255,0.05)'; };
+                row.onmouseleave = function() { row.style.background = 'none'; };
+
+                var labelSpan = document.createElement('span');
+                labelSpan.textContent = child.label || 'related_to';
+                labelSpan.style.color = '#e0e0e0';
+                row.appendChild(labelSpan);
+
+                if (child.title) {
+                  var confSpan = document.createElement('span');
+                  confSpan.textContent = child.title;
+                  confSpan.style.color = 'rgba(255,255,255,0.4)';
+                  confSpan.style.fontSize = '0.7rem';
+                  confSpan.style.marginLeft = '8px';
+                  row.appendChild(confSpan);
+                }
+
+                popup.appendChild(row);
+              });
+
+              document.body.appendChild(popup);
+              self._edgePopupEl = popup;
+
+              // Close on click outside
+              setTimeout(function() {
+                document.addEventListener('click', function closePopup(e) {
+                  if (popup && !popup.contains(e.target)) {
+                    popup.remove();
+                    self._edgePopupEl = null;
+                    document.removeEventListener('click', closePopup);
+                  }
+                });
+              }, 100);
+            } else {
+              // Single edge: show inline detail via node click callback
+              var src = typeof link.source === 'object' ? link.source.id : link.source;
+              var tgt = typeof link.target === 'object' ? link.target.id : link.target;
+              var detail = (link.label || 'related_to') + ' (' + (link.title || '') + ')';
+              // Show a brief tooltip
+              var tip = document.createElement('div');
+              tip.className = 'engram-context-menu';
+              tip.style.left = (event ? event.clientX : 200) + 'px';
+              tip.style.top = (event ? event.clientY : 200) + 'px';
+              tip.style.padding = '8px 12px';
+              tip.style.fontSize = '0.8rem';
+              tip.innerHTML = '<strong>' + src + '</strong> <span style="color:#4fc3f7">\u2192 ' + (link.label || 'related_to') + ' \u2192</span> <strong>' + tgt + '</strong>';
+              if (link.title) {
+                tip.innerHTML += '<br><span style="color:rgba(255,255,255,0.5);font-size:0.72rem;">Confidence: ' + link.title + '</span>';
+              }
+              if (link.valid_from || link.valid_to) {
+                tip.innerHTML += '<br><span style="color:rgba(255,255,255,0.4);font-size:0.7rem;">' + (link.valid_from || '?') + ' \u2013 ' + (link.valid_to || 'present') + '</span>';
+              }
+              document.body.appendChild(tip);
+              self._edgePopupEl = tip;
+              setTimeout(function() {
+                document.addEventListener('click', function closeTip(e) {
+                  if (tip && !tip.contains(e.target)) {
+                    tip.remove();
+                    self._edgePopupEl = null;
+                    document.removeEventListener('click', closeTip);
+                  }
+                });
+              }, 100);
+            }
           });
 
         // Right-click: show context menu
