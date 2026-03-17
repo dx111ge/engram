@@ -1,5 +1,10 @@
 use super::*;
 
+/// Normalize a relation type: lowercase, replace spaces and hyphens with underscores.
+fn normalize_rel_type(rel: &str) -> String {
+    rel.to_lowercase().replace(' ', "_").replace('-', "_")
+}
+
 /// Result of a relate() call, indicating whether the edge was created or deduplicated.
 pub struct RelateResult {
     pub edge_id: u64,
@@ -124,7 +129,8 @@ impl Graph {
         let to_node = self.find_node_id(to_label)?
             .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
 
-        let edge_type = self.type_registry.get_or_create(relationship);
+        let normalized = normalize_rel_type(relationship);
+        let edge_type = self.type_registry.get_or_create(&normalized);
 
         // Dedup: check for existing edge
         if let Some(existing_slot) = self.find_edge_slot_by_ids(from_node, to_node, edge_type)? {
@@ -167,7 +173,7 @@ impl Graph {
             edge_id,
             from: from_node,
             to: to_node,
-            rel_type: Arc::from(relationship),
+            rel_type: Arc::from(normalized.as_str()),
             confidence: edge.confidence,
         });
 
@@ -236,7 +242,8 @@ impl Graph {
             .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
         let to_node = self.find_node_id(to_label)?
             .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
-        let edge_type = self.type_registry.get_or_create(relationship);
+        let normalized = normalize_rel_type(relationship);
+        let edge_type = self.type_registry.get_or_create(&normalized);
 
         let new_vf = valid_from.map(parse_date_to_unix).unwrap_or(0);
         let new_vt = valid_to.map(parse_date_to_unix).unwrap_or(0);
@@ -304,7 +311,7 @@ impl Graph {
             edge_id,
             from: from_node,
             to: to_node,
-            rel_type: Arc::from(relationship),
+            rel_type: Arc::from(normalized.as_str()),
             confidence: edge.confidence,
         });
 

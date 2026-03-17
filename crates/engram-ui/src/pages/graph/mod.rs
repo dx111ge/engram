@@ -14,6 +14,32 @@ use crate::components::detail_modal::DetailModal;
 
 use search::search_variations;
 
+/// Humanize a fact slug: strip trailing `-XXXX` hash, replace hyphens with spaces, capitalize.
+fn humanize_fact_slug(slug: &str) -> String {
+    // Strip trailing hash: last "-" followed by 4 hex chars
+    let clean = if slug.len() > 5 {
+        let last_dash = slug.rfind('-').unwrap_or(slug.len());
+        if slug.len() - last_dash == 5
+            && slug[last_dash + 1..].chars().all(|c| c.is_ascii_hexdigit())
+        {
+            &slug[..last_dash]
+        } else {
+            slug
+        }
+    } else {
+        slug
+    };
+    let mut result: String = clean.replace('-', " ");
+    if let Some(first) = result.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    if result.chars().count() > 40 {
+        format!("{}...", result.chars().take(40).collect::<String>())
+    } else {
+        result
+    }
+}
+
 #[component]
 pub fn GraphPage() -> impl IntoView {
     let api = use_context::<ApiClient>().expect("ApiClient context");
@@ -51,6 +77,9 @@ pub fn GraphPage() -> impl IntoView {
     let (path_autocomplete_open, set_path_autocomplete_open) = signal(true);
     let (path_from, set_path_from) = signal(Option::<String>::None);
     let (path_target_query, set_path_target_query) = signal(String::new());
+    let (path_via_query, set_path_via_query) = signal(String::new());
+    let (path_min_depth, set_path_min_depth) = signal(1u32);
+    let (path_max_depth, set_path_max_depth) = signal(5u32);
     let (path_results, set_path_results) = signal(Vec::<Vec<String>>::new());
     let (path_selected, set_path_selected) = signal(Vec::<bool>::new());
 
@@ -168,8 +197,7 @@ pub fn GraphPage() -> impl IntoView {
                                 let (size, color, shape, display_label) = match ntype_lower.as_str() {
                                     "fact" => {
                                         let claim = if n.label.starts_with("Fact:") {
-                                            let trimmed = n.label.trim_start_matches("Fact:").trim();
-                                            if trimmed.chars().count() > 40 { format!("{}...", trimmed.chars().take(40).collect::<String>()) } else { trimmed.to_string() }
+                                            humanize_fact_slug(n.label.trim_start_matches("Fact:").trim())
                                         } else {
                                             let l = &n.label;
                                             if l.chars().count() > 40 { format!("{}...", l.chars().take(40).collect::<String>()) } else { l.to_string() }
@@ -285,8 +313,7 @@ pub fn GraphPage() -> impl IntoView {
                         let (size, color, shape, display_label) = match ntype_lower.as_str() {
                             "fact" => {
                                 let claim = if n.label.starts_with("Fact:") {
-                                    let trimmed = n.label.trim_start_matches("Fact:").trim();
-                                    if trimmed.chars().count() > 40 { format!("{}...", trimmed.chars().take(40).collect::<String>()) } else { trimmed.to_string() }
+                                    humanize_fact_slug(n.label.trim_start_matches("Fact:").trim())
                                 } else {
                                     let l = &n.label;
                                     if l.chars().count() > 40 { format!("{}...", l.chars().take(40).collect::<String>()) } else { l.to_string() }
@@ -349,12 +376,14 @@ pub fn GraphPage() -> impl IntoView {
         let set_pr = set_path_results.clone();
         let set_ps = set_path_selected.clone();
         let set_ptq = set_path_target_query.clone();
+        let set_pvq = set_path_via_query.clone();
         let cb = Closure::wrap(Box::new(move |ev: web_sys::CustomEvent| {
             if let Some(detail) = ev.detail().as_string() {
                 set_pf.set(Some(detail));
                 set_pr.set(Vec::new());
                 set_ps.set(Vec::new());
                 set_ptq.set(String::new());
+                set_pvq.set(String::new());
             }
         }) as Box<dyn FnMut(web_sys::CustomEvent)>);
         let _ = web_sys::window().unwrap().add_event_listener_with_callback(
@@ -526,6 +555,12 @@ pub fn GraphPage() -> impl IntoView {
                     set_path_from,
                     path_target_query,
                     set_path_target_query,
+                    path_via_query,
+                    set_path_via_query,
+                    path_min_depth,
+                    set_path_min_depth,
+                    path_max_depth,
+                    set_path_max_depth,
                     path_autocomplete_open,
                     set_path_autocomplete_open,
                     path_results,

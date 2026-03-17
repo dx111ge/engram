@@ -1926,4 +1926,18 @@ then flag(node, "low confidence")
         let edges = g.edges_from("Alice").unwrap();
         assert_eq!(edges.len(), 1, "only 1 active edge should remain after dedup");
     }
+
+    #[test]
+    fn test_relate_normalizes_spaces() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+        g.store("Alice", &prov).unwrap();
+        g.store("Berlin", &prov).unwrap();
+        g.relate("Alice", "Berlin", "significant event", &prov).unwrap();
+        let edges = g.edges_from("Alice").unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].relationship, "significant_event");
+    }
 }

@@ -273,7 +273,7 @@ pub(crate) fn render_step_web_search(
                 <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.25rem;">
                     "How much should engram trust web search results?"
                 </p>
-                {trust_slider_inline(source_trust_values, "web", 30)}
+                {trust_slider_inline(source_trust_values, "web", 90)}
             </div>
         </div>
     }.into_any()

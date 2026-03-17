@@ -211,10 +211,14 @@ impl RelationExtractor for KbRelationExtractor {
             if let Some(article) = self.fetch_area_of_interest_article(&area_of_interest, &input.language) {
                 let cooccurrences = self.find_cooccurrences(&article, &entity_labels);
                 for (a, b) in &cooccurrences {
+                    let inferred = crate::rel_type_templates::infer_from_types(
+                        &input.entities[*a].entity_type,
+                        &input.entities[*b].entity_type,
+                    );
                     all_relations.push(CandidateRelation {
                         head_idx: *a,
                         tail_idx: *b,
-                        rel_type: "related_to".to_string(),
+                        rel_type: inferred.clone(),
                         confidence: 0.60,
                         method: ExtractionMethod::KnowledgeBase,
                     });
@@ -224,7 +228,7 @@ impl RelationExtractor for KbRelationExtractor {
                         session_id: session_id.clone(),
                         from: Arc::from(entity_labels[*a].as_str()),
                         to: Arc::from(entity_labels[*b].as_str()),
-                        rel_type: Arc::from("related_to"),
+                        rel_type: Arc::from(inferred.as_str()),
                         source: Arc::from("area_of_interest_article"),
                     });
                 }
@@ -242,10 +246,14 @@ impl RelationExtractor for KbRelationExtractor {
                         &unmentioned, &entity_labels, &area_of_interest, &input.language,
                     );
                     for (a, b) in &extra_pairs {
+                        let inferred = crate::rel_type_templates::infer_from_types(
+                            &input.entities[*a].entity_type,
+                            &input.entities[*b].entity_type,
+                        );
                         all_relations.push(CandidateRelation {
                             head_idx: *a,
                             tail_idx: *b,
-                            rel_type: "related_to".to_string(),
+                            rel_type: inferred.clone(),
                             confidence: 0.55,
                             method: ExtractionMethod::KnowledgeBase,
                         });
@@ -255,7 +263,7 @@ impl RelationExtractor for KbRelationExtractor {
                             session_id: session_id.clone(),
                             from: Arc::from(entity_labels[*a].as_str()),
                             to: Arc::from(entity_labels[*b].as_str()),
-                            rel_type: Arc::from("related_to"),
+                            rel_type: Arc::from(inferred.as_str()),
                             source: Arc::from("entity_context_search"),
                         });
                     }
@@ -294,10 +302,14 @@ impl RelationExtractor for KbRelationExtractor {
                                         (r.head_idx == oidx && r.tail_idx == uidx)
                                     );
                                     if !already {
+                                        let inferred = crate::rel_type_templates::infer_from_types(
+                                            &input.entities[uidx].entity_type,
+                                            &input.entities[oidx].entity_type,
+                                        );
                                         all_relations.push(CandidateRelation {
                                             head_idx: uidx,
                                             tail_idx: oidx,
-                                            rel_type: "related_to".to_string(),
+                                            rel_type: inferred.clone(),
                                             confidence: 0.50,
                                             method: ExtractionMethod::KnowledgeBase,
                                         });
@@ -307,7 +319,7 @@ impl RelationExtractor for KbRelationExtractor {
                                             session_id: session_id.clone(),
                                             from: Arc::from(entity_labels[uidx].as_str()),
                                             to: Arc::from(entity_labels[oidx].as_str()),
-                                            rel_type: Arc::from("related_to"),
+                                            rel_type: Arc::from(inferred.as_str()),
                                             source: Arc::from("web_search"),
                                         });
                                     }
@@ -502,10 +514,14 @@ impl RelationExtractor for KbRelationExtractor {
 
                 for &idx in &disconnected {
                     if idx == anchor_idx { continue; }
+                    let inferred = crate::rel_type_templates::infer_from_types(
+                        &input.entities[idx].entity_type,
+                        &input.entities[anchor_idx].entity_type,
+                    );
                     all_relations.push(CandidateRelation {
                         head_idx: idx,
                         tail_idx: anchor_idx,
-                        rel_type: "related_to".to_string(),
+                        rel_type: inferred.clone(),
                         confidence: 0.45,
                         method: ExtractionMethod::KnowledgeBase,
                     });
@@ -514,7 +530,7 @@ impl RelationExtractor for KbRelationExtractor {
                         session_id: session_id.clone(),
                         from: Arc::from(entity_labels[idx].as_str()),
                         to: Arc::from(entity_labels[anchor_idx].as_str()),
-                        rel_type: Arc::from("related_to"),
+                        rel_type: Arc::from(inferred.as_str()),
                         source: Arc::from("co-extracted_seed_text"),
                     });
                 }

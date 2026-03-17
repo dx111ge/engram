@@ -346,7 +346,7 @@ pub async fn find_paths(
     let max_depth = req.max_depth.unwrap_or(5).min(8); // Cap at 8 to prevent explosion
 
     let paths = g
-        .find_all_paths(&req.from, &req.to, max_depth)
+        .find_all_paths(&req.from, &req.to, max_depth, req.min_depth, req.via.as_deref())
         .map_err(|e| api_err(StatusCode::NOT_FOUND, e.to_string()))?;
 
     let count = paths.len();

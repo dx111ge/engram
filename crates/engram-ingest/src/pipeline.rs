@@ -68,9 +68,20 @@ fn extract_snippet(text: &str, span: (usize, usize), max_chars: usize) -> String
     }
 }
 
+/// Check if a date text contains a specific year (19xx or 20xx).
+fn is_specific_date(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    chars.windows(4).any(|w| {
+        w.iter().all(|c| c.is_ascii_digit()) && {
+            let year: String = w.iter().collect();
+            year.starts_with("19") || year.starts_with("20")
+        }
+    })
+}
+
 /// Generate a dedup-safe label for a Fact node: `Fact:{summary}-{hash4}`.
 /// Uses the first ~50 chars of the claim as a readable summary slug.
-fn make_fact_label(_entity: &str, source_text: &str) -> String {
+fn make_fact_label(entity: &str, source_text: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     // Build a readable slug from the claim text (first ~50 chars, words only)
@@ -89,6 +100,7 @@ fn make_fact_label(_entity: &str, source_text: &str) -> String {
     let cut = snap_to_char_boundary(&slug, 50);
     slug.truncate(cut);
     let mut hasher = DefaultHasher::new();
+    entity.hash(&mut hasher);
     source_text.hash(&mut hasher);
     let hash = hasher.finish();
     format!("Fact:{}-{:04x}", slug, hash & 0xFFFF)
@@ -177,6 +189,7 @@ impl Pipeline {
     pub fn execute(&self, items: Vec<RawItem>) -> Result<PipelineResult, IngestError> {
         let start = std::time::Instant::now();
         let mut result = PipelineResult::default();
+        let mut absorbed_dates: HashMap<String, String> = HashMap::new();
 
         if items.is_empty() {
             return Ok(result);
@@ -218,6 +231,42 @@ impl Pipeline {
         if self.config.stages.ner && !self.extractors.is_empty() {
             for (seg, lang) in &lang_segments {
                 let mut extracted = self.run_extractors(&seg.text, lang);
+
+                // Fragment filter: remove junk NER outputs
+                extracted.retain(|e| {
+                    if e.text.len() > 60 { return false; }
+                    if e.text.matches('-').count() >= 5 { return false; }
+                    let lower = e.text.to_lowercase();
+                    let stops = ["the", "a", "an", "of", "in", "to", "for", "and", "or", "but", "is", "was", "are", "were", "following", "after", "before"];
+                    let words: Vec<&str> = lower.split_whitespace().collect();
+                    if let Some(&first) = words.first() {
+                        if stops.contains(&first) { return false; }
+                    }
+                    if let Some(&last) = words.last() {
+                        if stops.contains(&last) { return false; }
+                    }
+                    true
+                });
+
+                // Date absorption: partition into date vs non-date entities
+                let (date_entities, non_date_entities): (Vec<_>, Vec<_>) = extracted
+                    .into_iter()
+                    .partition(|e| e.entity_type.eq_ignore_ascii_case("date"));
+
+                // Build sentence -> date map for absorbed dates
+                let mut sentence_dates: HashMap<String, String> = HashMap::new();
+                for de in &date_entities {
+                    if is_specific_date(&de.text) {
+                        let sent = extract_snippet(&seg.text, de.span, 200);
+                        sentence_dates.insert(sent, de.text.clone());
+                    }
+                }
+
+                // Merge into pipeline-level absorbed dates
+                absorbed_dates.extend(sentence_dates);
+
+                // Continue with non-date entities only
+                let mut extracted = non_date_entities;
 
                 // Stage 4: Resolve extracted entities against graph
                 if self.config.stages.entity_resolve && !self.resolvers.is_empty() {
@@ -319,7 +368,7 @@ impl Pipeline {
         let facts = self.apply_transformers(facts, &mut result);
 
         // Stage 7: Load — batch write to graph (chunked write locking)
-        self.load_facts(facts, &mut result)?;
+        self.load_facts(facts, &mut result, &absorbed_dates)?;
 
         result.duration_ms = start.elapsed().as_millis() as u64;
 
@@ -387,6 +436,22 @@ impl Pipeline {
                     };
 
                     let mut extracted = self.run_extractors(&seg.text, &lang);
+
+                    // Fragment filter: remove junk NER outputs
+                    extracted.retain(|e| {
+                        if e.text.len() > 60 { return false; }
+                        if e.text.matches('-').count() >= 5 { return false; }
+                        let lower = e.text.to_lowercase();
+                        let stops = ["the", "a", "an", "of", "in", "to", "for", "and", "or", "but", "is", "was", "are", "were", "following", "after", "before"];
+                        let words: Vec<&str> = lower.split_whitespace().collect();
+                        if let Some(&first) = words.first() {
+                            if stops.contains(&first) { return false; }
+                        }
+                        if let Some(&last) = words.last() {
+                            if stops.contains(&last) { return false; }
+                        }
+                        true
+                    });
 
                     // Resolve under read lock
                     if has_resolve {
@@ -497,7 +562,7 @@ impl Pipeline {
         let facts = self.apply_transformers(facts, &mut result);
 
         // Stage 7: Load (chunked writes)
-        self.load_facts(facts, &mut result)?;
+        self.load_facts(facts, &mut result, &HashMap::new())?;
 
         result.duration_ms = start.elapsed().as_millis() as u64;
 
@@ -617,7 +682,7 @@ impl Pipeline {
         }
 
         let facts = self.apply_transformers(facts, &mut result);
-        self.load_facts(facts, &mut result)?;
+        self.load_facts(facts, &mut result, &HashMap::new())?;
 
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
@@ -842,6 +907,7 @@ impl Pipeline {
         &self,
         facts: Vec<ProcessedFact>,
         result: &mut PipelineResult,
+        absorbed_dates: &HashMap<String, String>,
     ) -> Result<(), IngestError> {
         if facts.is_empty() {
             return Ok(());
@@ -957,6 +1023,13 @@ impl Pipeline {
                         );
                         if let Some(ref url) = fact.provenance.source_url {
                             let _ = graph.set_property(&fact_label, "source_url", url);
+                        }
+
+                        // Check for absorbed date
+                        if let Some(ref source_text) = fact.source_text {
+                            if let Some(date) = absorbed_dates.get(source_text) {
+                                let _ = graph.set_property(&fact_label, "event_date", date);
+                            }
                         }
 
                         // Edge: entity -> fact node (mentioned_in)
@@ -1415,5 +1488,38 @@ mod tests {
         let span = (0, 4);
         let result = extract_snippet(text, span, 200);
         assert!(!result.is_empty(), "snippet should not be empty even with non-boundary span");
+    }
+
+    #[test]
+    fn test_is_specific_date() {
+        assert!(is_specific_date("2022"));
+        assert!(is_specific_date("February 2024"));
+        assert!(is_specific_date("January 15, 2023"));
+        assert!(!is_specific_date("a few days later"));
+        assert!(!is_specific_date("recently"));
+        assert!(!is_specific_date("the following day"));
+    }
+
+    #[test]
+    fn test_fragment_filter() {
+        // Long entity (>60 chars)
+        assert!("A".repeat(61).len() > 60);
+        // Hyphen-heavy slug
+        assert!("a-b-c-d-e-f".matches('-').count() >= 5);
+        // Starts with stopword
+        let stops = ["the", "a", "an", "of", "in", "to", "for", "and", "or", "but", "is", "was", "are", "were", "following", "after", "before"];
+        assert!(stops.contains(&"the"));
+        assert!(stops.contains(&"following"));
+    }
+
+    #[test]
+    fn test_make_fact_label_unique_per_entity() {
+        let text = "Berlin is the capital of Germany";
+        let label_a = make_fact_label("Berlin", text);
+        let label_b = make_fact_label("Germany", text);
+        assert_ne!(label_a, label_b, "same source_text + different entities should produce different labels");
+        // Same entity + same text should be deterministic
+        let label_a2 = make_fact_label("Berlin", text);
+        assert_eq!(label_a, label_a2);
     }
 }

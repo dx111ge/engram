@@ -101,10 +101,10 @@
         self._showEdgeLabels = nodeCount < 80;
 
         // ── Edge Bundling (Step I) ──
-        self._originalLinks = links.slice();
+        self._originalLinks = links.map(function(l) { return Object.assign({}, l); });
         var displayLinks = links;
         if (self._bundlingEnabled && links.length > 0) {
-          displayLinks = self._bundleEdges(links);
+          displayLinks = self._bundleEdges(this._originalLinks);
         }
 
         var graph = ForceGraph3D()(container)
@@ -627,7 +627,9 @@
       toggleBundling: function(enabled) {
         this._bundlingEnabled = enabled;
         if (this.instance && this._originalLinks) {
-          var links = enabled ? this._bundleEdges(this._originalLinks) : this._originalLinks.slice();
+          var links = enabled
+            ? this._bundleEdges(this._originalLinks)
+            : this._originalLinks.map(function(l) { return Object.assign({}, l); });
           var data = this.instance.graphData();
           this.instance.graphData({ nodes: data.nodes, links: links });
         }
@@ -687,8 +689,8 @@
         if (!this.instance) return;
         var nodes = JSON.parse(nodesJson);
         var links = JSON.parse(linksJson);
-        this._originalLinks = links.slice();
-        var displayLinks = this._bundlingEnabled ? this._bundleEdges(links) : links;
+        this._originalLinks = links.map(function(l) { return Object.assign({}, l); });
+        var displayLinks = this._bundlingEnabled ? this._bundleEdges(this._originalLinks) : links;
         this.instance.graphData({ nodes: nodes, links: displayLinks });
       },
 
@@ -885,6 +887,34 @@
           this.instance.linkColor(this.instance.linkColor());
           this.instance.linkWidth(this.instance.linkWidth());
         }
+      },
+
+      fitToPath: function(pathNodes) {
+        if (!this.instance || !pathNodes || pathNodes.length === 0) return;
+        var data = this.instance.graphData();
+        var positions = [];
+        data.nodes.forEach(function(n) {
+          if (pathNodes.indexOf(n.id) !== -1 && n.x !== undefined) {
+            positions.push({ x: n.x, y: n.y, z: n.z });
+          }
+        });
+        if (positions.length === 0) return;
+        // Calculate centroid
+        var cx = 0, cy = 0, cz = 0;
+        positions.forEach(function(p) { cx += p.x; cy += p.y; cz += p.z; });
+        cx /= positions.length; cy /= positions.length; cz /= positions.length;
+        // Camera distance based on bounding box
+        var maxDist = 0;
+        positions.forEach(function(p) {
+          var d = Math.sqrt((p.x-cx)*(p.x-cx) + (p.y-cy)*(p.y-cy) + (p.z-cz)*(p.z-cz));
+          if (d > maxDist) maxDist = d;
+        });
+        var camDist = Math.max(maxDist * 2.5, 100);
+        this.instance.cameraPosition(
+          { x: cx + camDist * 0.5, y: cy + camDist * 0.3, z: cz + camDist },
+          { x: cx, y: cy, z: cz },
+          1000
+        );
       },
 
       clearPath: function() {

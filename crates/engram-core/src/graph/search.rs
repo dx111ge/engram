@@ -415,22 +415,36 @@ impl Graph {
         }
     }
 
-    /// Find all paths between two nodes using BFS, up to max_depth hops.
+    /// Find all paths between two nodes using DFS, up to max_depth hops.
     /// Returns paths as vectors of node labels.
+    ///
+    /// Optional filters:
+    /// - `min_depth`: skip paths with fewer hops than this value
+    /// - `via_label`: only return paths that pass through the named node
     pub fn find_all_paths(
         &self,
         from_label: &str,
         to_label: &str,
         max_depth: u32,
+        min_depth: Option<u32>,
+        via_label: Option<&str>,
     ) -> Result<Vec<Vec<String>>> {
         let from_id = self.find_node_id(from_label)?
             .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
         let to_id = self.find_node_id(to_label)?
             .ok_or_else(|| StorageError::NodeNotFound { id: 0 })?;
 
+        // Resolve via node ID if provided
+        let via_id: Option<u64> = match via_label {
+            Some(label) => self.find_node_id(label)?,
+            None => None,
+        };
+
         if from_id == to_id {
             return Ok(vec![vec![from_label.to_string()]]);
         }
+
+        let min_d = min_depth.unwrap_or(0);
 
         let mut all_paths = Vec::new();
         // DFS with path tracking (bounded by max_depth)
@@ -467,6 +481,20 @@ impl Graph {
                     // Found a path!
                     let mut full_path = path.clone();
                     full_path.push(to_id);
+                    let hops = full_path.len() - 1;
+
+                    // Apply min_depth filter
+                    if (hops as u32) < min_d {
+                        continue;
+                    }
+
+                    // Apply via filter: path must contain the via node
+                    if let Some(vid) = via_id {
+                        if !full_path.contains(&vid) {
+                            continue;
+                        }
+                    }
+
                     // Convert IDs to labels
                     let label_path: Vec<String> = full_path.iter()
                         .filter_map(|&id| self.label_for_id(id).ok())
@@ -515,7 +543,7 @@ mod path_tests {
         graph.relate("A", "D", "knows", &prov).unwrap();
         graph.relate("D", "C", "knows", &prov).unwrap();
 
-        let paths = graph.find_all_paths("A", "C", 5).unwrap();
+        let paths = graph.find_all_paths("A", "C", 5, None, None).unwrap();
         assert!(paths.len() >= 2, "should find at least 2 paths, got {}", paths.len());
         for path in &paths {
             assert_eq!(path.first().unwrap(), "A");
@@ -533,7 +561,65 @@ mod path_tests {
         graph.store("Y", &prov).unwrap();
         // No edges between X and Y
 
-        let paths = graph.find_all_paths("X", "Y", 5).unwrap();
+        let paths = graph.find_all_paths("X", "Y", 5, None, None).unwrap();
         assert!(paths.is_empty(), "disconnected nodes should return no paths");
+    }
+
+    #[test]
+    fn test_find_paths_with_via() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut graph = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+        // Create A -> B -> C and A -> D -> C
+        graph.store("A", &prov).unwrap();
+        graph.store("B", &prov).unwrap();
+        graph.store("C", &prov).unwrap();
+        graph.store("D", &prov).unwrap();
+        graph.relate("A", "B", "knows", &prov).unwrap();
+        graph.relate("B", "C", "knows", &prov).unwrap();
+        graph.relate("A", "D", "knows", &prov).unwrap();
+        graph.relate("D", "C", "knows", &prov).unwrap();
+
+        // Via B should only return paths through B
+        let paths = graph.find_all_paths("A", "C", 5, None, Some("B")).unwrap();
+        assert!(!paths.is_empty(), "should find at least 1 path via B");
+        for path in &paths {
+            assert!(path.contains(&"B".to_string()), "every path must contain B");
+        }
+
+        // Via D should only return paths through D
+        let paths_d = graph.find_all_paths("A", "C", 5, None, Some("D")).unwrap();
+        assert!(!paths_d.is_empty(), "should find at least 1 path via D");
+        for path in &paths_d {
+            assert!(path.contains(&"D".to_string()), "every path must contain D");
+        }
+    }
+
+    #[test]
+    fn test_find_paths_with_min_depth() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut graph = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+        // Create A -> B -> C and A -> C (direct)
+        graph.store("A", &prov).unwrap();
+        graph.store("B", &prov).unwrap();
+        graph.store("C", &prov).unwrap();
+        graph.relate("A", "C", "knows", &prov).unwrap();
+        graph.relate("A", "B", "knows", &prov).unwrap();
+        graph.relate("B", "C", "knows", &prov).unwrap();
+
+        // Without min_depth, should find both 1-hop and 2-hop paths
+        let all_paths = graph.find_all_paths("A", "C", 5, None, None).unwrap();
+        assert!(all_paths.len() >= 2, "should find at least 2 paths, got {}", all_paths.len());
+
+        // min_depth=2 should skip the direct A->C path (1 hop)
+        let filtered = graph.find_all_paths("A", "C", 5, Some(2), None).unwrap();
+        for path in &filtered {
+            let hops = path.len() - 1;
+            assert!(hops >= 2, "path should have at least 2 hops, got {}", hops);
+        }
+        assert!(!filtered.is_empty(), "should find at least 1 path with >= 2 hops");
     }
 }

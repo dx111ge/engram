@@ -543,6 +543,8 @@ pub struct PathsRequest {
     pub from: String,
     pub to: String,
     pub max_depth: Option<u32>,
+    pub via: Option<String>,
+    pub min_depth: Option<u32>,
 }
 
 /// Response for `POST /paths`.

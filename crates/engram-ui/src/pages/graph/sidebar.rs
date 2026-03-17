@@ -266,6 +266,42 @@ pub(super) fn filters_view(
     }
 }
 
+/// Helper: run a sync XHR search against /search and return label suggestions.
+fn search_suggestions(query: &str, exclude: &str) -> Vec<String> {
+    if query.len() < 2 { return Vec::new(); }
+    let tq_lower = query.to_lowercase();
+    let search_code = format!(
+        r#"(function(){{
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/search', false);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            var token = localStorage.getItem('engram_token');
+            if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+            xhr.send(JSON.stringify({{query: "{}", limit: 10}}));
+            if (xhr.status === 200) {{
+                var data = JSON.parse(xhr.responseText);
+                return JSON.stringify(data.results.map(function(r){{ return r.label; }}));
+            }}
+            return '[]';
+        }})()"#,
+        query.replace('\\', r#"\\"#).replace('"', r#"\""#),
+    );
+    let mut results = Vec::new();
+    if let Ok(result) = js_sys::eval(&search_code) {
+        if let Some(s) = result.as_string() {
+            if let Ok(labels) = serde_json::from_str::<Vec<String>>(&s) {
+                for l in labels {
+                    if l.to_lowercase().contains(&tq_lower) && l != exclude && !results.contains(&l) {
+                        results.push(l);
+                    }
+                }
+            }
+        }
+    }
+    results.truncate(8);
+    results
+}
+
 /// Renders the Find Path sidebar section.
 pub(super) fn find_path_view(
     nodes: ReadSignal<Vec<serde_json::Value>>,
@@ -273,6 +309,12 @@ pub(super) fn find_path_view(
     set_path_from: WriteSignal<Option<String>>,
     path_target_query: ReadSignal<String>,
     set_path_target_query: WriteSignal<String>,
+    path_via_query: ReadSignal<String>,
+    set_path_via_query: WriteSignal<String>,
+    path_min_depth: ReadSignal<u32>,
+    set_path_min_depth: WriteSignal<u32>,
+    path_max_depth: ReadSignal<u32>,
+    set_path_max_depth: WriteSignal<u32>,
     path_autocomplete_open: ReadSignal<bool>,
     set_path_autocomplete_open: WriteSignal<bool>,
     path_results: ReadSignal<Vec<Vec<String>>>,
@@ -280,6 +322,9 @@ pub(super) fn find_path_view(
     path_selected: ReadSignal<Vec<bool>>,
     set_path_selected: WriteSignal<Vec<bool>>,
 ) -> impl IntoView {
+    // Via autocomplete open state (separate from target autocomplete)
+    let (via_ac_open, set_via_ac_open) = signal(false);
+
     move || {
         let pf = path_from.get();
         if pf.is_none() { return None; }
@@ -287,44 +332,18 @@ pub(super) fn find_path_view(
         let results = path_results.get();
         let selected = path_selected.get();
 
-        // Autocomplete: filter node labels by typed query
-        // First check loaded nodes, then fall back to all graph nodes via search
+        // Autocomplete for "To" field
         let tq = path_target_query.get();
         let ac_open = path_autocomplete_open.get();
         let suggestions: Vec<String> = if tq.len() >= 2 && ac_open {
             let tq_lower = tq.to_lowercase();
-            // Search loaded graph nodes first
             let mut local: Vec<String> = nodes.get().iter()
                 .filter_map(|n| n.get("label").and_then(|v| v.as_str()).map(|s| s.to_string()))
                 .filter(|l| l.to_lowercase().contains(&tq_lower) && l != &from_label)
                 .collect();
-            // Also search all graph nodes via fulltext index (sync XHR for simplicity)
-            let search_code = format!(
-                r#"(function(){{
-                    var xhr = new XMLHttpRequest();
-                    xhr.open('POST', '/search', false);
-                    xhr.setRequestHeader('Content-Type', 'application/json');
-                    var token = localStorage.getItem('engram_token');
-                    if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-                    xhr.send(JSON.stringify({{query: "{}", limit: 10}}));
-                    if (xhr.status === 200) {{
-                        var data = JSON.parse(xhr.responseText);
-                        return JSON.stringify(data.results.map(function(r){{ return r.label; }}));
-                    }}
-                    return '[]';
-                }})()"#,
-                tq.replace('"', r#"\""#).replace('\\', r#"\\"#),
-            );
-            if let Ok(result) = js_sys::eval(&search_code) {
-                if let Some(s) = result.as_string() {
-                    if let Ok(labels) = serde_json::from_str::<Vec<String>>(&s) {
-                        for l in labels {
-                            if l.to_lowercase().contains(&tq_lower) && l != from_label && !local.contains(&l) {
-                                local.push(l);
-                            }
-                        }
-                    }
-                }
+            // Also search via fulltext index
+            for l in search_suggestions(&tq, &from_label) {
+                if !local.contains(&l) { local.push(l); }
             }
             local.truncate(8);
             local
@@ -332,7 +351,24 @@ pub(super) fn find_path_view(
             Vec::new()
         };
 
-        let from_label_for_find = from_label.clone();
+        // Autocomplete for "Via" field
+        let vq = path_via_query.get();
+        let via_open = via_ac_open.get();
+        let via_suggestions: Vec<String> = if vq.len() >= 2 && via_open {
+            let vq_lower = vq.to_lowercase();
+            let mut local: Vec<String> = nodes.get().iter()
+                .filter_map(|n| n.get("label").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .filter(|l| l.to_lowercase().contains(&vq_lower) && l != &from_label)
+                .collect();
+            for l in search_suggestions(&vq, &from_label) {
+                if !local.contains(&l) { local.push(l); }
+            }
+            local.truncate(8);
+            local
+        } else {
+            Vec::new()
+        };
+
         Some(view! {
             <div class="card">
                 <h3><i class="fa-solid fa-route"></i>" Find Path"</h3>
@@ -340,6 +376,7 @@ pub(super) fn find_path_view(
                     <span class="prop-key">"From"</span>
                     <strong style="font-size: 0.85rem;">{from_label.clone()}</strong>
                 </div>
+                // To field with autocomplete
                 <div class="form-group" style="margin-top: 0.5rem; position: relative;">
                     <label>"To"</label>
                     <input type="text" placeholder="Type entity name..."
@@ -351,11 +388,9 @@ pub(super) fn find_path_view(
                         on:keydown=move |ev| {
                             if ev.key() == "Enter" {
                                 set_path_autocomplete_open.set(false);
-                                // Trigger the Find Paths button click
                             }
                         }
                     />
-                    // Autocomplete dropdown
                     {(!suggestions.is_empty()).then(|| view! {
                         <div class="path-autocomplete">
                             {suggestions.iter().map(|s| {
@@ -374,12 +409,83 @@ pub(super) fn find_path_view(
                         </div>
                     })}
                 </div>
+                // Via field with autocomplete (optional)
+                <div class="form-group" style="margin-top: 0.5rem; position: relative;">
+                    <label>"Via " <span class="text-secondary" style="font-size: 0.7rem;">"(optional)"</span></label>
+                    <input type="text" placeholder="Must pass through..."
+                        prop:value=path_via_query
+                        on:input=move |ev| {
+                            set_path_via_query.set(event_target_value(&ev));
+                            set_via_ac_open.set(true);
+                        }
+                        on:keydown=move |ev| {
+                            if ev.key() == "Enter" {
+                                set_via_ac_open.set(false);
+                            }
+                        }
+                    />
+                    {(!via_suggestions.is_empty()).then(|| view! {
+                        <div class="path-autocomplete">
+                            {via_suggestions.iter().map(|s| {
+                                let s_click = s.clone();
+                                let s_display = s.clone();
+                                view! {
+                                    <div class="path-autocomplete-item"
+                                        on:click=move |_| {
+                                            set_path_via_query.set(s_click.clone());
+                                            set_via_ac_open.set(false);
+                                        }>
+                                        {s_display}
+                                    </div>
+                                }
+                            }).collect::<Vec<_>>()}
+                        </div>
+                    })}
+                </div>
+                // Min/Max hops
+                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                    <div class="form-group" style="flex: 1;">
+                        <label>"Min hops"</label>
+                        <input type="number" min="1" max="8" style="width: 100%;"
+                            prop:value=move || path_min_depth.get().to_string()
+                            on:input=move |ev| {
+                                if let Ok(v) = event_target_value(&ev).parse::<u32>() {
+                                    set_path_min_depth.set(v.max(1).min(8));
+                                }
+                            }
+                        />
+                    </div>
+                    <div class="form-group" style="flex: 1;">
+                        <label>"Max hops"</label>
+                        <input type="number" min="1" max="8" style="width: 100%;"
+                            prop:value=move || path_max_depth.get().to_string()
+                            on:input=move |ev| {
+                                if let Ok(v) = event_target_value(&ev).parse::<u32>() {
+                                    set_path_max_depth.set(v.max(1).min(8));
+                                }
+                            }
+                        />
+                    </div>
+                </div>
                 <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;"
                     on:click=move |_| {
                         let target = path_target_query.get_untracked();
                         let from = path_from.get_untracked().unwrap_or_default();
                         if !target.is_empty() && !from.is_empty() {
-                            // Call server-side path finding API
+                            let via = path_via_query.get_untracked();
+                            let min_d = path_min_depth.get_untracked();
+                            let max_d = path_max_depth.get_untracked();
+                            // Build JSON body with optional via and min_depth
+                            let via_field = if via.is_empty() {
+                                String::new()
+                            } else {
+                                format!(r#", via: "{}""#, via.replace('\\', r#"\\"#).replace('"', r#"\""#))
+                            };
+                            let min_field = if min_d > 1 {
+                                format!(", min_depth: {}", min_d)
+                            } else {
+                                String::new()
+                            };
                             let code = format!(
                                 r#"(function(){{
                                     var xhr = new XMLHttpRequest();
@@ -387,28 +493,27 @@ pub(super) fn find_path_view(
                                     xhr.setRequestHeader('Content-Type', 'application/json');
                                     var token = localStorage.getItem('engram_token');
                                     if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-                                    xhr.send(JSON.stringify({{from: "{from}", to: "{to}", max_depth: 5}}));
+                                    xhr.send(JSON.stringify({{from: "{from}", to: "{to}", max_depth: {max_d}{via}{min}}}));
                                     if (xhr.status === 200) {{
                                         var data = JSON.parse(xhr.responseText);
                                         return JSON.stringify(data.paths);
                                     }}
                                     return '[]';
                                 }})()"#,
-                                from = from.replace('"', r#"\""#).replace('\\', r#"\\"#),
-                                to = target.replace('"', r#"\""#).replace('\\', r#"\\"#),
+                                from = from.replace('\\', r#"\\"#).replace('"', r#"\""#),
+                                to = target.replace('\\', r#"\\"#).replace('"', r#"\""#),
+                                max_d = max_d,
+                                via = via_field,
+                                min = min_field,
                             );
                             if let Ok(result) = js_sys::eval(&code) {
                                 if let Some(s) = result.as_string() {
                                     if let Ok(paths) = serde_json::from_str::<Vec<Vec<String>>>(&s) {
-                                        let sel = vec![true; paths.len()];
+                                        let sel = vec![false; paths.len()];
                                         set_path_results.set(paths.clone());
                                         set_path_selected.set(sel);
-                                        let paths_json = serde_json::to_string(&paths).unwrap_or_default();
-                                        let show_code = format!(
-                                            "window.__engram_graph.showPaths('{}')",
-                                            paths_json.replace('\'', "\\'"),
-                                        );
-                                        let _ = js_sys::eval(&show_code);
+                                        // Don't auto-show paths on canvas since all start unchecked
+                                        let _ = js_sys::eval("window.__engram_graph.clearPath()");
                                     }
                                 }
                             }
@@ -421,13 +526,20 @@ pub(super) fn find_path_view(
                 {(!results.is_empty()).then(|| {
                     view! {
                         <div style="margin-top: 0.75rem;">
-                            <span class="text-secondary" style="font-size: 0.75rem; text-transform: uppercase;">"Paths Found"</span>
+                            <span class="text-secondary" style="font-size: 0.75rem; text-transform: uppercase;">
+                                {format!("{} Path{} Found", results.len(), if results.len() != 1 { "s" } else { "" })}
+                            </span>
                             <div style="display: grid; gap: 0.25rem; margin-top: 0.25rem;">
                                 {results.iter().enumerate().map(|(idx, path)| {
                                     let hops = path.len().saturating_sub(1);
-                                    let path_str = path.join(" > ");
-                                    let path_title = path_str.clone();
-                                    let is_selected = selected.get(idx).copied().unwrap_or(true);
+                                    // Intermediaries: middle nodes (skip first and last)
+                                    let intermediaries = if path.len() > 2 {
+                                        path[1..path.len()-1].join(", ")
+                                    } else {
+                                        "direct".to_string()
+                                    };
+                                    let path_title = path.join(" > ");
+                                    let is_selected = selected.get(idx).copied().unwrap_or(false);
                                     view! {
                                         <div class="prop-row" style="cursor: pointer; padding: 0.35rem 0.5rem; border-radius: 4px; font-size: 0.8rem;"
                                             on:click=move |_| {
@@ -449,15 +561,12 @@ pub(super) fn find_path_view(
                                                     paths_json.replace('\'', "\\'"),
                                                 );
                                                 let _ = js_sys::eval(&code);
-                                            }>
+                                            }
+                                            title=path_title>
                                             <span style="display: flex; align-items: center; gap: 0.5rem;">
                                                 <i class=move || if is_selected { "fa-solid fa-square-check" } else { "fa-regular fa-square" }
                                                     style="color: var(--accent-bright);"></i>
-                                                <span>{format!("Path {} ({} hop{})", idx + 1, hops, if hops != 1 { "s" } else { "" })}</span>
-                                            </span>
-                                            <span class="text-secondary" style="font-size: 0.7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px;"
-                                                title=path_title>
-                                                {path_str}
+                                                <span>{format!("{} hop{}: via {}", hops, if hops != 1 { "s" } else { "" }, intermediaries)}</span>
                                             </span>
                                         </div>
                                     }
@@ -469,6 +578,7 @@ pub(super) fn find_path_view(
                                     set_path_results.set(Vec::new());
                                     set_path_selected.set(Vec::new());
                                     set_path_target_query.set(String::new());
+                                    set_path_via_query.set(String::new());
                                     let _ = js_sys::eval("window.__engram_graph.clearPath()");
                                 }>
                                 <i class="fa-solid fa-xmark"></i>" Clear Paths"

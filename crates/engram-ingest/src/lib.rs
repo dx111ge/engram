@@ -40,6 +40,7 @@ pub mod rel_gazetteer;
 pub mod rel_kge;
 pub mod rel_knowledge_base;
 pub mod rel_traits;
+pub mod rel_type_templates;
 pub mod resolver;
 pub mod rules;
 pub mod scheduler;
