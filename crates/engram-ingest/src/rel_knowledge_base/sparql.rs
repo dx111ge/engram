@@ -167,8 +167,15 @@ impl KbRelationExtractor {
                 let prop_label = binding.pointer("/propLabel/value").and_then(|v| v.as_str()).unwrap_or("");
                 let value_label = binding.pointer("/valueLabel/value").and_then(|v| v.as_str()).unwrap_or("");
 
-                // Skip self-references and empty values
+                // Skip self-references, empty values, and empty property labels
                 if value_label.is_empty() || value_label.starts_with("http://") {
+                    continue;
+                }
+                if prop_label.is_empty() || prop_label.starts_with("http://") {
+                    continue;
+                }
+                // Skip QID values where label service failed (e.g. "Q38715852")
+                if value_label.starts_with('Q') && value_label[1..].chars().all(|c| c.is_ascii_digit()) {
                     continue;
                 }
 

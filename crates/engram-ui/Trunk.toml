@@ -3,4 +3,4 @@ target = "index.html"
 dist = "../../frontend/dist"
 
 [watch]
-watch = ["src", "index.html", "css"]
+watch = ["src", "index.html", "css", "js"]

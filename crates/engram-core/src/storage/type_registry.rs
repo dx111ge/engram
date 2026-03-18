@@ -52,7 +52,9 @@ impl TypeRegistry {
     }
 
     /// Get or create a type ID for a name.
+    /// Empty strings are redirected to "related_to" to prevent type_id 0 pollution.
     pub fn get_or_create(&mut self, name: &str) -> u32 {
+        let name = if name.is_empty() { "related_to" } else { name };
         if let Some(&id) = self.lookup.get(name) {
             return id;
         }
@@ -113,6 +115,18 @@ mod tests {
         assert_eq!(reg.name(0), Some("connects_to"));
         assert_eq!(reg.name(99), None);
         assert_eq!(reg.name_or_default(99), "type_99");
+    }
+
+    #[test]
+    fn empty_name_redirects_to_related_to() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut reg = TypeRegistry::new(&path);
+
+        let id = reg.get_or_create("");
+        assert_eq!(reg.name(id), Some("related_to"));
+        // Calling with "related_to" directly returns the same ID
+        assert_eq!(reg.get_or_create("related_to"), id);
     }
 
     #[test]

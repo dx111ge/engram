@@ -193,11 +193,20 @@ POST /ingest (seed text)
   ├── KB Enrichment:
   │     Step 0: area_of_interest = "Russia Ukraine war"
   │     Step 1: Wikipedia link each entity → QID + canonical (20 API calls, ~2s)
-  │     Step 2: Fetch area-of-interest article → co-occurrence edges (~1s)
+  │     Step 2: Fetch area-of-interest article → co-occurrence PAIRS (~1s)
   │             + individual search for unmentioned entities (~2s)
+  │             + web search fallback for still-unconnected entities (~2s)
+  │             NOTE: article text is retained for Step 5
   │     Step 3: Batch SPARQL direct connections (~2s)
   │     Step 3b: Property expansion (~2s)
+  │              Guards: empty propLabel and QID valueLabel bindings are skipped
   │     Step 3c: Shortest path fallback for remaining islands (~2s)
+  │     Step 5: GLiNER2 classifies unresolved co-occurrence pairs (~1s)
+  │              Uses the article text from Step 2 (not the caller's input text)
+  │              Pairs without GLiNER2 match fall back to "related_to"
+  │
+  ├── Post-process: upgrade "related_to" → typed relation where SPARQL found one
+  │   + dedup by (head, tail, type), keeping highest confidence
   │
   ├── Two-pass write: entities first, then relations
   │
@@ -352,9 +361,26 @@ sees the graph being built and can correct mistakes in real-time.
 
 ## Implementation Notes
 
-- `rel_knowledge_base.rs` to be rewritten with clean 4-step structure
-- Remove canonical node creation, label_map, pairwise fallback
-- Keep `wikipedia_search_qid()` and `batch_relation_lookup()` methods
-- Add `fetch_area_of_interest_article()` and `find_cooccurrences()` methods
-- Step 2 is the new core -- contextual connection via Wikipedia article text
-- Estimated implementation: 2-3 hours
+- `rel_knowledge_base/mod.rs`: 4-step enrichment + Step 5 GLiNER2 classification
+- `rel_knowledge_base/sparql.rs`: batch SPARQL, property expansion, shortest paths
+- `rel_knowledge_base/entity_link.rs`: Wikipedia entity linking
+- Key methods: `fetch_area_of_interest_article()`, `find_cooccurrences()`,
+  `batch_relation_lookup()`, `property_expansion()`, `batch_shortest_paths()`
+
+## Data Quality Guards (added 2026-03-18)
+
+| Guard | Location | Problem | Fix |
+|-------|----------|---------|-----|
+| Empty rel_type | `wikidata_prop_to_rel_type()` | Wikidata returns no label -> empty type_id 0 | Return "related_to" for empty input |
+| Empty propLabel | `property_expansion()` | SPARQL binding has empty/URI-only propLabel | Skip binding |
+| QID valueLabel | `property_expansion()` | Label service fails, returns "Q38715852" | Skip values matching `Q\d+` pattern |
+| Empty type_id | `TypeRegistry::get_or_create()` | Empty string creates type_id 0 | Redirect "" to "related_to" |
+| GLiNER2 empty text | `extract_relations()` Step 5 | Caller passes empty text, GLiNER2 returns nothing | Use article text from Step 2 |
+| Edge label display | `graph_canvas.rs` + `graph-bridge.js` | Empty label = no display | Fallback to "related_to" |
+
+## Relation Review UI (updated 2026-03-18)
+
+All confidence tiers (confirmed, likely, uncertain, no_relation) now show editable
+dropdown selectors. Previously only `no_relation` had a dropdown; other tiers showed
+read-only text. Backend infrastructure (`SeedConfirmRelationsRequest.modified`) already
+existed; the UI now uses it for all tiers.

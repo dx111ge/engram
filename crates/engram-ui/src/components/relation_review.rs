@@ -136,9 +136,12 @@ pub fn RelationReviewPanel(
                                             />
                                             <span style="color: #e0e0e0;"><strong>{from}</strong></span>
                                             <span style="color: rgba(255,255,255,0.4);">"\u{2192}"</span>
-                                            {if is_no_rel {
-                                                // Show dropdown for unclassified
+                                            {
+                                                // Editable dropdown for all tiers
                                                 let known = known_rel_types.get_untracked();
+                                                let current = has_retype.unwrap_or(rel);
+                                                let placeholder = if is_no_rel { "-- Pick type --" } else { &current };
+                                                let placeholder_val = if is_no_rel { "skip".to_string() } else { current.clone() };
                                                 view! {
                                                     <select
                                                         style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: #fff; padding: 2px 4px; font-size: 0.75rem; border-radius: 3px; max-width: 150px;"
@@ -149,19 +152,14 @@ pub fn RelationReviewPanel(
                                                             }
                                                         }
                                                     >
-                                                        <option value="skip">"-- Pick type --"</option>
-                                                        {known.into_iter().map(|t| {
+                                                        <option value=placeholder_val.clone() selected=true>{placeholder.to_string()}</option>
+                                                        {known.into_iter().filter(|t| t.as_str() != placeholder_val).map(|t| {
                                                             let t2 = t.clone();
                                                             view! { <option value=t>{t2}</option> }
                                                         }).collect::<Vec<_>>()}
                                                     </select>
                                                 }.into_any()
-                                            } else {
-                                                let display_type = has_retype.unwrap_or(rel);
-                                                view! {
-                                                    <span style="color: #4fc3f7;">{display_type}</span>
-                                                }.into_any()
-                                            }}
+                                            }
                                             <span style="color: rgba(255,255,255,0.4);">"\u{2192}"</span>
                                             <span style="color: #e0e0e0;"><strong>{to}</strong></span>
                                             <span style="margin-left: auto; color: rgba(255,255,255,0.3); font-size: 0.7rem;">

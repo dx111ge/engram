@@ -46,7 +46,7 @@ pub fn GraphCanvas(
             let mut link = serde_json::json!({
                 "source": e.get("from").and_then(|v| v.as_str()).unwrap_or(""),
                 "target": e.get("to").and_then(|v| v.as_str()).unwrap_or(""),
-                "label": e.get("label").and_then(|v| v.as_str()).unwrap_or(""),
+                "label": e.get("label").and_then(|v| v.as_str()).unwrap_or("related_to"),
             });
             // Pass through temporal fields
             if let Some(vf) = e.get("valid_from").and_then(|v| v.as_str()) {

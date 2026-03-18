@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::rel_knowledge_base::{sparql_escape, extract_qid, uri_to_label, extract_first_uri, extract_relations_from_sparql};
+    use crate::rel_knowledge_base::{sparql_escape, extract_qid, uri_to_label, extract_first_uri, extract_relations_from_sparql, wikidata_prop_to_rel_type};
 
     #[test]
     fn sparql_escape_handles_special_chars() {
@@ -73,5 +73,25 @@ mod tests {
         assert_eq!(rels.len(), 2);
         assert_eq!(rels[0].1, "employer");
         assert_eq!(rels[1].1, "country of citizenship");
+    }
+
+    #[test]
+    fn wikidata_prop_empty_returns_related_to() {
+        assert_eq!(wikidata_prop_to_rel_type(""), "related_to");
+    }
+
+    #[test]
+    fn wikidata_prop_known_labels() {
+        assert_eq!(wikidata_prop_to_rel_type("position held"), "holds_position");
+        assert_eq!(wikidata_prop_to_rel_type("country of citizenship"), "citizen_of");
+        assert_eq!(wikidata_prop_to_rel_type("country"), "located_in");
+    }
+
+    #[test]
+    fn wikidata_prop_uri_fallback() {
+        assert_eq!(
+            wikidata_prop_to_rel_type("http://www.wikidata.org/prop/direct/P39"),
+            "holds_position"
+        );
     }
 }

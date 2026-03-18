@@ -151,6 +151,8 @@ impl RelationExtractor for KbRelationExtractor {
             area_of_interest: Arc::from(area_of_interest.as_str()),
         });
 
+        let mut article_text = String::new();
+
         for endpoint in &self.endpoints {
             let mut budget = endpoint.max_lookups;
             let mut entity_kb_ids: HashMap<usize, String> = HashMap::new();
@@ -229,6 +231,7 @@ impl RelationExtractor for KbRelationExtractor {
             let mut cooccurrence_count = 0u32;
 
             if let Some(article) = self.fetch_area_of_interest_article(&area_of_interest, &input.language) {
+                article_text = article.clone();
                 let cooccurrences = self.find_cooccurrences(&article, &entity_labels);
                 for (a, b) in &cooccurrences {
                     discovered_pairs.push(DiscoveredPair {
@@ -572,9 +575,10 @@ impl RelationExtractor for KbRelationExtractor {
                         "Step 5: GLiNER2 classifying unresolved co-occurrence pairs"
                     );
 
-                    // Build a synthetic input with the same entities for GLiNER2
+                    // Build a synthetic input with article text (not caller's empty string)
+                    let gliner_text = if input.text.is_empty() { article_text.clone() } else { input.text.clone() };
                     let gliner_input = RelationExtractionInput {
-                        text: input.text.clone(),
+                        text: gliner_text,
                         entities: input.entities.clone(),
                         language: input.language.clone(),
                         area_of_interest: input.area_of_interest.clone(),
@@ -785,7 +789,11 @@ fn uri_to_label(uri: &str) -> String {
 }
 
 /// Map Wikidata property labels to engram relation types.
-fn wikidata_prop_to_rel_type(prop_label: &str) -> String {
+pub(crate) fn wikidata_prop_to_rel_type(prop_label: &str) -> String {
+    if prop_label.is_empty() {
+        return "related_to".to_string();
+    }
+
     // prop_label comes from Wikidata SERVICE wikibase:label, often as URI paths
     let label = if prop_label.contains('/') {
         uri_to_label(prop_label)
