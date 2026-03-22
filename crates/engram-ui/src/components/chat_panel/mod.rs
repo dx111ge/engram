@@ -16,6 +16,8 @@ use crate::api::ApiClient;
 use crate::api::types::{LlmMessage, LlmProxyRequest, LlmProxyResponse};
 use crate::components::chat_types::*;
 
+mod help;
+
 // ── Helper: get current pathname ──
 
 fn current_pathname() -> String {
@@ -62,6 +64,8 @@ pub fn ChatPanel() -> impl IntoView {
     let (sending, set_sending) = signal(false);
     let (pending_writes, set_pending_writes) = signal(Vec::<PendingWrite>::new());
     let (follow_ups, set_follow_ups) = signal(Vec::<FollowUpSuggestion>::new());
+    let (slash_suggestions, set_slash_suggestions) =
+        signal(Vec::<(&'static str, &'static str, &'static str)>::new());
 
     // Page context signals (set by GraphPage / InsightsPage)
     let chat_selected_node = use_context::<ChatSelectedNode>();
@@ -84,6 +88,7 @@ pub fn ChatPanel() -> impl IntoView {
         set_input_text.set(String::new());
         set_sending.set(true);
         set_follow_ups.set(Vec::new());
+        set_slash_suggestions.set(Vec::new());
 
         // Add user message
         set_messages.update(|msgs| {
@@ -92,6 +97,19 @@ pub fn ChatPanel() -> impl IntoView {
                 content: text.clone(),
             });
         });
+
+        // Intercept /help commands -- respond locally, no LLM needed
+        if text.starts_with("/help") {
+            let help_content = help::generate_help_response(&text);
+            set_messages.update(|msgs| {
+                msgs.push(ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: help_content,
+                });
+            });
+            set_sending.set(false);
+            return;
+        }
 
         let api = api_send.clone();
         spawn_local(async move {
@@ -369,7 +387,7 @@ pub fn ChatPanel() -> impl IntoView {
 
     let send_clone = send_message.clone();
     let on_keydown = StoredValue::new(Callback::new(move |ev: leptos::ev::KeyboardEvent| {
-        if ev.key() == "Enter" && ev.ctrl_key() {
+        if ev.key() == "Enter" && !ev.shift_key() {
             ev.prevent_default();
             send_clone();
         }
@@ -422,7 +440,7 @@ pub fn ChatPanel() -> impl IntoView {
 
     view! {
         // Toggle button -- only visible on allowed pages
-        <Show when=page_visible>
+        <Show when=move || page_visible() && !chat_open.get()>
             <button
                 class="chat-toggle-btn"
                 on:click=toggle_panel
@@ -527,6 +545,9 @@ pub fn ChatPanel() -> impl IntoView {
                                                 "What-if analysis"
                                             </button>
                                         </div>
+                                        <p style="margin:0.5rem 0 0;font-size:0.75rem;color:var(--text-muted, #8b8fa3);">
+                                            "Type "<strong>"/help"</strong>" for all available commands"
+                                        </p>
                                     </div>
                                 }.into_any()
                             } else {
@@ -634,16 +655,69 @@ pub fn ChatPanel() -> impl IntoView {
                         }.into_any()
                     }}
 
+                    // Slash autocomplete
+                    {move || {
+                        let suggestions = slash_suggestions.get();
+                        if suggestions.is_empty() {
+                            return view! { <span></span> }.into_any();
+                        }
+                        view! {
+                            <div class="slash-autocomplete"
+                                style="flex-shrink:0;padding:0.5rem 0.75rem;\
+                                       border-top:1px solid var(--border, #2d3139);\
+                                       display:flex;flex-direction:column;gap:0.25rem;">
+                                {suggestions.into_iter().map(|(cmd, icon, desc)| {
+                                    let cmd_str = cmd.to_string();
+                                    let cmd_display = cmd.to_string();
+                                    let icon_cls = icon.to_string();
+                                    let desc_str = desc.to_string();
+                                    view! {
+                                        <div style="display:flex;align-items:center;gap:0.5rem;\
+                                                    padding:0.3rem 0.5rem;border-radius:4px;\
+                                                    cursor:pointer;font-size:0.8rem;\
+                                                    color:var(--text, #c9ccd3);\
+                                                    background:var(--bg-tertiary, #232730);"
+                                            on:mousedown=move |ev| {
+                                                ev.prevent_default();
+                                                set_input_text.set(cmd_str.clone());
+                                                set_slash_suggestions.set(Vec::new());
+                                            }
+                                        >
+                                            <i class=icon_cls
+                                                style="width:16px;text-align:center;\
+                                                       color:var(--accent, #4a9eff);font-size:0.75rem;">
+                                            </i>
+                                            <span style="font-weight:600;">{cmd_display}</span>
+                                            <span style="font-size:0.72rem;\
+                                                         color:var(--text-muted, #8b8fa3);">
+                                                {desc_str}
+                                            </span>
+                                        </div>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            </div>
+                        }.into_any()
+                    }}
+
                     // Input area
                     <div class="chat-input-area"
                         style="flex-shrink:0;padding:0.75rem;border-top:1px solid var(--border, #2d3139);\
                                display:flex;gap:0.5rem;align-items:flex-end;">
                         <textarea
                             class="chat-input"
-                            placeholder="Ask about your knowledge... (Ctrl+Enter)"
+                            placeholder="Ask about your knowledge... (Enter to send)"
                             rows="2"
                             prop:value=input_text
-                            on:input=move |ev| set_input_text.set(event_target_value(&ev))
+                            on:input=move |ev| {
+                                let val = event_target_value(&ev);
+                                set_input_text.set(val.clone());
+                                if val.starts_with('/') {
+                                    let query = &val[1..];
+                                    set_slash_suggestions.set(help::filter_commands(query));
+                                } else {
+                                    set_slash_suggestions.set(Vec::new());
+                                }
+                            }
                             on:keydown=move |ev| on_keydown.with_value(|cb| cb.run(ev))
                             style="flex:1;resize:none;background:var(--bg-tertiary, #232730);\
                                    color:var(--text, #c9ccd3);border:1px solid var(--border, #2d3139);\

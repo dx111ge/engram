@@ -12,7 +12,7 @@ pub fn knowledge_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Name/label of the entity" },
+                        "entity": { "type": "string", "description": "Name/label of the entity -- use EXACT spelling as it appears in prior tool results when referencing existing entities" },
                         "type": { "type": "string", "description": "Entity type (person, server, concept, event, ...)" },
                         "properties": {
                             "type": "object",
@@ -34,8 +34,8 @@ pub fn knowledge_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "from": { "type": "string", "description": "Source entity" },
-                        "to": { "type": "string", "description": "Target entity" },
+                        "from": { "type": "string", "description": "Source entity label -- must be the EXACT name as it appears in the graph (copy from query/search results, do not modify casing or formatting)" },
+                        "to": { "type": "string", "description": "Target entity label -- must be the EXACT name as it appears in the graph (copy from query/search results, do not modify casing or formatting)" },
                         "relationship": { "type": "string", "description": "Type of relationship (causes, is_a, part_of, ...)" },
                         "confidence": { "type": "number", "description": "Relationship confidence" },
                         "valid_from": { "type": "string", "description": "Date when relationship became valid (YYYY-MM-DD)" },
@@ -53,7 +53,7 @@ pub fn knowledge_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "start": { "type": "string", "description": "Starting entity" },
+                        "start": { "type": "string", "description": "Starting entity -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "depth": { "type": "integer", "description": "Max traversal depth (default: 2)" },
                         "min_confidence": { "type": "number", "description": "Minimum confidence threshold" },
                         "direction": { "type": "string", "description": "Traversal direction: out, in, or both (default: both)" }
@@ -100,9 +100,9 @@ pub fn knowledge_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "from": { "type": "string", "description": "Source entity" },
+                        "from": { "type": "string", "description": "Source entity -- must be the EXACT name as it appears in the graph (copy from query/search results, do not modify casing or formatting)" },
                         "relationship": { "type": "string", "description": "Relationship to prove" },
-                        "to": { "type": "string", "description": "Target entity" }
+                        "to": { "type": "string", "description": "Target entity -- must be the EXACT name as it appears in the graph (copy from query/search results, do not modify casing or formatting)" }
                     },
                     "required": ["from", "relationship", "to"]
                 }
@@ -116,7 +116,7 @@ pub fn knowledge_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Entity to explain" }
+                        "entity": { "type": "string", "description": "Entity to explain -- use EXACT name as it appears in the graph (copy from query/search results)" }
                     },
                     "required": ["entity"]
                 }
@@ -130,7 +130,7 @@ pub fn knowledge_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Entity to reinforce" },
+                        "entity": { "type": "string", "description": "Entity to reinforce -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "source": { "type": "string", "description": "Confirmation source (omit for access-only boost)" }
                     },
                     "required": ["entity"]
@@ -145,7 +145,7 @@ pub fn knowledge_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Entity to correct" },
+                        "entity": { "type": "string", "description": "Entity to correct -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "reason": { "type": "string", "description": "Why this fact is wrong" }
                     },
                     "required": ["entity", "reason"]
@@ -160,7 +160,7 @@ pub fn knowledge_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Entity to delete" }
+                        "entity": { "type": "string", "description": "Entity to delete -- use EXACT name as it appears in the graph (copy from query/search results)" }
                     },
                     "required": ["entity"]
                 }

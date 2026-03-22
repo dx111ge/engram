@@ -83,7 +83,7 @@ pub async fn execute_tool(api: &ApiClient, name: &str, args: &str) -> String {
                 "entity": parsed.get("entity").and_then(|v| v.as_str()).unwrap_or(""),
                 "source": parsed.get("source").and_then(|v| v.as_str()),
             });
-            api.post_text("/reinforce", &body).await
+            api.post_text("/learn/reinforce", &body).await
         }
         "engram_correct" => {
             let body = serde_json::json!({
@@ -358,9 +358,11 @@ pub async fn execute_tool(api: &ApiClient, name: &str, args: &str) -> String {
             });
             api.post_text("/ingest/analyze", &body).await
         }
-        "engram_sources" | "engram_frontier" => {
-            let endpoint = name.strip_prefix("engram_").unwrap_or(name);
-            api.get_text(&format!("/reason/{endpoint}")).await
+        "engram_sources" => {
+            api.get_text("/sources").await
+        }
+        "engram_frontier" => {
+            api.get_text("/reason/frontier").await
         }
         // Generic fallback
         other => {

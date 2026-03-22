@@ -707,6 +707,7 @@ dependencies = [
 name = "engram"
 version = "1.1.0"
 dependencies = [
+ "axum",
  "engram-a2a",
  "engram-action",
  "engram-api",
@@ -716,6 +717,7 @@ dependencies = [
  "engram-ingest",
  "engram-mesh",
  "engram-reason",
+ "reqwest",
  "serde_json",
  "tempfile",
  "tokio",

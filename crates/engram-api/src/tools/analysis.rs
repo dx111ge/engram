@@ -12,7 +12,7 @@ pub fn temporal_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Entity to query temporal edges for" },
+                        "entity": { "type": "string", "description": "Entity to query temporal edges for -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "from_date": { "type": "string", "description": "Start date (YYYY-MM-DD)" },
                         "to_date": { "type": "string", "description": "End date (YYYY-MM-DD)" },
                         "relationship": { "type": "string", "description": "Filter to specific relationship type" }
@@ -29,7 +29,7 @@ pub fn temporal_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Entity to build timeline for" },
+                        "entity": { "type": "string", "description": "Entity to build timeline for -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "limit": { "type": "integer", "description": "Max events to return (default: 20)" }
                     },
                     "required": ["entity"]
@@ -44,7 +44,7 @@ pub fn temporal_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Entity to get current state for" },
+                        "entity": { "type": "string", "description": "Entity to get current state for -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "depth": { "type": "integer", "description": "Traversal depth (default: 1)" }
                     },
                     "required": ["entity"]
@@ -64,8 +64,8 @@ pub fn compare_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity_a": { "type": "string", "description": "First entity to compare" },
-                        "entity_b": { "type": "string", "description": "Second entity to compare" },
+                        "entity_a": { "type": "string", "description": "First entity to compare -- use EXACT name as it appears in the graph (copy from query/search results)" },
+                        "entity_b": { "type": "string", "description": "Second entity to compare -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "aspects": { "type": "array", "items": { "type": "string" }, "description": "Specific aspects to compare" }
                     },
                     "required": ["entity_a", "entity_b"]
@@ -80,8 +80,8 @@ pub fn compare_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "from": { "type": "string", "description": "Source entity" },
-                        "to": { "type": "string", "description": "Target entity" },
+                        "from": { "type": "string", "description": "Source entity -- must be the EXACT name as it appears in the graph (copy from query/search results, do not modify casing or formatting)" },
+                        "to": { "type": "string", "description": "Target entity -- must be the EXACT name as it appears in the graph (copy from query/search results, do not modify casing or formatting)" },
                         "max_depth": { "type": "integer", "description": "Maximum path length (default: 6)" }
                     },
                     "required": ["from", "to"]
@@ -159,7 +159,7 @@ pub fn investigation_tools() -> Vec<Value> {
                     "type": "object",
                     "properties": {
                         "since": { "type": "string", "description": "ISO date (YYYY-MM-DD) to look back from" },
-                        "entity": { "type": "string", "description": "Filter to changes affecting a specific entity" }
+                        "entity": { "type": "string", "description": "Filter to changes affecting a specific entity -- use EXACT name as it appears in the graph" }
                     },
                     "required": ["since"]
                 }
@@ -173,7 +173,7 @@ pub fn investigation_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Entity to investigate" },
+                        "entity": { "type": "string", "description": "Entity to investigate -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "depth": { "type": "string", "description": "Investigation depth: shallow (1 search) or deep (3 searches with follow-ups). Default: shallow" }
                     },
                     "required": ["entity"]
@@ -188,7 +188,7 @@ pub fn investigation_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Entity to watch" }
+                        "entity": { "type": "string", "description": "Entity to watch -- use EXACT name as it appears in the graph (copy from query/search results)" }
                     },
                     "required": ["entity"]
                 }

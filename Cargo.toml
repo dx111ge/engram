@@ -74,12 +74,15 @@ bytes = "1"
 [dev-dependencies]
 tempfile = "3"
 engram-core = { path = "crates/engram-core" }
-engram-api = { path = "crates/engram-api" }
+engram-api = { path = "crates/engram-api", features = ["assess", "actions", "reason", "ingest"] }
 engram-compute = { path = "crates/engram-compute" }
 engram-mesh = { path = "crates/engram-mesh" }
 engram-a2a = { path = "crates/engram-a2a", features = ["ingest"] }
 engram-assess = { path = "crates/engram-assess" }
 serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+axum = "0.8"
 
 
 [profile.release]

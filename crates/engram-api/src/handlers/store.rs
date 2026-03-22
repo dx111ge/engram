@@ -46,6 +46,31 @@ pub async fn store(
 
 // ── POST /relate ──
 
+/// Normalize an entity name for fuzzy matching: lowercase, replace hyphens/underscores with spaces, trim.
+fn normalize_entity_name(name: &str) -> String {
+    name.to_lowercase().replace('-', " ").replace('_', " ").trim().to_string()
+}
+
+/// Resolve an entity name: try exact match first, then case-insensitive normalized match.
+/// Returns the actual label from the graph if a fuzzy match is found, otherwise returns the input unchanged.
+fn resolve_entity_label(g: &engram_core::Graph, name: &str) -> String {
+    // Exact match -- fast path
+    if g.get_node(name).ok().flatten().is_some() {
+        return name.to_string();
+    }
+    // Normalized fuzzy match -- scan all nodes
+    let normalized_input = normalize_entity_name(name);
+    if let Ok(nodes) = g.all_nodes() {
+        for node in &nodes {
+            if normalize_entity_name(&node.label) == normalized_input {
+                return node.label.clone();
+            }
+        }
+    }
+    // No match found, return original (will create new node on relate)
+    name.to_string()
+}
+
 pub async fn relate(
     State(state): State<AppState>,
     Json(req): Json<RelateRequest>,
@@ -53,17 +78,21 @@ pub async fn relate(
     let mut g = state.graph.write().map_err(|_| write_lock_err())?;
     let prov = provenance(&None);
 
+    // Resolve entity names: exact match first, then normalized fuzzy match
+    let resolved_from = resolve_entity_label(&g, &req.from);
+    let resolved_to = resolve_entity_label(&g, &req.to);
+
     let has_temporal = req.valid_from.is_some() || req.valid_to.is_some();
     let edge_slot = if has_temporal || req.confidence.is_some() {
         g.relate_with_temporal(
-            &req.from, &req.to, &req.relationship,
+            &resolved_from, &resolved_to, &req.relationship,
             req.confidence.unwrap_or(0.8),
             req.valid_from.as_deref(),
             req.valid_to.as_deref(),
             &prov,
         )
     } else {
-        g.relate(&req.from, &req.to, &req.relationship, &prov)
+        g.relate(&resolved_from, &resolved_to, &req.relationship, &prov)
     }
     .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -72,8 +101,8 @@ pub async fn relate(
     state.fire_rules_async();
 
     Ok(Json(RelateResponse {
-        from: req.from,
-        to: req.to,
+        from: resolved_from,
+        to: resolved_to,
         relationship: req.relationship,
         edge_slot,
     }))

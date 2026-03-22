@@ -16,7 +16,7 @@ pub fn assessment_tools() -> Vec<Value> {
                         "category": { "type": "string", "description": "Category: financial, geopolitical, technical, military, social, other" },
                         "timeframe": { "type": "string", "description": "Time horizon" },
                         "probability": { "type": "number", "description": "Starting probability (0.05-0.95)" },
-                        "watches": { "type": "array", "items": { "type": "string" }, "description": "Entities to watch" }
+                        "watches": { "type": "array", "items": { "type": "string" }, "description": "Entities to watch -- use EXACT names as they appear in the graph (copy from query/search results)" }
                     },
                     "required": ["title"]
                 }
@@ -59,7 +59,7 @@ pub fn assessment_tools() -> Vec<Value> {
                     "type": "object",
                     "properties": {
                         "assessment": { "type": "string", "description": "Assessment label" },
-                        "entity": { "type": "string", "description": "Evidence entity label" },
+                        "entity": { "type": "string", "description": "Evidence entity label -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "direction": { "type": "string", "description": "'supports' or 'contradicts'" }
                     },
                     "required": ["assessment", "entity", "direction"]
@@ -89,7 +89,7 @@ pub fn assessment_tools() -> Vec<Value> {
                     "type": "object",
                     "properties": {
                         "label": { "type": "string", "description": "Assessment label" },
-                        "entity_label": { "type": "string", "description": "Entity to watch" }
+                        "entity_label": { "type": "string", "description": "Entity to watch -- use EXACT name as it appears in the graph (copy from query/search results)" }
                     },
                     "required": ["label"]
                 }
@@ -108,7 +108,7 @@ pub fn reasoning_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Entity to simulate change on" },
+                        "entity": { "type": "string", "description": "Entity to simulate change on -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "new_confidence": { "type": "number", "description": "Hypothetical new confidence (0.0-1.0)" },
                         "depth": { "type": "integer", "description": "How many hops to trace the cascade (default: 2)" }
                     },
@@ -124,8 +124,8 @@ pub fn reasoning_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "from": { "type": "string", "description": "Source entity" },
-                        "to": { "type": "string", "description": "Target entity" },
+                        "from": { "type": "string", "description": "Source entity -- must be the EXACT name as it appears in the graph (copy from query/search results, do not modify casing or formatting)" },
+                        "to": { "type": "string", "description": "Target entity -- must be the EXACT name as it appears in the graph (copy from query/search results, do not modify casing or formatting)" },
                         "max_depth": { "type": "integer", "description": "Maximum path length (default: 5)" }
                     },
                     "required": ["from", "to"]
@@ -189,7 +189,7 @@ pub fn action_tools() -> Vec<Value> {
                     "type": "object",
                     "properties": {
                         "action": { "type": "string", "description": "Action: 'create' or 'list'" },
-                        "entity": { "type": "string", "description": "Entity to schedule monitoring for (required for create)" },
+                        "entity": { "type": "string", "description": "Entity to schedule monitoring for (required for create) -- use EXACT name as it appears in the graph" },
                         "interval": { "type": "string", "description": "Check interval: hourly, daily, weekly (default: daily)" }
                     },
                     "required": ["action"]
@@ -209,7 +209,7 @@ pub fn reporting_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "topic": { "type": "string", "description": "Topic or entity to brief on" },
+                        "topic": { "type": "string", "description": "Topic or entity to brief on -- use EXACT name as it appears in the graph when referencing a specific entity" },
                         "depth": { "type": "string", "description": "Briefing depth: shallow, standard, or deep (default: standard)" },
                         "format": { "type": "string", "description": "Output format: text or json (default: text)" }
                     },
@@ -225,7 +225,7 @@ pub fn reporting_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Central entity" },
+                        "entity": { "type": "string", "description": "Central entity -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "depth": { "type": "integer", "description": "Number of hops (default: 2)" },
                         "format": { "type": "string", "description": "Output format: json-ld or csv (default: json-ld)" }
                     },
@@ -241,7 +241,7 @@ pub fn reporting_tools() -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "entity": { "type": "string", "description": "Entity to narrate" },
+                        "entity": { "type": "string", "description": "Entity to narrate -- use EXACT name as it appears in the graph (copy from query/search results)" },
                         "from_date": { "type": "string", "description": "Start date (YYYY-MM-DD)" },
                         "to_date": { "type": "string", "description": "End date (YYYY-MM-DD)" }
                     },

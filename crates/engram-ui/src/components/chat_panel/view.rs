@@ -16,7 +16,7 @@ pub fn render_message(msg: ChatMessage) -> impl IntoView {
             "background:var(--bg-tertiary, #232730);color:var(--text, #c9ccd3);\
              border-radius:12px 12px 12px 2px;padding:0.6rem 0.85rem;\
              max-width:85%;word-wrap:break-word;font-size:0.85rem;\
-             border:1px solid var(--border, #2d3139);",
+             border:1px solid var(--border, #2d3139);white-space:pre-wrap;",
             "fa-solid fa-brain", "align-self:flex-start;", "Engram",
         ),
         ChatRole::System => (
