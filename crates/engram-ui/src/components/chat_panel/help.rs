@@ -175,16 +175,15 @@ fn help_category_html(title: &str, icon: &str, tools: &[HelpTool]) -> String {
         } else {
             ""
         };
-        let escaped_example = tool.example.replace('\'', "\\'");
         html.push_str(&format!(
             "<div class=\"chat-help-tool\" onclick=\"\
-                window.dispatchEvent(new CustomEvent('engram-chat-send',{{detail:'{escaped}'}}));\">\
+                window.dispatchEvent(new CustomEvent('engram-tool-card',{{detail:'{name}'}}));\">\
                 <div class=\"chat-help-tool-name\">{}{}</div>\
                 <div class=\"chat-help-tool-desc\">{}</div>\
                 <div class=\"chat-help-tool-example\">\"{}\"</div>\
              </div>",
             tool.name, write_badge, tool.description, tool.example,
-            escaped = escaped_example,
+            name = tool.name,
         ));
     }
 
@@ -242,6 +241,170 @@ fn help_actions() -> String {
 
 fn help_reporting() -> String {
     "Reporting Tools:\n\n  briefing, export, entity_timeline".to_string()
+}
+
+/// Generate an interactive parameter card for a specific tool.
+/// These call the engram API directly, bypassing the LLM.
+pub fn generate_tool_card(tool_name: &str) -> Option<String> {
+    let input_style = "width:100%;padding:0.3rem 0.5rem;font-size:0.78rem;\
+        background:var(--bg-input, #1e2028);color:var(--text);border:1px solid var(--border);\
+        border-radius:4px;outline:none;font-family:inherit;box-sizing:border-box;";
+    let label_style = "font-size:0.68rem;color:var(--text-muted);text-transform:uppercase;";
+    let btn_style = "padding:0.35rem 0.75rem;font-size:0.78rem;font-family:inherit;\
+        background:var(--accent, #4a9eff);color:#fff;border:none;border-radius:4px;\
+        cursor:pointer;display:flex;align-items:center;gap:0.3rem;justify-content:center;";
+
+    let xhr_fn = |method: &str, endpoint: &str, body_js: &str, result_event: &str| -> String {
+        format!(
+            "var xhr=new XMLHttpRequest();\
+             xhr.open('{method}','{endpoint}',false);\
+             xhr.setRequestHeader('Content-Type','application/json');\
+             var tok=localStorage.getItem('engram_token');\
+             if(tok)xhr.setRequestHeader('Authorization','Bearer '+tok);\
+             {body}\
+             if(xhr.status===200){{\
+                 window.dispatchEvent(new CustomEvent('{evt}',{{detail:xhr.responseText}}));\
+             }}else{{alert('{endpoint} failed: '+xhr.status);}}",
+            method = method, endpoint = endpoint, body = body_js, evt = result_event,
+        )
+    };
+
+    let card = match tool_name {
+        "query" => format!(
+            "<div class=\"chat-card\">\
+                <div class=\"chat-card-header\"><i class=\"fa-solid fa-diagram-project\"></i> Query Graph</div>\
+                <div class=\"chat-card-body\" style=\"padding:0.5rem 0.6rem;\">\
+                    <div style=\"display:flex;flex-direction:column;gap:0.4rem;\">\
+                        <div><label style=\"{ls}\">Entity</label>\
+                            <input id=\"tc-query-entity\" type=\"text\" placeholder=\"Entity name...\" style=\"{is}\" /></div>\
+                        <div style=\"display:flex;gap:0.5rem;\">\
+                            <div style=\"flex:1;\"><label style=\"{ls}\">Depth</label>\
+                                <input id=\"tc-query-depth\" type=\"number\" value=\"1\" min=\"1\" max=\"5\" style=\"{is}\" /></div>\
+                            <div style=\"flex:1;\"><label style=\"{ls}\">Direction</label>\
+                                <select id=\"tc-query-dir\" style=\"{is}\"><option value=\"both\">Both</option><option value=\"out\">Out</option><option value=\"in\">In</option></select></div>\
+                        </div>\
+                        <button onclick=\"var e=document.getElementById('tc-query-entity').value;\
+                            var d=document.getElementById('tc-query-depth').value;\
+                            var dir=document.getElementById('tc-query-dir').value;\
+                            if(!e){{alert('Entity is required');return;}}\
+                            {xhr}\
+                        \" style=\"{bs}\"><i class=\"fa-solid fa-play\"></i> Run Query</button>\
+                    </div>\
+                </div></div>",
+            ls = label_style, is = input_style, bs = btn_style,
+            xhr = xhr_fn("POST", "/query", "xhr.send(JSON.stringify({query:e,depth:parseInt(d),direction:dir,limit:100}));", "engram-tool-result"),
+        ),
+        "search" => format!(
+            "<div class=\"chat-card\">\
+                <div class=\"chat-card-header\"><i class=\"fa-solid fa-magnifying-glass\"></i> Search Entities</div>\
+                <div class=\"chat-card-body\" style=\"padding:0.5rem 0.6rem;\">\
+                    <div style=\"display:flex;flex-direction:column;gap:0.4rem;\">\
+                        <div><label style=\"{ls}\">Search query</label>\
+                            <input id=\"tc-search-q\" type=\"text\" placeholder=\"Keywords...\" style=\"{is}\" /></div>\
+                        <button onclick=\"var q=document.getElementById('tc-search-q').value;\
+                            if(!q){{alert('Query is required');return;}}\
+                            {xhr}\
+                        \" style=\"{bs}\"><i class=\"fa-solid fa-play\"></i> Search</button>\
+                    </div>\
+                </div></div>",
+            ls = label_style, is = input_style, bs = btn_style,
+            xhr = xhr_fn("POST", "/search", "xhr.send(JSON.stringify({query:q,limit:20}));", "engram-tool-result"),
+        ),
+        "explain" => format!(
+            "<div class=\"chat-card\">\
+                <div class=\"chat-card-header\"><i class=\"fa-solid fa-circle-info\"></i> Explain Entity</div>\
+                <div class=\"chat-card-body\" style=\"padding:0.5rem 0.6rem;\">\
+                    <div style=\"display:flex;flex-direction:column;gap:0.4rem;\">\
+                        <div><label style=\"{ls}\">Entity</label>\
+                            <input id=\"tc-explain-e\" type=\"text\" placeholder=\"Entity name...\" style=\"{is}\" /></div>\
+                        <button onclick=\"var e=document.getElementById('tc-explain-e').value;\
+                            if(!e){{alert('Entity is required');return;}}\
+                            var xhr=new XMLHttpRequest();\
+                            xhr.open('GET','/explain/'+encodeURIComponent(e),false);\
+                            var tok=localStorage.getItem('engram_token');\
+                            if(tok)xhr.setRequestHeader('Authorization','Bearer '+tok);\
+                            xhr.send();\
+                            if(xhr.status===200){{\
+                                window.dispatchEvent(new CustomEvent('engram-tool-result',{{detail:xhr.responseText}}));\
+                            }}else{{alert('Explain failed: '+xhr.status);}}\
+                        \" style=\"{bs}\"><i class=\"fa-solid fa-play\"></i> Explain</button>\
+                    </div>\
+                </div></div>",
+            ls = label_style, is = input_style, bs = btn_style,
+        ),
+        "similar" => format!(
+            "<div class=\"chat-card\">\
+                <div class=\"chat-card-header\"><i class=\"fa-solid fa-arrows-spin\"></i> Similar Entities</div>\
+                <div class=\"chat-card-body\" style=\"padding:0.5rem 0.6rem;\">\
+                    <div style=\"display:flex;flex-direction:column;gap:0.4rem;\">\
+                        <div><label style=\"{ls}\">Entity / text</label>\
+                            <input id=\"tc-similar-t\" type=\"text\" placeholder=\"Find similar to...\" style=\"{is}\" /></div>\
+                        <button onclick=\"var t=document.getElementById('tc-similar-t').value;\
+                            if(!t){{alert('Text is required');return;}}\
+                            {xhr}\
+                        \" style=\"{bs}\"><i class=\"fa-solid fa-play\"></i> Find Similar</button>\
+                    </div>\
+                </div></div>",
+            ls = label_style, is = input_style, bs = btn_style,
+            xhr = xhr_fn("POST", "/similar", "xhr.send(JSON.stringify({text:t,limit:10}));", "engram-tool-result"),
+        ),
+        "compare" => format!(
+            "<div class=\"chat-card\">\
+                <div class=\"chat-card-header\"><i class=\"fa-solid fa-code-compare\"></i> Compare Entities</div>\
+                <div class=\"chat-card-body\" style=\"padding:0.5rem 0.6rem;\">\
+                    <div style=\"display:flex;flex-direction:column;gap:0.4rem;\">\
+                        <div><label style=\"{ls}\">Entity A</label>\
+                            <input id=\"tc-compare-a\" type=\"text\" placeholder=\"First entity...\" style=\"{is}\" /></div>\
+                        <div><label style=\"{ls}\">Entity B</label>\
+                            <input id=\"tc-compare-b\" type=\"text\" placeholder=\"Second entity...\" style=\"{is}\" /></div>\
+                        <button onclick=\"var a=document.getElementById('tc-compare-a').value;\
+                            var b=document.getElementById('tc-compare-b').value;\
+                            if(!a||!b){{alert('Both entities required');return;}}\
+                            {xhr}\
+                        \" style=\"{bs}\"><i class=\"fa-solid fa-play\"></i> Compare</button>\
+                    </div>\
+                </div></div>",
+            ls = label_style, is = input_style, bs = btn_style,
+            xhr = xhr_fn("POST", "/chat/compare", "xhr.send(JSON.stringify({entity_a:a,entity_b:b}));", "engram-tool-result"),
+        ),
+        "most_connected" => format!(
+            "<div class=\"chat-card\">\
+                <div class=\"chat-card-header\"><i class=\"fa-solid fa-chart-bar\"></i> Most Connected</div>\
+                <div class=\"chat-card-body\" style=\"padding:0.5rem 0.6rem;\">\
+                    <div style=\"display:flex;flex-direction:column;gap:0.4rem;\">\
+                        <div><label style=\"{ls}\">Limit</label>\
+                            <input id=\"tc-mc-limit\" type=\"number\" value=\"10\" min=\"1\" max=\"50\" style=\"{is}\" /></div>\
+                        <button onclick=\"var l=document.getElementById('tc-mc-limit').value;\
+                            {xhr}\
+                        \" style=\"{bs}\"><i class=\"fa-solid fa-play\"></i> Find Most Connected</button>\
+                    </div>\
+                </div></div>",
+            ls = label_style, is = input_style, bs = btn_style,
+            xhr = xhr_fn("POST", "/chat/most_connected", "xhr.send(JSON.stringify({limit:parseInt(l)}));", "engram-tool-result"),
+        ),
+        "shortest_path" => format!(
+            "<div class=\"chat-card\">\
+                <div class=\"chat-card-header\"><i class=\"fa-solid fa-route\"></i> Shortest Path</div>\
+                <div class=\"chat-card-body\" style=\"padding:0.5rem 0.6rem;\">\
+                    <div style=\"display:flex;flex-direction:column;gap:0.4rem;\">\
+                        <div><label style=\"{ls}\">From</label>\
+                            <input id=\"tc-sp-from\" type=\"text\" placeholder=\"Start entity...\" style=\"{is}\" /></div>\
+                        <div><label style=\"{ls}\">To</label>\
+                            <input id=\"tc-sp-to\" type=\"text\" placeholder=\"Target entity...\" style=\"{is}\" /></div>\
+                        <button onclick=\"var f=document.getElementById('tc-sp-from').value;\
+                            var t=document.getElementById('tc-sp-to').value;\
+                            if(!f||!t){{alert('Both entities required');return;}}\
+                            {xhr}\
+                        \" style=\"{bs}\"><i class=\"fa-solid fa-play\"></i> Find Shortest Path</button>\
+                    </div>\
+                </div></div>",
+            ls = label_style, is = input_style, bs = btn_style,
+            xhr = xhr_fn("POST", "/chat/shortest_path", "xhr.send(JSON.stringify({from:f,to:t,max_depth:6}));", "engram-tool-result"),
+        ),
+        _ => return None,
+    };
+
+    Some(card)
 }
 
 /// Generate an interactive path search card for the /path command.
@@ -374,7 +537,7 @@ mod tests {
     fn test_help_category_tools_are_clickable() {
         let html = generate_help_html("/help knowledge");
         assert!(html.contains("onclick"));
-        assert!(html.contains("engram-chat-send"));
+        assert!(html.contains("engram-tool-card"));
     }
 
     #[test]

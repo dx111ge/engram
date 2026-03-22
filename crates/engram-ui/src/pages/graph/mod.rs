@@ -73,9 +73,6 @@ pub fn GraphPage() -> impl IntoView {
     let (detail_modal_open, set_detail_modal_open) = signal(false);
     let (detail_node_id, set_detail_node_id) = signal(Option::<String>::None);
 
-    // Ensure chat is always open on Explore page
-    let chat_open = use_context::<RwSignal<bool>>().expect("chat_open context");
-    chat_open.set(true);
 
     // Smart search action: try variations, traverse best match, fall back to list
     let api_query = api.clone();

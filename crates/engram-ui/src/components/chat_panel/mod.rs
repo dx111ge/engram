@@ -12,6 +12,7 @@ pub mod tools;
 pub mod view;
 pub mod markdown;
 pub mod cards;
+pub mod intent;
 
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
@@ -155,223 +156,177 @@ pub fn ChatPanel(
             return;
         }
 
-        let api = api_send.clone();
-        spawn_local(async move {
-            // 1. Check LLM configuration
-            let config: Result<serde_json::Value, _> = api.get("/config").await;
-            let (llm_endpoint, llm_model) = match &config {
-                Ok(cfg) => {
-                    let endpoint = cfg.get("llm_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let model = cfg.get("llm_model").and_then(|v| v.as_str()).unwrap_or("default").to_string();
-                    (endpoint, model)
-                }
-                Err(_) => (None, "default".to_string()),
-            };
+        // ── Intent-based routing: keyword detection → show tool card ──
+        // No LLM tool calls. Cards call the API directly.
 
-            if llm_endpoint.is_none() || llm_endpoint.as_deref() == Some("") {
-                set_messages.update(|msgs| {
-                    msgs.push(ChatMessage {
-                        role: ChatRole::System,
-                        content: "LLM not configured. Go to System > Language Model to set up.".to_string(),
-                        display_html: None,
-                    });
-                });
-                set_sending.set(false);
-                return;
-            }
+        let detected = intent::detect_intent(&text);
 
-            // 2. Context retrieval (visible step)
-            let keywords = context::extract_keywords(&text);
-            let context_items = if !keywords.is_empty() {
-                set_messages.update(|msgs| {
-                    msgs.push(ChatMessage {
-                        role: ChatRole::Context,
-                        content: format!("Retrieving context for: {}", keywords.join(", ")),
-                        display_html: None,
-                    });
-                });
-                context::retrieve_context(&api, &keywords).await
-            } else {
-                Vec::new()
-            };
-
-            // Update context message with results
-            if !context_items.is_empty() {
-                set_messages.update(|msgs| {
-                    // Replace the "Retrieving..." message with results
-                    if let Some(last_ctx) = msgs.iter_mut().rev().find(|m| m.role == ChatRole::Context) {
-                        let items_str: Vec<String> = context_items.iter().map(|c| {
-                            let typ = c.node_type.as_deref().unwrap_or("entity");
-                            format!("{} ({}, {:.0}%)", c.label, typ, c.confidence * 100.0)
-                        }).collect();
-                        last_ctx.content = format!("Context: {}", items_str.join(", "));
-                    }
-                });
-            }
-
-            // 3. Get graph stats for system prompt
-            let (node_count, edge_count) = match api.get::<serde_json::Value>("/stats").await {
-                Ok(stats) => (
-                    stats.get("nodes").and_then(|v| v.as_u64()).unwrap_or(0),
-                    stats.get("edges").and_then(|v| v.as_u64()).unwrap_or(0),
-                ),
-                Err(_) => (0, 0),
-            };
-
-            // 4. Build system prompt with context
-            let page = current_pathname();
-            // Read page context signals
-            let selected_node = chat_selected_node.and_then(|s| s.0.get_untracked());
-            let current_assessment = chat_assessment.and_then(|s| s.0.get_untracked());
-            let context_block = context::format_context_block(
-                &context_items, &page, &selected_node, &current_assessment,
-                node_count, edge_count,
-            );
-
-            // Get persona from config (llm_system_prompt) or use default
-            let persona = config.as_ref().ok()
-                .and_then(|c| c.get("llm_system_prompt").and_then(|v| v.as_str()))
-                .filter(|s| !s.is_empty())
-                .unwrap_or(context::DEFAULT_PERSONA);
-            let system_prompt = context::build_system_prompt(&context_block, persona);
-
-            // 5. Fetch tools
-            let tools_val: Option<serde_json::Value> = api.get::<serde_json::Value>("/tools").await.ok();
-            let tools_array = tools_val.as_ref().and_then(|v| v.get("tools")).cloned();
-
-            // 6. Build message history
-            let mut all_messages = vec![ChatMessage {
-                role: ChatRole::System,
-                content: system_prompt,
-                display_html: None,
-            }];
-            all_messages.extend(messages.get_untracked());
-
-            // 7. LLM call with tool loop
-            let mut collected_writes = Vec::<PendingWrite>::new();
-            let max_tool_rounds = 5;
-
-            for _round in 0..max_tool_rounds {
-                let llm_msgs = build_llm_messages(&all_messages);
-                let req = LlmProxyRequest {
-                    model: llm_model.clone(),
-                    messages: llm_msgs,
-                    temperature: Some(0.3),
-                    tools: tools_array.clone(),
+        // For tools that have interactive cards, show the card with pre-filled values
+        if let Some(card_html) = help::generate_tool_card(detected.tool) {
+            // For two-entity tools, try to pre-fill both fields via JS after rendering
+            let prefill_js = if !detected.prefill.is_empty() {
+                let p1 = detected.prefill.replace('\'', "\\'");
+                let p2 = detected.prefill2.replace('\'', "\\'");
+                let id_prefix = match detected.tool {
+                    "query" => "tc-query-entity",
+                    "search" => "tc-search-q",
+                    "explain" => "tc-explain-e",
+                    "similar" => "tc-similar-t",
+                    "compare" => "tc-compare-a",
+                    "shortest_path" => "tc-sp-from",
+                    _ => "",
                 };
-
-                let resp: Result<LlmProxyResponse, _> = api.post("/proxy/llm", &req).await;
-
-                match resp {
-                    Ok(r) => {
-                        let choice = r.choices.first().and_then(|c| c.message.as_ref());
-                        if let Some(msg) = choice {
-                            // Display assistant text with markdown rendering
-                            if let Some(content) = &msg.content {
-                                if !content.is_empty() {
-                                    let rendered_html = markdown::markdown_to_html(content);
-                                    let assistant_msg = ChatMessage {
-                                        role: ChatRole::Assistant,
-                                        content: content.clone(),
-                                        display_html: Some(rendered_html),
-                                    };
-                                    all_messages.push(assistant_msg.clone());
-                                    set_messages.update(|msgs| msgs.push(assistant_msg));
-                                }
-                            }
-
-                            // Process tool calls
-                            if let Some(tool_calls) = &msg.tool_calls {
-                                if tool_calls.is_empty() {
-                                    break;
-                                }
-                                for tc in tool_calls {
-                                    let tool_name = &tc.function.name;
-                                    let tool_args = &tc.function.arguments;
-
-                                    if is_write_tool(tool_name) {
-                                        // Collect write for confirmation
-                                        let label = write_label(tool_name, tool_args);
-                                        collected_writes.push(PendingWrite {
-                                            label,
-                                            tool_name: tool_name.clone(),
-                                            args: tool_args.clone(),
-                                            selected: true,
-                                        });
-
-                                        // Tell LLM the write is pending confirmation
-                                        let pending_msg = format!(
-                                            "{{\"status\": \"pending_confirmation\", \"tool\": \"{tool_name}\"}}"
-                                        );
-                                        all_messages.push(ChatMessage {
-                                            role: ChatRole::ToolResult,
-                                            content: pending_msg,
-                                            display_html: None,
-                                        });
-                                    } else {
-                                        // Execute read tool immediately
-                                        let result = tools::execute_tool(&api, tool_name, tool_args).await;
-
-                                        // Generate rich card HTML for display
-                                        let card_html = cards::render_tool_card(tool_name, &result);
-
-                                        // Dispatch graph data to main canvas (on Explore page)
-                                        dispatch_graph_data(tool_name, &result);
-
-                                        let display_result = if result.len() > 500 {
-                                            format!("{}...", &result[..500])
-                                        } else {
-                                            result.clone()
-                                        };
-
-                                        let tool_msg = ChatMessage {
-                                            role: ChatRole::ToolResult,
-                                            content: format!("[{tool_name}] {display_result}"),
-                                            display_html: Some(card_html),
-                                        };
-                                        set_messages.update(|msgs| msgs.push(tool_msg));
-
-                                        all_messages.push(ChatMessage {
-                                            role: ChatRole::ToolResult,
-                                            content: result,
-                                            display_html: None,
-                                        });
-                                    }
-                                }
-                                continue;
-                            }
+                if !id_prefix.is_empty() {
+                    let mut js = format!(
+                        "requestAnimationFrame(function(){{var el=document.getElementById('{}');if(el)el.value='{}';",
+                        id_prefix, p1,
+                    );
+                    // Pre-fill second field for compare/path
+                    if !p2.is_empty() {
+                        let id2 = match detected.tool {
+                            "compare" => "tc-compare-b",
+                            "shortest_path" => "tc-sp-to",
+                            _ => "",
+                        };
+                        if !id2.is_empty() {
+                            js.push_str(&format!(
+                                "var el2=document.getElementById('{}');if(el2)el2.value='{}';",
+                                id2, p2,
+                            ));
                         }
-                        break;
                     }
-                    Err(e) => {
-                        set_messages.update(|msgs| {
-                            msgs.push(ChatMessage {
-                                role: ChatRole::System,
-                                content: format!("LLM request failed: {e}"),
-                                display_html: None,
-                            });
+                    js.push_str("});");
+                    js
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            set_messages.update(|msgs| {
+                msgs.push(ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: format!("Tool: {}", detected.tool),
+                    display_html: Some(card_html),
+                });
+            });
+
+            if !prefill_js.is_empty() {
+                let _ = js_sys::eval(&prefill_js);
+            }
+
+            set_sending.set(false);
+            return;
+        }
+
+        // For tools without cards (gaps, most_connected, isolated, category commands),
+        // execute directly via API
+        let api = api_send.clone();
+        let tool = detected.tool.to_string();
+        let prefill = detected.prefill.clone();
+        spawn_local(async move {
+            let result: Result<String, _> = match tool.as_str() {
+                "gaps" => api.get_text("/reason/gaps").await,
+                "most_connected" => {
+                    let body = serde_json::json!({"limit": 10});
+                    api.post_text("/chat/most_connected", &body).await
+                }
+                "isolated" => {
+                    let body = serde_json::json!({"max_edges": 1});
+                    api.post_text("/chat/isolated", &body).await
+                }
+                "analyze" | "knowledge" | "investigate" => {
+                    // Category commands: run explain + query for the entity
+                    let encoded = js_sys::encode_uri_component(&prefill);
+                    let explain_result = api.get_text(
+                        &format!("/explain/{}", encoded.as_string().unwrap_or_default())
+                    ).await.unwrap_or_default();
+
+                    let explain_card = cards::render_tool_card("engram_explain", &explain_result);
+                    dispatch_graph_data("engram_explain", &explain_result);
+                    set_messages.update(|msgs| {
+                        msgs.push(ChatMessage {
+                            role: ChatRole::ToolResult,
+                            content: format!("Explain: {}", prefill),
+                            display_html: Some(explain_card),
                         });
-                        break;
-                    }
+                    });
+
+                    // Also run query for graph
+                    let body = serde_json::json!({"query": prefill, "depth": 2, "direction": "both", "limit": 100});
+                    let query_result = api.post_text("/query", &body).await.unwrap_or_default();
+                    dispatch_graph_data("engram_query", &query_result);
+
+                    let query_card = cards::render_tool_card("engram_query", &query_result);
+                    set_messages.update(|msgs| {
+                        msgs.push(ChatMessage {
+                            role: ChatRole::ToolResult,
+                            content: format!("Query: {}", prefill),
+                            display_html: Some(query_card),
+                        });
+                    });
+
+                    set_sending.set(false);
+                    return;
+                }
+                "briefing" => {
+                    let body = serde_json::json!({"topic": prefill, "depth": 2, "format": "structured"});
+                    api.post_text("/chat/briefing", &body).await
+                }
+                "timeline" => {
+                    let body = serde_json::json!({"entity": prefill, "limit": 20});
+                    api.post_text("/chat/timeline", &body).await
+                }
+                "what_if" => {
+                    // Show parameter card for what-if (needs entity + confidence)
+                    set_messages.update(|msgs| {
+                        msgs.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            content: "What-if analysis requires entity and new confidence. Use the what-if tool card.".to_string(),
+                            display_html: None,
+                        });
+                    });
+                    set_sending.set(false);
+                    return;
+                }
+                _ => {
+                    // Unknown tool -- show as system message
+                    set_messages.update(|msgs| {
+                        msgs.push(ChatMessage {
+                            role: ChatRole::System,
+                            content: format!("Unknown command: {}. Type /help for available commands.", tool),
+                            display_html: None,
+                        });
+                    });
+                    set_sending.set(false);
+                    return;
+                }
+            };
+
+            match result {
+                Ok(json_str) => {
+                    let card_tool = format!("engram_{}", tool);
+                    let card_html = cards::render_tool_card(&card_tool, &json_str);
+                    dispatch_graph_data(&card_tool, &json_str);
+                    set_messages.update(|msgs| {
+                        msgs.push(ChatMessage {
+                            role: ChatRole::ToolResult,
+                            content: if json_str.len() > 500 { format!("{}...", &json_str[..500]) } else { json_str },
+                            display_html: Some(card_html),
+                        });
+                    });
+                }
+                Err(e) => {
+                    set_messages.update(|msgs| {
+                        msgs.push(ChatMessage {
+                            role: ChatRole::System,
+                            content: format!("API call failed: {e}"),
+                            display_html: None,
+                        });
+                    });
                 }
             }
-
-            // 8. Show write confirmation if any writes pending
-            if !collected_writes.is_empty() {
-                set_pending_writes.set(collected_writes);
-                set_messages.update(|msgs| {
-                    msgs.push(ChatMessage {
-                        role: ChatRole::WriteConfirmation,
-                        content: "Proposed changes ready for review.".to_string(),
-                        display_html: None,
-                    });
-                });
-            }
-
-            // 9. Extract follow-up suggestions from last assistant message
-            let suggestions = view::extract_follow_ups(&messages.get_untracked());
-            set_follow_ups.set(suggestions);
-
             set_sending.set(false);
         });
     };
@@ -507,6 +462,79 @@ pub fn ChatPanel(
         );
         cb.forget();
     }
+
+    // ── Listen for tool-card events (show interactive parameter form) ──
+
+    {
+        let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::CustomEvent| {
+            if let Some(tool_name) = ev.detail().as_string() {
+                if let Some(card_html) = help::generate_tool_card(&tool_name) {
+                    set_messages.update(|msgs| {
+                        msgs.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            content: format!("Tool: {}", tool_name),
+                            display_html: Some(card_html),
+                        });
+                    });
+                }
+            }
+        }) as Box<dyn FnMut(web_sys::CustomEvent)>);
+        let _ = web_sys::window().unwrap().add_event_listener_with_callback(
+            "engram-tool-card",
+            cb.as_ref().unchecked_ref(),
+        );
+        cb.forget();
+    }
+
+    // ── Listen for tool-result events (direct API call results) ──
+
+    {
+        let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::CustomEvent| {
+            if let Some(json_str) = ev.detail().as_string() {
+                // Try to detect which tool produced this result for proper card rendering
+                let tool_name = if json_str.contains("\"results\"") {
+                    "engram_search"
+                } else if json_str.contains("\"edges_from\"") || json_str.contains("\"edges_to\"") {
+                    "engram_explain"
+                } else if json_str.contains("\"nodes\"") && json_str.contains("\"edges\"") {
+                    "engram_query"
+                } else if json_str.contains("\"paths\"") {
+                    "engram_shortest_path"
+                } else if json_str.contains("\"entities\"") {
+                    "engram_most_connected"
+                } else {
+                    "engram_query" // default
+                };
+
+                let card_html = cards::render_tool_card(tool_name, &json_str);
+                dispatch_graph_data(tool_name, &json_str);
+
+                set_messages.update(|msgs| {
+                    msgs.push(ChatMessage {
+                        role: ChatRole::ToolResult,
+                        content: json_str.chars().take(500).collect(),
+                        display_html: Some(card_html),
+                    });
+                });
+            }
+        }) as Box<dyn FnMut(web_sys::CustomEvent)>);
+        let _ = web_sys::window().unwrap().add_event_listener_with_callback(
+            "engram-tool-result",
+            cb.as_ref().unchecked_ref(),
+        );
+        cb.forget();
+    }
+
+    // ── Auto-scroll chat to bottom when messages change ──
+
+    Effect::new(move |_| {
+        let _count = messages.get().len(); // subscribe to changes
+        // Use requestAnimationFrame to scroll after DOM update
+        let _ = js_sys::eval(
+            "requestAnimationFrame(function(){var el=document.querySelector('.chat-messages');\
+             if(el)el.scrollTop=el.scrollHeight;})"
+        );
+    });
 
     // ── Follow-up click ──
 
