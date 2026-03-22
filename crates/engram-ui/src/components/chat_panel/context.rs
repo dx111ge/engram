@@ -172,6 +172,14 @@ pub fn build_system_prompt(context_block: &str, persona: &str) -> String {
         "{persona}\n\n\
          CONTEXT (auto-injected):\n\
          {context_block}\n\n\
+         TOOL SELECTION RULES (critical):\n\
+         - When the user says 'search X', 'find X', 'look up X' -> use engram_search (READ tool)\n\
+         - When the user says 'explain X', 'tell me about X', 'what is X' -> use engram_explain (READ tool)\n\
+         - When the user says 'query X', 'show connections of X' -> use engram_query (READ tool)\n\
+         - NEVER use engram_ingest_text unless the user explicitly asks to ingest/import text\n\
+         - NEVER use write tools (store, relate, ingest) for read operations\n\
+         - Prefer engram_search for finding entities, engram_explain for entity details, engram_query for graph traversal\n\
+         - Use engram_timeline only when the user explicitly asks about timeline/history/changes over time\n\n\
          BEHAVIOR:\n\
          - Always cite confidence levels when reporting facts\n\
          - Flag low-confidence (<40%) data explicitly\n\

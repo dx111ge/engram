@@ -16,7 +16,7 @@ pub fn render_message(msg: ChatMessage) -> impl IntoView {
             "background:var(--bg-tertiary, #232730);color:var(--text, #c9ccd3);\
              border-radius:12px 12px 12px 2px;padding:0.6rem 0.85rem;\
              max-width:85%;word-wrap:break-word;font-size:0.85rem;\
-             border:1px solid var(--border, #2d3139);white-space:pre-wrap;",
+             border:1px solid var(--border, #2d3139);",
             "fa-solid fa-brain", "align-self:flex-start;", "Engram",
         ),
         ChatRole::System => (
@@ -30,8 +30,7 @@ pub fn render_message(msg: ChatMessage) -> impl IntoView {
             "background:var(--bg-tertiary, #232730);color:var(--text-muted, #8b8fa3);\
              border-radius:6px;padding:0.4rem 0.65rem;\
              max-width:90%;word-wrap:break-word;font-size:0.75rem;\
-             border-left:3px solid var(--accent, #4a9eff);\
-             font-family:monospace;white-space:pre-wrap;",
+             border-left:3px solid var(--accent, #4a9eff);",
             "fa-solid fa-wrench", "align-self:flex-start;", "Tool",
         ),
         ChatRole::Context => (
@@ -50,7 +49,14 @@ pub fn render_message(msg: ChatMessage) -> impl IntoView {
         ),
     };
 
-    let wrapper_style = format!("display:flex;flex-direction:column;{align}gap:0.2rem;");
+    let has_html = msg.display_html.is_some();
+    let wrapper_style = if has_html && msg.role != ChatRole::User {
+        format!("display:flex;flex-direction:column;{align}gap:0.2rem;width:100%;")
+    } else {
+        format!("display:flex;flex-direction:column;{align}gap:0.2rem;")
+    };
+    let html_content = msg.display_html.clone().unwrap_or_default();
+    let text_content = msg.content.clone();
 
     view! {
         <div style=wrapper_style>
@@ -59,9 +65,20 @@ pub fn render_message(msg: ChatMessage) -> impl IntoView {
                 <i class=icon_class style="font-size:0.65rem;"></i>
                 <span>{role_name}</span>
             </div>
-            <div style=bubble_style>
-                {msg.content.clone()}
-            </div>
+            {if has_html {
+                // Rich HTML rendering (markdown, cards, help grids) -- full width
+                let html_style = format!("{}max-width:100%;", bubble_style);
+                view! {
+                    <div class="chat-md" style=html_style inner_html=html_content></div>
+                }.into_any()
+            } else {
+                // Plain text rendering
+                view! {
+                    <div style=format!("{bubble_style}white-space:pre-wrap;")>
+                        {text_content}
+                    </div>
+                }.into_any()
+            }}
         </div>
     }
 }

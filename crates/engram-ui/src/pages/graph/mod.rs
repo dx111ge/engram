@@ -2,7 +2,6 @@ mod search;
 mod sidebar;
 
 use leptos::prelude::*;
-use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
 use crate::api::ApiClient;
@@ -11,6 +10,8 @@ use crate::components::chat_types::ChatSelectedNode;
 use crate::components::graph_canvas::GraphCanvas;
 use crate::components::crud_modal::CrudModal;
 use crate::components::detail_modal::DetailModal;
+use crate::components::explore_controls::ExploreControls;
+use crate::components::chat_panel::ChatPanel;
 
 use search::search_variations;
 
@@ -48,7 +49,7 @@ pub fn GraphPage() -> impl IntoView {
     let (edges, set_edges) = signal(Vec::<serde_json::Value>::new());
     let (_selected_node, set_selected_node) = signal(Option::<String>::None);
     let chat_selected = use_context::<ChatSelectedNode>();
-    let (node_detail, set_node_detail) = signal(Option::<NodeResponse>::None);
+    let (_node_detail, set_node_detail) = signal(Option::<NodeResponse>::None);
     let (search_term, set_search_term) = signal(String::new());
     let (depth, set_depth) = signal(1u32);
     let (min_strength, set_min_strength) = signal(0.0f32);
@@ -64,58 +65,17 @@ pub fn GraphPage() -> impl IntoView {
     let (edge_bundling, set_edge_bundling) = signal(false);
     let (temporal_current_only, set_temporal_current_only) = signal(false);
     let (highlighted_node, set_highlighted_node) = signal(Option::<String>::None);
-    let (filters_open, set_filters_open) = signal(false);
-
-    // Smart search: results list fallback
-    let (search_results, set_search_results) = signal(Vec::<NodeHit>::new());
-    let (show_results_list, set_show_results_list) = signal(false);
 
     // Progressive disclosure hint
     let (show_hint, set_show_hint) = signal(false);
-
-    // Find Path sidebar signals
-    let (path_autocomplete_open, set_path_autocomplete_open) = signal(true);
-    let (path_from, set_path_from) = signal(Option::<String>::None);
-    let (path_target_query, set_path_target_query) = signal(String::new());
-    let (path_via_query, set_path_via_query) = signal(String::new());
-    let (path_min_depth, set_path_min_depth) = signal(1u32);
-    let (path_max_depth, set_path_max_depth) = signal(5u32);
-    let (path_results, set_path_results) = signal(Vec::<Vec<String>>::new());
-    let (path_selected, set_path_selected) = signal(Vec::<bool>::new());
 
     // Detail modal signals
     let (detail_modal_open, set_detail_modal_open) = signal(false);
     let (detail_node_id, set_detail_node_id) = signal(Option::<String>::None);
 
-    // Derived: count node types from current graph data
-    let type_counts = Signal::derive(move || {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for n in nodes.get().iter() {
-            let nt = n.get("node_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Entity")
-                .to_string();
-            *counts.entry(nt).or_insert(0) += 1;
-        }
-        let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
-        sorted
-    });
-
-    // Derived: count relationship types from current graph data
-    let rel_counts = Signal::derive(move || {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for e in edges.get().iter() {
-            let rel = e.get("label")
-                .and_then(|v| v.as_str())
-                .unwrap_or("related_to")
-                .to_string();
-            *counts.entry(rel).or_insert(0) += 1;
-        }
-        let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
-        sorted
-    });
+    // Ensure chat is always open on Explore page
+    let chat_open = use_context::<RwSignal<bool>>().expect("chat_open context");
+    chat_open.set(true);
 
     // Smart search action: try variations, traverse best match, fall back to list
     let api_query = api.clone();
@@ -128,8 +88,6 @@ pub fn GraphPage() -> impl IntoView {
         async move {
             if query.is_empty() { return; }
             set_loading.set(true);
-            set_show_results_list.set(false);
-            set_search_results.set(Vec::new());
 
             // Generate search variations
             let variations = search_variations(&query);
@@ -183,9 +141,6 @@ pub fn GraphPage() -> impl IntoView {
                 match api.post::<_, QueryResponse>("/query", &body).await {
                     Ok(result) => {
                         if result.nodes.is_empty() {
-                            // Traverse returned nothing -- show as list fallback
-                            set_search_results.set(all_results);
-                            set_show_results_list.set(true);
                             set_nodes.set(Vec::new());
                             set_edges.set(Vec::new());
                         } else {
@@ -273,27 +228,22 @@ pub fn GraphPage() -> impl IntoView {
                 set_start_node.set(None);
             }
 
-            // Clear filters, highlight, and path state on new search
+            // Clear filters, highlight on new search
             set_hidden_types.set(Vec::new());
             set_hidden_rels.set(Vec::new());
             set_highlighted_node.set(None);
-            set_path_from.set(None);
-            set_path_results.set(Vec::new());
-            set_path_selected.set(Vec::new());
-            set_path_target_query.set(String::new());
-            set_path_via_query.set(String::new());
             set_loading.set(false);
         }
     });
 
-    // Load node details on click + highlight (sidebar preview only, no modal)
+    // Load node details on click + highlight + push detail card to chat
     let api_detail = api.clone();
     let on_select = Callback::new(move |node_id: String| {
         set_selected_node.set(Some(node_id.clone()));
         if let Some(ctx) = chat_selected { ctx.0.set(Some(node_id.clone())); }
         set_highlighted_node.set(Some(node_id.clone()));
         set_detail_node_id.set(Some(node_id.clone()));
-        // Do NOT open modal on click -- modal opens from sidebar "Open" button or context menu
+        // Do NOT open modal on click -- modal opens from "Open" button
         let api = api_detail.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let encoded = js_sys::encode_uri_component(&node_id);
@@ -394,22 +344,114 @@ pub fn GraphPage() -> impl IntoView {
 
     // Listen for JS context menu "Find Path From..." event
     {
-        let set_pf = set_path_from.clone();
-        let set_pr = set_path_results.clone();
-        let set_ps = set_path_selected.clone();
-        let set_ptq = set_path_target_query.clone();
-        let set_pvq = set_path_via_query.clone();
         let cb = Closure::wrap(Box::new(move |ev: web_sys::CustomEvent| {
             if let Some(detail) = ev.detail().as_string() {
-                set_pf.set(Some(detail));
-                set_pr.set(Vec::new());
-                set_ps.set(Vec::new());
-                set_ptq.set(String::new());
-                set_pvq.set(String::new());
+                if let Some(ctx) = chat_selected { ctx.0.set(Some(detail)); }
             }
         }) as Box<dyn FnMut(web_sys::CustomEvent)>);
         let _ = web_sys::window().unwrap().add_event_listener_with_callback(
             "engram-set-path-from",
+            cb.as_ref().unchecked_ref(),
+        );
+        cb.forget();
+    }
+
+    // Listen for chat graph data push events (Phase 5)
+    {
+        let set_n = set_nodes.clone();
+        let set_e = set_edges.clone();
+        let cb = Closure::wrap(Box::new(move |ev: web_sys::CustomEvent| {
+            if let Ok(detail_str) = js_sys::JSON::stringify(&ev.detail()) {
+                if let Some(s) = detail_str.as_string() {
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&s) {
+                        if let Some(new_nodes) = data.get("nodes").and_then(|v| v.as_array()) {
+                            let vis_nodes: Vec<serde_json::Value> = new_nodes.iter().map(|n| {
+                                let label = n.get("label").or_else(|| n.get("id"))
+                                    .and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                                let ntype = n.get("node_type").and_then(|v| v.as_str()).unwrap_or("Entity");
+                                let conf = n.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5);
+                                let base_size = 4.0 + (conf * 6.0);
+                                serde_json::json!({
+                                    "id": label,
+                                    "label": label,
+                                    "display_label": label,
+                                    "title": format!("{} ({:.0}%)", ntype, conf * 100.0),
+                                    "node_type": ntype,
+                                    "confidence": conf,
+                                    "size": base_size,
+                                })
+                            }).collect();
+
+                            set_n.update(|existing| {
+                                for node in vis_nodes {
+                                    if !existing.iter().any(|e| e.get("id") == node.get("id")) {
+                                        existing.push(node);
+                                    }
+                                }
+                            });
+                        }
+                        if let Some(new_edges) = data.get("edges").and_then(|v| v.as_array()) {
+                            let vis_edges: Vec<serde_json::Value> = new_edges.iter().filter_map(|e| {
+                                let from = e.get("from").and_then(|v| v.as_str())?;
+                                let to = e.get("to").and_then(|v| v.as_str())?;
+                                let rel = e.get("relationship").or_else(|| e.get("label"))
+                                    .and_then(|v| v.as_str()).unwrap_or("related_to");
+                                Some(serde_json::json!({
+                                    "from": from,
+                                    "to": to,
+                                    "label": rel,
+                                }))
+                            }).collect();
+                            set_e.update(|existing| {
+                                for edge in vis_edges {
+                                    existing.push(edge);
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }) as Box<dyn FnMut(web_sys::CustomEvent)>);
+        let _ = web_sys::window().unwrap().add_event_listener_with_callback(
+            "engram-chat-graph",
+            cb.as_ref().unchecked_ref(),
+        );
+        cb.forget();
+    }
+
+    // Listen for entity navigation from chat cards
+    {
+        let set_hl = set_highlighted_node.clone();
+        let cb = Closure::wrap(Box::new(move |ev: web_sys::CustomEvent| {
+            if let Some(entity) = ev.detail().as_string() {
+                set_hl.set(Some(entity.clone()));
+                // Focus on node in graph
+                let code = format!(
+                    "window.__engram_graph && window.__engram_graph.focusNode('{}')",
+                    entity.replace('\'', "\\'"),
+                );
+                let _ = js_sys::eval(&code);
+            }
+        }) as Box<dyn FnMut(web_sys::CustomEvent)>);
+        let _ = web_sys::window().unwrap().add_event_listener_with_callback(
+            "engram-navigate",
+            cb.as_ref().unchecked_ref(),
+        );
+        cb.forget();
+    }
+
+    // Listen for detail modal open from chat cards
+    {
+        let set_dmo = set_detail_modal_open.clone();
+        let set_dni = set_detail_node_id.clone();
+        let cb = Closure::wrap(Box::new(move |ev: web_sys::CustomEvent| {
+            if let Some(entity) = ev.detail().as_string() {
+                set_dni.set(Some(entity));
+                set_dmo.set(true);
+            }
+        }) as Box<dyn FnMut(web_sys::CustomEvent)>);
+        let _ = web_sys::window().unwrap().add_event_listener_with_callback(
+            "engram-open-detail",
             cb.as_ref().unchecked_ref(),
         );
         cb.forget();
@@ -420,9 +462,7 @@ pub fn GraphPage() -> impl IntoView {
         let n = nodes.get();
         if !n.is_empty() {
             set_show_hint.set(true);
-            // Auto-dismiss after 5s via JS setTimeout
             let _ = js_sys::eval("setTimeout(function(){if(window.__engram_hint_dismiss){window.__engram_hint_dismiss()}},5000)");
-            // Store dismiss callback
             let dismiss_cb = Closure::wrap(Box::new(move || {
                 set_show_hint.set(false);
             }) as Box<dyn FnMut()>);
@@ -483,8 +523,13 @@ pub fn GraphPage() -> impl IntoView {
             </div>
         </div>
 
-        <div class="graph-container">
-            <div class="graph-canvas" style="position: relative;">
+        // New layout: graph canvas (flex:1) + embedded chat panel (420px)
+        <div class="explore-layout"
+            style="display:flex;gap:0;height:calc(100vh - var(--nav-height, 56px) - 7rem);">
+            // Left: graph canvas
+            <div class="graph-canvas" style="flex:1;position:relative;background:var(--bg-secondary);\
+                        border:1px solid var(--border);border-radius:var(--radius, 8px) 0 0 var(--radius, 8px);\
+                        overflow:hidden;">
                 <button
                     class="btn btn-secondary"
                     style="position: absolute; top: 12px; right: 12px; z-index: 10; opacity: 0.85;"
@@ -532,75 +577,30 @@ pub fn GraphPage() -> impl IntoView {
                 }}
             </div>
 
-            <div class="graph-sidebar">
-                // Search results list (shown when smart search finds no traverse match)
-                {sidebar::search_results_view(
-                    search_results,
-                    show_results_list,
-                    set_show_results_list,
-                    set_search_term,
-                    Callback::new(move |_: ()| { do_search.dispatch(()); }),
-                )}
-
-                // Controls
-                {sidebar::controls_view(
-                    depth,
-                    set_depth,
-                    min_strength,
-                    set_min_strength,
-                    direction,
-                    set_direction,
-                    show_edge_labels,
-                    set_show_edge_labels,
-                    temporal_current_only,
-                    set_temporal_current_only,
-                    edge_bundling,
-                    set_edge_bundling,
-                )}
-
-                // Collapsible Filters section
-                {sidebar::filters_view(
-                    type_counts,
-                    rel_counts,
-                    hidden_types,
-                    set_hidden_types,
-                    hidden_rels,
-                    set_hidden_rels,
-                    filters_open,
-                    set_filters_open,
-                )}
-
-                // Find Path sidebar section
-                {sidebar::find_path_view(
-                    nodes,
-                    path_from,
-                    set_path_from,
-                    path_target_query,
-                    set_path_target_query,
-                    path_via_query,
-                    set_path_via_query,
-                    path_min_depth,
-                    set_path_min_depth,
-                    path_max_depth,
-                    set_path_max_depth,
-                    path_autocomplete_open,
-                    set_path_autocomplete_open,
-                    path_results,
-                    set_path_results,
-                    path_selected,
-                    set_path_selected,
-                )}
-
-                // Compact node preview panel
-                {sidebar::node_preview_view(
-                    node_detail,
-                    set_detail_node_id,
-                    set_detail_modal_open,
-                    set_path_from,
-                    set_path_results,
-                    set_path_selected,
-                    set_path_target_query,
-                )}
+            // Right: integrated chat panel with compact controls
+            <div class="explore-chat"
+                style="width:420px;display:flex;flex-direction:column;\
+                       border-left:1px solid var(--border);border-right:1px solid var(--border);\
+                       border-top:1px solid var(--border);border-bottom:1px solid var(--border);\
+                       border-radius:0 var(--radius, 8px) var(--radius, 8px) 0;\
+                       background:var(--bg-secondary);flex-shrink:0;overflow:hidden;">
+                // Compact controls bar
+                <ExploreControls
+                    depth=depth
+                    set_depth=set_depth
+                    min_confidence=min_strength
+                    set_min_confidence=set_min_strength
+                    show_edge_labels=show_edge_labels
+                    set_show_edge_labels=set_show_edge_labels
+                    temporal_current_only=temporal_current_only
+                    set_temporal_current_only=set_temporal_current_only
+                    edge_bundling=edge_bundling
+                    set_edge_bundling=set_edge_bundling
+                />
+                // Chat panel (always visible, embedded)
+                <div style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+                    <ChatPanel embedded=true />
+                </div>
             </div>
         </div>
 

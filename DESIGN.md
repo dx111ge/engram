@@ -2053,10 +2053,19 @@ A task is "done" when:
    - **Transport**: mTLS derived from the ed25519 keypair; peers trust each other's keys directly (SSH `known_hosts` model, no CA needed)
    - **Audit trail**: every fact received from a peer records who sent it, when, which peer key, and which policy allowed it
 
-6. **Frontend: separate project**
-   - Engram stays a pure headless engine (CLI + API + LLM tool-calling)
-   - Web UI / graph visualization is a separate repository that talks to the engram API
-   - Keeps the core binary small and focused
+6. **Frontend: embedded Leptos WASM UI**
+   - Built with Leptos (Rust WASM), trunk build, CSR mode
+   - vis.js for graph visualization via wasm-bindgen interop
+   - **Explore page**: chat-centric layout -- sidebar replaced by always-visible chat panel
+     - Compact graph controls at top of chat panel (depth, direction, toggles)
+     - LLM tool results render as rich HTML cards (entity lists, confidence bars, bar charts)
+     - Tool results with graph data push nodes/edges to the main graph canvas
+     - Node click shows detail card in chat (instead of sidebar preview)
+     - `/help` renders styled category grid with clickable cards
+     - Assistant messages render with markdown (bold, italic, code, lists, headers)
+     - Path search and filters available via chat commands
+   - Other pages (Insights, Security, System, etc.) use floating toggle chat panel
+   - 11 pages: Explore, Insights, Search, Ingest, Sources, Actions, Gaps, Mesh, NL, Import, Learning
 
 ---
 

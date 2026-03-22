@@ -4,12 +4,17 @@
 //! - `context` -- entity extraction & context retrieval
 //! - `tools` -- tool name -> API endpoint mapping
 //! - `view` -- message rendering & follow-up extraction
+//! - `markdown` -- markdown-to-HTML converter
+//! - `cards` -- tool result card HTML generators
 
 pub mod context;
 pub mod tools;
 pub mod view;
+pub mod markdown;
+pub mod cards;
 
 use leptos::prelude::*;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::api::ApiClient;
@@ -24,6 +29,21 @@ fn current_pathname() -> String {
     web_sys::window()
         .and_then(|w| w.location().pathname().ok())
         .unwrap_or_default()
+}
+
+// ── Dispatch graph data from chat tool results to the main graph canvas ──
+
+fn dispatch_graph_data(tool_name: &str, raw_json: &str) {
+    if let Some((nodes, edges)) = cards::extract_graph_data(tool_name, raw_json) {
+        let payload = serde_json::json!({ "nodes": nodes, "edges": edges });
+        if let Ok(json_str) = serde_json::to_string(&payload) {
+            let code = format!(
+                "window.dispatchEvent(new CustomEvent('engram-chat-graph',{{detail:{}}}));",
+                json_str,
+            );
+            let _ = js_sys::eval(&code);
+        }
+    }
 }
 
 // ── Convert chat messages to LLM wire format ──
@@ -54,7 +74,11 @@ fn build_llm_messages(messages: &[ChatMessage]) -> Vec<LlmMessage> {
 // ── Main component ──
 
 #[component]
-pub fn ChatPanel() -> impl IntoView {
+pub fn ChatPanel(
+    /// When true, renders inline (for Explore page). When false, renders as floating panel.
+    #[prop(default = false)]
+    embedded: bool,
+) -> impl IntoView {
     let api = use_context::<ApiClient>().expect("ApiClient context");
     let chat_open =
         use_context::<RwSignal<bool>>().expect("chat_open context");
@@ -71,11 +95,13 @@ pub fn ChatPanel() -> impl IntoView {
     let chat_selected_node = use_context::<ChatSelectedNode>();
     let chat_assessment = use_context::<ChatCurrentAssessment>();
 
-    // Page-aware visibility
+    // Page-aware visibility: on /graph the chat is always embedded, not floating
     let page_visible = move || {
         let path = current_pathname();
         page_allows_chat(&path)
     };
+
+    let is_explore_page = move || current_pathname() == "/graph";
 
     // ── Send message flow ──
 
@@ -95,16 +121,34 @@ pub fn ChatPanel() -> impl IntoView {
             msgs.push(ChatMessage {
                 role: ChatRole::User,
                 content: text.clone(),
+                display_html: None,
             });
         });
 
         // Intercept /help commands -- respond locally, no LLM needed
         if text.starts_with("/help") {
-            let help_content = help::generate_help_response(&text);
+            let help_text = help::generate_help_response(&text);
+            let help_html = help::generate_help_html(&text);
             set_messages.update(|msgs| {
                 msgs.push(ChatMessage {
                     role: ChatRole::Assistant,
-                    content: help_content,
+                    content: help_text,
+                    display_html: Some(help_html),
+                });
+            });
+            set_sending.set(false);
+            return;
+        }
+
+        // Intercept /path commands -- render interactive path search card
+        if text.starts_with("/path") {
+            let arg = text.strip_prefix("/path").unwrap_or("").trim().to_string();
+            let path_html = help::generate_path_card(&arg);
+            set_messages.update(|msgs| {
+                msgs.push(ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: "Path search card".to_string(),
+                    display_html: Some(path_html),
                 });
             });
             set_sending.set(false);
@@ -129,6 +173,7 @@ pub fn ChatPanel() -> impl IntoView {
                     msgs.push(ChatMessage {
                         role: ChatRole::System,
                         content: "LLM not configured. Go to System > Language Model to set up.".to_string(),
+                        display_html: None,
                     });
                 });
                 set_sending.set(false);
@@ -142,6 +187,7 @@ pub fn ChatPanel() -> impl IntoView {
                     msgs.push(ChatMessage {
                         role: ChatRole::Context,
                         content: format!("Retrieving context for: {}", keywords.join(", ")),
+                        display_html: None,
                     });
                 });
                 context::retrieve_context(&api, &keywords).await
@@ -197,6 +243,7 @@ pub fn ChatPanel() -> impl IntoView {
             let mut all_messages = vec![ChatMessage {
                 role: ChatRole::System,
                 content: system_prompt,
+                display_html: None,
             }];
             all_messages.extend(messages.get_untracked());
 
@@ -219,12 +266,14 @@ pub fn ChatPanel() -> impl IntoView {
                     Ok(r) => {
                         let choice = r.choices.first().and_then(|c| c.message.as_ref());
                         if let Some(msg) = choice {
-                            // Display assistant text
+                            // Display assistant text with markdown rendering
                             if let Some(content) = &msg.content {
                                 if !content.is_empty() {
+                                    let rendered_html = markdown::markdown_to_html(content);
                                     let assistant_msg = ChatMessage {
                                         role: ChatRole::Assistant,
                                         content: content.clone(),
+                                        display_html: Some(rendered_html),
                                     };
                                     all_messages.push(assistant_msg.clone());
                                     set_messages.update(|msgs| msgs.push(assistant_msg));
@@ -257,10 +306,17 @@ pub fn ChatPanel() -> impl IntoView {
                                         all_messages.push(ChatMessage {
                                             role: ChatRole::ToolResult,
                                             content: pending_msg,
+                                            display_html: None,
                                         });
                                     } else {
                                         // Execute read tool immediately
                                         let result = tools::execute_tool(&api, tool_name, tool_args).await;
+
+                                        // Generate rich card HTML for display
+                                        let card_html = cards::render_tool_card(tool_name, &result);
+
+                                        // Dispatch graph data to main canvas (on Explore page)
+                                        dispatch_graph_data(tool_name, &result);
 
                                         let display_result = if result.len() > 500 {
                                             format!("{}...", &result[..500])
@@ -271,12 +327,14 @@ pub fn ChatPanel() -> impl IntoView {
                                         let tool_msg = ChatMessage {
                                             role: ChatRole::ToolResult,
                                             content: format!("[{tool_name}] {display_result}"),
+                                            display_html: Some(card_html),
                                         };
                                         set_messages.update(|msgs| msgs.push(tool_msg));
 
                                         all_messages.push(ChatMessage {
                                             role: ChatRole::ToolResult,
                                             content: result,
+                                            display_html: None,
                                         });
                                     }
                                 }
@@ -290,6 +348,7 @@ pub fn ChatPanel() -> impl IntoView {
                             msgs.push(ChatMessage {
                                 role: ChatRole::System,
                                 content: format!("LLM request failed: {e}"),
+                                display_html: None,
                             });
                         });
                         break;
@@ -304,6 +363,7 @@ pub fn ChatPanel() -> impl IntoView {
                     msgs.push(ChatMessage {
                         role: ChatRole::WriteConfirmation,
                         content: "Proposed changes ready for review.".to_string(),
+                        display_html: None,
                     });
                 });
             }
@@ -339,6 +399,7 @@ pub fn ChatPanel() -> impl IntoView {
                 msgs.push(ChatMessage {
                     role: ChatRole::System,
                     content: format!("Applied {} changes:\n{}", selected.len(), results.join("\n")),
+                    display_html: None,
                 });
             });
             set_pending_writes.set(Vec::new());
@@ -351,6 +412,7 @@ pub fn ChatPanel() -> impl IntoView {
             msgs.push(ChatMessage {
                 role: ChatRole::System,
                 content: "All proposed changes rejected.".to_string(),
+                display_html: None,
             });
         });
     }));
@@ -398,6 +460,7 @@ pub fn ChatPanel() -> impl IntoView {
     let send_for_qa1 = send_message.clone();
     let send_for_qa2 = send_message.clone();
     let send_for_qa3 = send_message.clone();
+    let send_for_qa4 = send_message.clone();
 
     let qa_know = StoredValue::new(Callback::new(move |_: leptos::ev::MouseEvent| {
         // If a node is selected on Explore, query about it specifically
@@ -423,6 +486,28 @@ pub fn ChatPanel() -> impl IntoView {
         send_for_qa3();
     }));
 
+    let qa_help = StoredValue::new(Callback::new(move |_: leptos::ev::MouseEvent| {
+        set_input_text.set("/help".to_string());
+        send_for_qa4();
+    }));
+
+    // ── Listen for chat-send events from HTML cards (e.g. help category clicks) ──
+
+    {
+        let send_for_event = send_message.clone();
+        let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::CustomEvent| {
+            if let Some(text) = ev.detail().as_string() {
+                set_input_text.set(text);
+                send_for_event();
+            }
+        }) as Box<dyn FnMut(web_sys::CustomEvent)>);
+        let _ = web_sys::window().unwrap().add_event_listener_with_callback(
+            "engram-chat-send",
+            cb.as_ref().unchecked_ref(),
+        );
+        cb.forget();
+    }
+
     // ── Follow-up click ──
 
     let send_for_fu = send_message.clone();
@@ -438,314 +523,343 @@ pub fn ChatPanel() -> impl IntoView {
         send_for_btn();
     }));
 
-    view! {
-        // Toggle button -- only visible on allowed pages
-        <Show when=move || page_visible() && !chat_open.get()>
-            <button
-                class="chat-toggle-btn"
-                on:click=toggle_panel
-                title="Knowledge Chat"
-                style="position:fixed;right:1.5rem;bottom:1.5rem;z-index:1500;\
-                       width:52px;height:52px;border-radius:50%;border:none;\
-                       background:var(--accent, #4a9eff);color:#fff;font-size:1.3rem;\
-                       cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,0.3);\
-                       display:flex;align-items:center;justify-content:center;\
-                       transition:transform 0.2s ease;"
+    // ── Render chat panel internals (reused by both floating and embedded modes) ──
+
+    let render_chat_internals = move || {
+        view! {
+            // Header
+            <div class="chat-header"
+                style="display:flex;align-items:center;justify-content:space-between;\
+                       padding:0.75rem 1rem;border-bottom:1px solid var(--border, #2d3139);flex-shrink:0;"
             >
-                <i class="fa-solid fa-comments"></i>
-            </button>
-        </Show>
-
-        // Sliding panel
-        {move || {
-            if !page_visible() {
-                return view! { <span></span> }.into_any();
-            }
-            let open = chat_open.get();
-            let panel_style = if open {
-                "position:fixed;right:0;top:56px;bottom:0;width:420px;z-index:1400;\
-                 background:var(--bg-secondary, #1a1d23);border-left:1px solid var(--border, #2d3139);\
-                 display:flex;flex-direction:column;transform:translateX(0);\
-                 transition:transform 0.3s ease;box-shadow:-4px 0 20px rgba(0,0,0,0.3);"
-            } else {
-                "position:fixed;right:0;top:56px;bottom:0;width:420px;z-index:1400;\
-                 background:var(--bg-secondary, #1a1d23);border-left:1px solid var(--border, #2d3139);\
-                 display:flex;flex-direction:column;transform:translateX(100%);\
-                 transition:transform 0.3s ease;pointer-events:none;"
-            };
-
-            view! {
-                <div class="chat-panel" style=panel_style>
-                    // Header
-                    <div class="chat-header"
-                        style="display:flex;align-items:center;justify-content:space-between;\
-                               padding:0.75rem 1rem;border-bottom:1px solid var(--border, #2d3139);flex-shrink:0;"
-                    >
-                        <div style="display:flex;align-items:center;gap:0.5rem;font-weight:600;">
-                            <i class="fa-solid fa-brain" style="color:var(--accent, #4a9eff);"></i>
-                            <span>"Knowledge Chat"</span>
-                        </div>
-                        <div style="display:flex;gap:0.5rem;">
-                            <button class="btn btn-sm btn-ghost" on:click=clear_messages title="Clear chat"
-                                style="background:none;border:none;color:var(--text-muted, #8b8fa3);\
-                                       cursor:pointer;padding:0.25rem 0.5rem;font-size:0.85rem;">
-                                <i class="fa-solid fa-trash-can"></i>
-                            </button>
+                <div style="display:flex;align-items:center;gap:0.5rem;font-weight:600;">
+                    <i class="fa-solid fa-brain" style="color:var(--accent, #4a9eff);"></i>
+                    <span>"Knowledge Chat"</span>
+                </div>
+                <div style="display:flex;gap:0.5rem;">
+                    <button class="btn btn-sm btn-ghost" on:click=clear_messages title="Clear chat"
+                        style="background:none;border:none;color:var(--text-muted, #8b8fa3);\
+                               cursor:pointer;padding:0.25rem 0.5rem;font-size:0.85rem;">
+                        <i class="fa-solid fa-trash-can"></i>
+                    </button>
+                    // Close button only in floating mode (not on Explore)
+                    {move || if !is_explore_page() {
+                        Some(view! {
                             <button class="btn btn-sm btn-ghost" on:click=close_panel title="Close"
                                 style="background:none;border:none;color:var(--text-muted, #8b8fa3);\
                                        cursor:pointer;padding:0.25rem 0.5rem;font-size:0.85rem;">
                                 <i class="fa-solid fa-xmark"></i>
                             </button>
+                        })
+                    } else { None }}
+                </div>
+            </div>
+
+            // Message list
+            <div class="chat-messages"
+                style="flex:1;overflow-y:auto;padding:0.75rem;display:flex;\
+                       flex-direction:column;gap:0.5rem;"
+            >
+                {move || {
+                    let msgs = messages.get();
+                    if msgs.is_empty() {
+                        // Empty state with quick actions
+                        view! {
+                            <div class="chat-empty"
+                                style="display:flex;flex-direction:column;align-items:center;\
+                                       justify-content:center;flex:1;gap:1rem;\
+                                       color:var(--text-muted, #8b8fa3);text-align:center;padding:2rem 1rem;"
+                            >
+                                <i class="fa-solid fa-comments" style="font-size:2.5rem;opacity:0.3;"></i>
+                                <p style="margin:0;font-size:0.9rem;">
+                                    "Ask questions, analyze entities, compare connections, or investigate gaps."
+                                </p>
+                                <div class="quick-actions"
+                                    style="display:flex;flex-direction:column;gap:0.5rem;width:100%;max-width:300px;">
+                                    <button class="btn btn-outline btn-sm"
+                                        on:click=move |ev| qa_know.with_value(|cb| cb.run(ev))
+                                        style="text-align:left;padding:0.5rem 0.75rem;\
+                                               border:1px solid var(--border, #2d3139);background:transparent;\
+                                               color:var(--text, #c9ccd3);border-radius:6px;cursor:pointer;font-size:0.8rem;">
+                                        <i class="fa-solid fa-search" style="margin-right:0.5rem;color:var(--accent, #4a9eff);"></i>
+                                        "What do I know about..."
+                                    </button>
+                                    <button class="btn btn-outline btn-sm"
+                                        on:click=move |ev| qa_gaps.with_value(|cb| cb.run(ev))
+                                        style="text-align:left;padding:0.5rem 0.75rem;\
+                                               border:1px solid var(--border, #2d3139);background:transparent;\
+                                               color:var(--text, #c9ccd3);border-radius:6px;cursor:pointer;font-size:0.8rem;">
+                                        <i class="fa-solid fa-circle-question" style="margin-right:0.5rem;color:var(--warning, #f0ad4e);"></i>
+                                        "Find gaps in my knowledge"
+                                    </button>
+                                    <button class="btn btn-outline btn-sm"
+                                        on:click=move |ev| qa_whatif.with_value(|cb| cb.run(ev))
+                                        style="text-align:left;padding:0.5rem 0.75rem;\
+                                               border:1px solid var(--border, #2d3139);background:transparent;\
+                                               color:var(--text, #c9ccd3);border-radius:6px;cursor:pointer;font-size:0.8rem;">
+                                        <i class="fa-solid fa-code-branch" style="margin-right:0.5rem;color:var(--success, #5cb85c);"></i>
+                                        "What-if analysis"
+                                    </button>
+                                    <button class="btn btn-outline btn-sm"
+                                        on:click=move |ev| qa_help.with_value(|cb| cb.run(ev))
+                                        style="text-align:left;padding:0.5rem 0.75rem;\
+                                               border:1px solid var(--border, #2d3139);background:transparent;\
+                                               color:var(--text, #c9ccd3);border-radius:6px;cursor:pointer;font-size:0.8rem;">
+                                        <i class="fa-solid fa-circle-question" style="margin-right:0.5rem;color:var(--info, #5bc0de);"></i>
+                                        "Browse all commands"
+                                    </button>
+                                </div>
+                            </div>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <For
+                                each={move || messages.get().into_iter().enumerate().collect::<Vec<_>>()}
+                                key={|(i, _)| *i}
+                                children={move |(_, msg)| {
+                                    view::render_message(msg)
+                                }}
+                            />
+                            // Typing indicator
+                            {move || {
+                                if sending.get() {
+                                    view! {
+                                        <div style="align-self:flex-start;display:flex;align-items:center;gap:0.4rem;\
+                                                    color:var(--text-muted, #8b8fa3);font-size:0.8rem;padding:0.4rem;">
+                                            <i class="fa-solid fa-spinner fa-spin"></i>
+                                            <span>"Thinking..."</span>
+                                        </div>
+                                    }.into_any()
+                                } else {
+                                    view! { <span></span> }.into_any()
+                                }
+                            }}
+                        }.into_any()
+                    }
+                }}
+            </div>
+
+            // Write confirmation panel
+            {move || {
+                let writes = pending_writes.get();
+                if writes.is_empty() {
+                    return view! { <span></span> }.into_any();
+                }
+                view! {
+                    <div class="chat-write-confirm"
+                        style="flex-shrink:0;padding:0.75rem;border-top:1px solid var(--border, #2d3139);\
+                               background:var(--bg-tertiary, #232730);max-height:200px;overflow-y:auto;">
+                        <div style="font-size:0.75rem;font-weight:600;margin-bottom:0.5rem;\
+                                    color:var(--warning, #f0ad4e);display:flex;align-items:center;gap:0.4rem;">
+                            <i class="fa-solid fa-pen-to-square"></i>
+                            <span>"Proposed Changes"</span>
+                        </div>
+                        {writes.into_iter().enumerate().map(|(idx, w)| {
+                            let label = w.label.clone();
+                            let checked = w.selected;
+                            view! {
+                                <label style="display:flex;align-items:center;gap:0.5rem;padding:0.3rem 0;\
+                                              font-size:0.8rem;color:var(--text, #c9ccd3);cursor:pointer;">
+                                    <input type="checkbox" prop:checked=checked
+                                        on:change=move |_| toggle_write(idx)
+                                        style="accent-color:var(--accent, #4a9eff);" />
+                                    <span>{label}</span>
+                                </label>
+                            }
+                        }).collect::<Vec<_>>()}
+                        <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
+                            <button class="btn btn-sm" on:click=move |ev| apply_writes.with_value(|cb| cb.run(ev))
+                                style="background:var(--success, #5cb85c);color:#fff;border:none;\
+                                       border-radius:4px;padding:0.3rem 0.75rem;cursor:pointer;font-size:0.75rem;">
+                                <i class="fa-solid fa-check" style="margin-right:0.3rem;"></i>
+                                "Apply Selected"
+                            </button>
+                            <button class="btn btn-sm" on:click=move |ev| reject_writes.with_value(|cb| cb.run(ev))
+                                style="background:var(--danger, #d9534f);color:#fff;border:none;\
+                                       border-radius:4px;padding:0.3rem 0.75rem;cursor:pointer;font-size:0.75rem;">
+                                <i class="fa-solid fa-xmark" style="margin-right:0.3rem;"></i>
+                                "Reject All"
+                            </button>
                         </div>
                     </div>
+                }.into_any()
+            }}
 
-                    // Message list
-                    <div class="chat-messages"
-                        style="flex:1;overflow-y:auto;padding:0.75rem;display:flex;\
-                               flex-direction:column;gap:0.5rem;"
-                    >
-                        {move || {
-                            let msgs = messages.get();
-                            if msgs.is_empty() {
-                                // Empty state with quick actions
-                                view! {
-                                    <div class="chat-empty"
-                                        style="display:flex;flex-direction:column;align-items:center;\
-                                               justify-content:center;flex:1;gap:1rem;\
-                                               color:var(--text-muted, #8b8fa3);text-align:center;padding:2rem 1rem;"
-                                    >
-                                        <i class="fa-solid fa-comments" style="font-size:2.5rem;opacity:0.3;"></i>
-                                        <p style="margin:0;font-size:0.9rem;">
-                                            "Ask questions, analyze entities, compare connections, or investigate gaps."
-                                        </p>
-                                        <div class="quick-actions"
-                                            style="display:flex;flex-direction:column;gap:0.5rem;width:100%;max-width:300px;">
-                                            <button class="btn btn-outline btn-sm"
-                                                on:click=move |ev| qa_know.with_value(|cb| cb.run(ev))
-                                                style="text-align:left;padding:0.5rem 0.75rem;\
-                                                       border:1px solid var(--border, #2d3139);background:transparent;\
-                                                       color:var(--text, #c9ccd3);border-radius:6px;cursor:pointer;font-size:0.8rem;">
-                                                <i class="fa-solid fa-search" style="margin-right:0.5rem;color:var(--accent, #4a9eff);"></i>
-                                                "What do I know about..."
-                                            </button>
-                                            <button class="btn btn-outline btn-sm"
-                                                on:click=move |ev| qa_gaps.with_value(|cb| cb.run(ev))
-                                                style="text-align:left;padding:0.5rem 0.75rem;\
-                                                       border:1px solid var(--border, #2d3139);background:transparent;\
-                                                       color:var(--text, #c9ccd3);border-radius:6px;cursor:pointer;font-size:0.8rem;">
-                                                <i class="fa-solid fa-circle-question" style="margin-right:0.5rem;color:var(--warning, #f0ad4e);"></i>
-                                                "Find gaps in my knowledge"
-                                            </button>
-                                            <button class="btn btn-outline btn-sm"
-                                                on:click=move |ev| qa_whatif.with_value(|cb| cb.run(ev))
-                                                style="text-align:left;padding:0.5rem 0.75rem;\
-                                                       border:1px solid var(--border, #2d3139);background:transparent;\
-                                                       color:var(--text, #c9ccd3);border-radius:6px;cursor:pointer;font-size:0.8rem;">
-                                                <i class="fa-solid fa-code-branch" style="margin-right:0.5rem;color:var(--success, #5cb85c);"></i>
-                                                "What-if analysis"
-                                            </button>
-                                        </div>
-                                        <p style="margin:0.5rem 0 0;font-size:0.75rem;color:var(--text-muted, #8b8fa3);">
-                                            "Type "<strong>"/help"</strong>" for all available commands"
-                                        </p>
-                                    </div>
-                                }.into_any()
-                            } else {
-                                view! {
-                                    <For
-                                        each={move || messages.get().into_iter().enumerate().collect::<Vec<_>>()}
-                                        key={|(i, _)| *i}
-                                        children={move |(_, msg)| {
-                                            view::render_message(msg)
-                                        }}
-                                    />
-                                    // Typing indicator
-                                    {move || {
-                                        if sending.get() {
-                                            view! {
-                                                <div style="align-self:flex-start;display:flex;align-items:center;gap:0.4rem;\
-                                                            color:var(--text-muted, #8b8fa3);font-size:0.8rem;padding:0.4rem;">
-                                                    <i class="fa-solid fa-spinner fa-spin"></i>
-                                                    <span>"Thinking..."</span>
-                                                </div>
-                                            }.into_any()
-                                        } else {
-                                            view! { <span></span> }.into_any()
-                                        }
-                                    }}
-                                }.into_any()
+            // Follow-up suggestions
+            {move || {
+                let suggestions = follow_ups.get();
+                if suggestions.is_empty() || sending.get() {
+                    return view! { <span></span> }.into_any();
+                }
+                view! {
+                    <div class="chat-follow-ups"
+                        style="flex-shrink:0;padding:0.5rem 0.75rem;border-top:1px solid var(--border, #2d3139);\
+                               display:flex;flex-wrap:wrap;gap:0.4rem;">
+                        {suggestions.into_iter().map(|s| {
+                            let text = s.text.clone();
+                            let text_for_click = s.text.clone();
+                            let icon = s.icon;
+                            view! {
+                                <button class="chat-follow-up-chip"
+                                    on:click=move |_| on_follow_up.with_value(|cb| cb.run(text_for_click.clone()))
+                                    style="display:inline-flex;align-items:center;gap:0.3rem;\
+                                           padding:0.25rem 0.6rem;border-radius:12px;\
+                                           border:1px solid var(--border, #2d3139);background:transparent;\
+                                           color:var(--text-muted, #8b8fa3);font-size:0.72rem;\
+                                           cursor:pointer;transition:all 0.2s;">
+                                    <i class=icon style="font-size:0.65rem;"></i>
+                                    <span>{text}</span>
+                                </button>
                             }
-                        }}
+                        }).collect::<Vec<_>>()}
                     </div>
+                }.into_any()
+            }}
 
-                    // Write confirmation panel
-                    {move || {
-                        let writes = pending_writes.get();
-                        if writes.is_empty() {
-                            return view! { <span></span> }.into_any();
-                        }
-                        view! {
-                            <div class="chat-write-confirm"
-                                style="flex-shrink:0;padding:0.75rem;border-top:1px solid var(--border, #2d3139);\
-                                       background:var(--bg-tertiary, #232730);max-height:200px;overflow-y:auto;">
-                                <div style="font-size:0.75rem;font-weight:600;margin-bottom:0.5rem;\
-                                            color:var(--warning, #f0ad4e);display:flex;align-items:center;gap:0.4rem;">
-                                    <i class="fa-solid fa-pen-to-square"></i>
-                                    <span>"Proposed Changes"</span>
+            // Slash autocomplete
+            {move || {
+                let suggestions = slash_suggestions.get();
+                if suggestions.is_empty() {
+                    return view! { <span></span> }.into_any();
+                }
+                view! {
+                    <div class="slash-autocomplete"
+                        style="flex-shrink:0;padding:0.5rem 0.75rem;\
+                               border-top:1px solid var(--border, #2d3139);\
+                               display:flex;flex-direction:column;gap:0.25rem;">
+                        {suggestions.into_iter().map(|(cmd, icon, desc)| {
+                            let cmd_str = cmd.to_string();
+                            let cmd_display = cmd.to_string();
+                            let icon_cls = icon.to_string();
+                            let desc_str = desc.to_string();
+                            view! {
+                                <div style="display:flex;align-items:center;gap:0.5rem;\
+                                            padding:0.3rem 0.5rem;border-radius:4px;\
+                                            cursor:pointer;font-size:0.8rem;\
+                                            color:var(--text, #c9ccd3);\
+                                            background:var(--bg-tertiary, #232730);"
+                                    on:mousedown=move |ev| {
+                                        ev.prevent_default();
+                                        set_input_text.set(cmd_str.clone());
+                                        set_slash_suggestions.set(Vec::new());
+                                    }
+                                >
+                                    <i class=icon_cls
+                                        style="width:16px;text-align:center;\
+                                               color:var(--accent, #4a9eff);font-size:0.75rem;">
+                                    </i>
+                                    <span style="font-weight:600;">{cmd_display}</span>
+                                    <span style="font-size:0.72rem;\
+                                                 color:var(--text-muted, #8b8fa3);">
+                                        {desc_str}
+                                    </span>
                                 </div>
-                                {writes.into_iter().enumerate().map(|(idx, w)| {
-                                    let label = w.label.clone();
-                                    let checked = w.selected;
-                                    view! {
-                                        <label style="display:flex;align-items:center;gap:0.5rem;padding:0.3rem 0;\
-                                                      font-size:0.8rem;color:var(--text, #c9ccd3);cursor:pointer;">
-                                            <input type="checkbox" prop:checked=checked
-                                                on:change=move |_| toggle_write(idx)
-                                                style="accent-color:var(--accent, #4a9eff);" />
-                                            <span>{label}</span>
-                                        </label>
-                                    }
-                                }).collect::<Vec<_>>()}
-                                <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
-                                    <button class="btn btn-sm" on:click=move |ev| apply_writes.with_value(|cb| cb.run(ev))
-                                        style="background:var(--success, #5cb85c);color:#fff;border:none;\
-                                               border-radius:4px;padding:0.3rem 0.75rem;cursor:pointer;font-size:0.75rem;">
-                                        <i class="fa-solid fa-check" style="margin-right:0.3rem;"></i>
-                                        "Apply Selected"
-                                    </button>
-                                    <button class="btn btn-sm" on:click=move |ev| reject_writes.with_value(|cb| cb.run(ev))
-                                        style="background:var(--danger, #d9534f);color:#fff;border:none;\
-                                               border-radius:4px;padding:0.3rem 0.75rem;cursor:pointer;font-size:0.75rem;">
-                                        <i class="fa-solid fa-xmark" style="margin-right:0.3rem;"></i>
-                                        "Reject All"
-                                    </button>
-                                </div>
-                            </div>
-                        }.into_any()
-                    }}
-
-                    // Follow-up suggestions
-                    {move || {
-                        let suggestions = follow_ups.get();
-                        if suggestions.is_empty() || sending.get() {
-                            return view! { <span></span> }.into_any();
-                        }
-                        view! {
-                            <div class="chat-follow-ups"
-                                style="flex-shrink:0;padding:0.5rem 0.75rem;border-top:1px solid var(--border, #2d3139);\
-                                       display:flex;flex-wrap:wrap;gap:0.4rem;">
-                                {suggestions.into_iter().map(|s| {
-                                    let text = s.text.clone();
-                                    let text_for_click = s.text.clone();
-                                    let icon = s.icon;
-                                    view! {
-                                        <button class="chat-follow-up-chip"
-                                            on:click=move |_| on_follow_up.with_value(|cb| cb.run(text_for_click.clone()))
-                                            style="display:inline-flex;align-items:center;gap:0.3rem;\
-                                                   padding:0.25rem 0.6rem;border-radius:12px;\
-                                                   border:1px solid var(--border, #2d3139);background:transparent;\
-                                                   color:var(--text-muted, #8b8fa3);font-size:0.72rem;\
-                                                   cursor:pointer;transition:all 0.2s;">
-                                            <i class=icon style="font-size:0.65rem;"></i>
-                                            <span>{text}</span>
-                                        </button>
-                                    }
-                                }).collect::<Vec<_>>()}
-                            </div>
-                        }.into_any()
-                    }}
-
-                    // Slash autocomplete
-                    {move || {
-                        let suggestions = slash_suggestions.get();
-                        if suggestions.is_empty() {
-                            return view! { <span></span> }.into_any();
-                        }
-                        view! {
-                            <div class="slash-autocomplete"
-                                style="flex-shrink:0;padding:0.5rem 0.75rem;\
-                                       border-top:1px solid var(--border, #2d3139);\
-                                       display:flex;flex-direction:column;gap:0.25rem;">
-                                {suggestions.into_iter().map(|(cmd, icon, desc)| {
-                                    let cmd_str = cmd.to_string();
-                                    let cmd_display = cmd.to_string();
-                                    let icon_cls = icon.to_string();
-                                    let desc_str = desc.to_string();
-                                    view! {
-                                        <div style="display:flex;align-items:center;gap:0.5rem;\
-                                                    padding:0.3rem 0.5rem;border-radius:4px;\
-                                                    cursor:pointer;font-size:0.8rem;\
-                                                    color:var(--text, #c9ccd3);\
-                                                    background:var(--bg-tertiary, #232730);"
-                                            on:mousedown=move |ev| {
-                                                ev.prevent_default();
-                                                set_input_text.set(cmd_str.clone());
-                                                set_slash_suggestions.set(Vec::new());
-                                            }
-                                        >
-                                            <i class=icon_cls
-                                                style="width:16px;text-align:center;\
-                                                       color:var(--accent, #4a9eff);font-size:0.75rem;">
-                                            </i>
-                                            <span style="font-weight:600;">{cmd_display}</span>
-                                            <span style="font-size:0.72rem;\
-                                                         color:var(--text-muted, #8b8fa3);">
-                                                {desc_str}
-                                            </span>
-                                        </div>
-                                    }
-                                }).collect::<Vec<_>>()}
-                            </div>
-                        }.into_any()
-                    }}
-
-                    // Input area
-                    <div class="chat-input-area"
-                        style="flex-shrink:0;padding:0.75rem;border-top:1px solid var(--border, #2d3139);\
-                               display:flex;gap:0.5rem;align-items:flex-end;">
-                        <textarea
-                            class="chat-input"
-                            placeholder="Ask about your knowledge... (Enter to send)"
-                            rows="2"
-                            prop:value=input_text
-                            on:input=move |ev| {
-                                let val = event_target_value(&ev);
-                                set_input_text.set(val.clone());
-                                if val.starts_with('/') {
-                                    let query = &val[1..];
-                                    set_slash_suggestions.set(help::filter_commands(query));
-                                } else {
-                                    set_slash_suggestions.set(Vec::new());
-                                }
                             }
-                            on:keydown=move |ev| on_keydown.with_value(|cb| cb.run(ev))
-                            style="flex:1;resize:none;background:var(--bg-tertiary, #232730);\
-                                   color:var(--text, #c9ccd3);border:1px solid var(--border, #2d3139);\
-                                   border-radius:8px;padding:0.5rem 0.75rem;font-size:0.85rem;\
-                                   font-family:inherit;outline:none;min-height:40px;max-height:120px;"
-                        ></textarea>
-                        <button
-                            class="chat-send-btn"
-                            on:click=move |ev| on_send_click.with_value(|cb| cb.run(ev))
-                            disabled=move || sending.get() || input_text.get().trim().is_empty()
-                            title="Send message"
-                            style="width:36px;height:36px;border-radius:8px;border:none;\
-                                   background:var(--accent, #4a9eff);color:#fff;cursor:pointer;\
-                                   display:flex;align-items:center;justify-content:center;\
-                                   font-size:0.9rem;flex-shrink:0;transition:opacity 0.2s;"
-                            style:opacity=move || {
-                                if sending.get() || input_text.get().trim().is_empty() { "0.5" } else { "1" }
-                            }
-                        >
-                            <i class=move || {
-                                if sending.get() { "fa-solid fa-spinner fa-spin" }
-                                else { "fa-solid fa-paper-plane" }
-                            }></i>
-                        </button>
+                        }).collect::<Vec<_>>()}
                     </div>
-                </div>
-            }.into_any()
-        }}
+                }.into_any()
+            }}
+
+            // Input area
+            <div class="chat-input-area"
+                style="flex-shrink:0;padding:0.75rem;border-top:1px solid var(--border, #2d3139);\
+                       display:flex;gap:0.5rem;align-items:flex-end;">
+                <textarea
+                    class="chat-input"
+                    placeholder="Ask about your knowledge... (Enter to send)"
+                    rows="2"
+                    prop:value=input_text
+                    on:input=move |ev| {
+                        let val = event_target_value(&ev);
+                        set_input_text.set(val.clone());
+                        if val.starts_with('/') {
+                            let query = &val[1..];
+                            set_slash_suggestions.set(help::filter_commands(query));
+                        } else {
+                            set_slash_suggestions.set(Vec::new());
+                        }
+                    }
+                    on:keydown=move |ev| on_keydown.with_value(|cb| cb.run(ev))
+                    style="flex:1;resize:none;background:var(--bg-tertiary, #232730);\
+                           color:var(--text, #c9ccd3);border:1px solid var(--border, #2d3139);\
+                           border-radius:8px;padding:0.5rem 0.75rem;font-size:0.85rem;\
+                           font-family:inherit;outline:none;min-height:40px;max-height:120px;"
+                ></textarea>
+                <button
+                    class="chat-send-btn"
+                    on:click=move |ev| on_send_click.with_value(|cb| cb.run(ev))
+                    disabled=move || sending.get() || input_text.get().trim().is_empty()
+                    title="Send message"
+                    style="width:36px;height:36px;border-radius:8px;border:none;\
+                           background:var(--accent, #4a9eff);color:#fff;cursor:pointer;\
+                           display:flex;align-items:center;justify-content:center;\
+                           font-size:0.9rem;flex-shrink:0;transition:opacity 0.2s;"
+                    style:opacity=move || {
+                        if sending.get() || input_text.get().trim().is_empty() { "0.5" } else { "1" }
+                    }
+                >
+                    <i class=move || {
+                        if sending.get() { "fa-solid fa-spinner fa-spin" }
+                        else { "fa-solid fa-paper-plane" }
+                    }></i>
+                </button>
+            </div>
+        }
+    };
+
+    if embedded {
+        // Embedded mode: render internals directly, no floating wrapper
+        view! {
+            <div class="chat-panel chat-panel-embedded"
+                style="display:flex;flex-direction:column;height:100%;width:100%;\
+                       background:var(--bg-secondary, #1a1d23);">
+                {render_chat_internals()}
+            </div>
+        }.into_any()
+    } else {
+        // Floating mode: toggle button + sliding panel
+        view! {
+            // Toggle button
+            <Show when=move || page_visible() && !is_explore_page() && !chat_open.get()>
+                <button
+                    class="chat-toggle-btn"
+                    on:click=toggle_panel
+                    title="Knowledge Chat"
+                    style="position:fixed;right:1.5rem;bottom:1.5rem;z-index:1500;\
+                           width:52px;height:52px;border-radius:50%;border:none;\
+                           background:var(--accent, #4a9eff);color:#fff;font-size:1.3rem;\
+                           cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,0.3);\
+                           display:flex;align-items:center;justify-content:center;\
+                           transition:transform 0.2s ease;"
+                >
+                    <i class="fa-solid fa-comments"></i>
+                </button>
+            </Show>
+
+            // Floating panel
+            {move || {
+                if !page_visible() || is_explore_page() {
+                    return view! { <span></span> }.into_any();
+                }
+                let open = chat_open.get();
+                let panel_style = if open {
+                    "position:fixed;right:0;top:56px;bottom:0;width:420px;z-index:1400;\
+                     background:var(--bg-secondary, #1a1d23);border-left:1px solid var(--border, #2d3139);\
+                     display:flex;flex-direction:column;transform:translateX(0);\
+                     transition:transform 0.3s ease;box-shadow:-4px 0 20px rgba(0,0,0,0.3);"
+                } else {
+                    "position:fixed;right:0;top:56px;bottom:0;width:420px;z-index:1400;\
+                     background:var(--bg-secondary, #1a1d23);border-left:1px solid var(--border, #2d3139);\
+                     display:flex;flex-direction:column;transform:translateX(100%);\
+                     transition:transform 0.3s ease;pointer-events:none;"
+                };
+
+                view! {
+                    <div class="chat-panel" style=panel_style>
+                        {render_chat_internals()}
+                    </div>
+                }.into_any()
+            }}
+        }.into_any()
     }
 }
-

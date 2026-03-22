@@ -12,6 +12,7 @@ pub mod crud_modal;
 pub mod detail_modal;
 pub mod chat_panel;
 pub mod chat_types;
+pub mod explore_controls;
 pub mod source_wizard;
 pub mod assessment_wizard;
 pub mod onboarding_wizard;

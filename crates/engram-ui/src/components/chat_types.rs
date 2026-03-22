@@ -14,6 +14,9 @@ pub struct ChatCurrentAssessment(pub RwSignal<Option<String>>);
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    /// Pre-rendered HTML for rich display (markdown, cards, help grids).
+    /// When set, view renders via inner_html instead of plain text.
+    pub display_html: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
