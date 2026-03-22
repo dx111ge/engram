@@ -64,8 +64,8 @@ pub fn OnboardingWizard(
     let (llm_key, set_llm_key) = signal(String::new());
     let (llm_model, set_llm_model) = signal(String::new());
     let (rel_threshold, set_rel_threshold) = signal(0.85_f64);
-    let (rel_model_choice, set_rel_model_choice) = signal("gliner2".to_string());
-    let (rel_download_progress, set_rel_download_progress) = signal(String::new());
+    let (rel_model_choice, _set_rel_model_choice) = signal("gliner2".to_string());
+    let (_rel_download_progress, _set_rel_download_progress) = signal(String::new());
     let (rel_custom_templates_json, set_rel_custom_templates_json) = signal(String::new());
     let (rel_templates_mode, set_rel_templates_mode) = signal("general".to_string());
     let (quant_choice, set_quant_choice) = signal("int8".to_string());
@@ -89,7 +89,12 @@ pub fn OnboardingWizard(
     // New entity input
     let (new_entity_label, set_new_entity_label) = signal(String::new());
     let (new_entity_type, set_new_entity_type) = signal("entity".to_string());
-    // Relation review state (seed phase 2)
+    // Expansion entity review state (seed phase 2)
+    // Vec<(label, node_type, confidence, skipped)>
+    let (seed_expansion_entities, set_seed_expansion_entities) = signal(
+        Vec::<(String, String, f32, bool)>::new()
+    );
+    // Relation review state (seed phase 3)
     let (seed_review_connections, set_seed_review_connections) = signal(
         Vec::<crate::components::relation_review::ReviewConnection>::new()
     );
@@ -249,7 +254,7 @@ pub fn OnboardingWizard(
         let ner = ner_choice.get_untracked();
         let ner_m = ner_model.get_untracked();
         let rel_thresh = rel_threshold.get_untracked();
-        let rel_m = rel_model_choice.get_untracked();
+        let _rel_m = rel_model_choice.get_untracked();
         let rel_tpl_mode = rel_templates_mode.get_untracked();
         let rel_custom_tpl = rel_custom_templates_json.get_untracked();
         let llm = llm_choice.get_untracked();
@@ -695,6 +700,7 @@ pub fn OnboardingWizard(
                             analyzing, seed_result, set_seed_result,
                             do_analyze, do_ingest,
                             set_step,
+                            seed_expansion_entities, set_seed_expansion_entities,
                             seed_review_connections, set_seed_review_connections,
                             seed_known_rel_types, set_seed_known_rel_types,
                             seed_review_submitting, set_seed_review_submitting,

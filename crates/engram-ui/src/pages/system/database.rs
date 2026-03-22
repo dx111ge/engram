@@ -76,6 +76,7 @@ pub(crate) fn render_database_modal(
 
 // ── Database Management section ──
 
+#[allow(unused_variables)]
 #[component]
 fn DatabaseManagementInline(
     api: ApiClient,

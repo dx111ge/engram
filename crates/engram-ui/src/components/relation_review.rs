@@ -137,27 +137,32 @@ pub fn RelationReviewPanel(
                                             <span style="color: #e0e0e0;"><strong>{from}</strong></span>
                                             <span style="color: rgba(255,255,255,0.4);">"\u{2192}"</span>
                                             {
-                                                // Editable dropdown for all tiers
+                                                // Typeahead autocomplete for relation type
                                                 let known = known_rel_types.get_untracked();
                                                 let current = has_retype.unwrap_or(rel);
-                                                let placeholder = if is_no_rel { "-- Pick type --" } else { &current };
-                                                let placeholder_val = if is_no_rel { "skip".to_string() } else { current.clone() };
+                                                let display_val = if is_no_rel { String::new() } else { current.clone() };
+                                                let list_id = format!("rel-types-{}", idx);
+                                                let list_id2 = list_id.clone();
                                                 view! {
-                                                    <select
-                                                        style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: #fff; padding: 2px 4px; font-size: 0.75rem; border-radius: 3px; max-width: 150px;"
+                                                    <input
+                                                        type="text"
+                                                        list=list_id.clone()
+                                                        value=display_val
+                                                        placeholder="type to search..."
+                                                        style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: #4fc3f7; padding: 2px 6px; font-size: 0.75rem; border-radius: 3px; width: 140px;"
                                                         on:change=move |ev| {
                                                             let val = event_target_value(&ev);
-                                                            if !val.is_empty() && val != "skip" {
+                                                            if !val.is_empty() {
                                                                 set_new_type(idx, val);
                                                             }
                                                         }
-                                                    >
-                                                        <option value=placeholder_val.clone() selected=true>{placeholder.to_string()}</option>
-                                                        {known.into_iter().filter(|t| t.as_str() != placeholder_val).map(|t| {
+                                                    />
+                                                    <datalist id=list_id2>
+                                                        {known.into_iter().map(|t| {
                                                             let t2 = t.clone();
                                                             view! { <option value=t>{t2}</option> }
                                                         }).collect::<Vec<_>>()}
-                                                    </select>
+                                                    </datalist>
                                                 }.into_any()
                                             }
                                             <span style="color: rgba(255,255,255,0.4);">"\u{2192}"</span>

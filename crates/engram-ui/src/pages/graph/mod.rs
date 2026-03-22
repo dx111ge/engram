@@ -232,7 +232,16 @@ pub fn GraphPage() -> impl IntoView {
                                 node
                             }).collect();
 
-                            let vis_edges: Vec<serde_json::Value> = result.edges.iter().map(|e| {
+                            // Collect node IDs to filter dangling edges
+                            let node_ids: std::collections::HashSet<&str> = vis_nodes.iter()
+                                .filter_map(|n| n.get("id").and_then(|v| v.as_str()))
+                                .collect();
+
+                            let vis_edges: Vec<serde_json::Value> = result.edges.iter().filter_map(|e| {
+                                // Skip edges whose endpoints aren't in the node set
+                                if !node_ids.contains(e.from.as_str()) || !node_ids.contains(e.to.as_str()) {
+                                    return None;
+                                }
                                 let mut edge = serde_json::json!({
                                     "from": e.from,
                                     "to": e.to,
@@ -245,7 +254,7 @@ pub fn GraphPage() -> impl IntoView {
                                 if let Some(ref vt) = e.valid_to {
                                     edge.as_object_mut().unwrap().insert("valid_to".into(), serde_json::Value::String(vt.clone()));
                                 }
-                                edge
+                                Some(edge)
                             }).collect();
 
                             set_nodes.set(vis_nodes);
@@ -355,8 +364,16 @@ pub fn GraphPage() -> impl IntoView {
                         }
                     }
                 });
+                // Collect all node IDs (existing + newly added) to filter dangling edges
+                let all_node_ids: std::collections::HashSet<String> = nodes.get_untracked().iter()
+                    .filter_map(|n| n.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    .collect();
                 set_edges.update(|existing| {
                     for e in &result.edges {
+                        // Skip edges whose endpoints aren't in the node set
+                        if !all_node_ids.contains(e.from.as_str()) || !all_node_ids.contains(e.to.as_str()) {
+                            continue;
+                        }
                         let mut new_edge = serde_json::json!({
                             "from": e.from,
                             "to": e.to,
@@ -579,7 +596,6 @@ pub fn GraphPage() -> impl IntoView {
                     node_detail,
                     set_detail_node_id,
                     set_detail_modal_open,
-                    set_start_node,
                     set_path_from,
                     set_path_results,
                     set_path_selected,

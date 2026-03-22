@@ -705,6 +705,83 @@ window.__engram_graph = {
           renameRow.appendChild(deleteBtn);
           tip.appendChild(renameRow);
 
+          // Date editing row
+          var dateRow = document.createElement('div');
+          dateRow.style.marginTop = '4px';
+          dateRow.style.display = 'flex';
+          dateRow.style.alignItems = 'center';
+          dateRow.style.gap = '4px';
+          dateRow.style.fontSize = '0.72rem';
+
+          var fromLabel = document.createElement('span');
+          fromLabel.textContent = 'From:';
+          fromLabel.style.color = 'rgba(255,255,255,0.5)';
+          dateRow.appendChild(fromLabel);
+
+          var fromDate = document.createElement('input');
+          fromDate.type = 'date';
+          fromDate.value = link.valid_from || '';
+          fromDate.style.cssText = 'background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:2px 4px; font-size:0.7rem; border-radius:3px; width:110px;';
+          dateRow.appendChild(fromDate);
+
+          var toLabel = document.createElement('span');
+          toLabel.textContent = 'To:';
+          toLabel.style.color = 'rgba(255,255,255,0.5)';
+          dateRow.appendChild(toLabel);
+
+          var toDate = document.createElement('input');
+          toDate.type = 'date';
+          toDate.value = link.valid_to || '';
+          toDate.style.cssText = 'background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:2px 4px; font-size:0.7rem; border-radius:3px; width:110px;';
+          dateRow.appendChild(toDate);
+
+          var dateSaveBtn = document.createElement('button');
+          dateSaveBtn.innerHTML = '<i class="fa-solid fa-calendar-check"></i>';
+          dateSaveBtn.style.cssText = 'background:var(--accent-bright, #4fc3f7); border:none; color:#000; padding:3px 6px; border-radius:3px; cursor:pointer; font-size:0.65rem;';
+          dateSaveBtn.title = 'Save dates';
+          dateSaveBtn.addEventListener('click', function() {
+            var vf = fromDate.value || null;
+            var vt = toDate.value || null;
+            var curLabel = link.label || 'related_to';
+            var xhr = new XMLHttpRequest();
+            xhr.open('PATCH', '/edge', false);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            var token = localStorage.getItem('engram_token');
+            if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+            xhr.send(JSON.stringify({
+              from: src, to: tgt,
+              old_rel_type: curLabel, new_rel_type: curLabel,
+              valid_from: vf, valid_to: vt
+            }));
+            if (xhr.status === 200) {
+              var resp = JSON.parse(xhr.responseText);
+              if (resp.renamed) {
+                link.valid_from = vf;
+                link.valid_to = vt;
+                // Update original links too
+                if (self._originalLinks) {
+                  self._originalLinks.forEach(function(ol) {
+                    var olSrc = typeof ol.source === 'object' ? ol.source.id : ol.source;
+                    var olTgt = typeof ol.target === 'object' ? ol.target.id : ol.target;
+                    if (olSrc === src && olTgt === tgt && (ol.label || 'related_to') === curLabel) {
+                      ol.valid_from = vf;
+                      ol.valid_to = vt;
+                    }
+                  });
+                }
+                dateSaveBtn.innerHTML = '<i class="fa-solid fa-check"></i>';
+                setTimeout(function() { dateSaveBtn.innerHTML = '<i class="fa-solid fa-calendar-check"></i>'; }, 1000);
+              }
+            }
+          });
+          dateRow.appendChild(dateSaveBtn);
+
+          // Prevent click propagation from date inputs
+          fromDate.addEventListener('click', function(e) { e.stopPropagation(); });
+          toDate.addEventListener('click', function(e) { e.stopPropagation(); });
+
+          tip.appendChild(dateRow);
+
           document.body.appendChild(tip);
           self._edgePopupEl = tip;
           setTimeout(function() {
@@ -736,7 +813,6 @@ window.__engram_graph = {
       var items = [
         { icon: 'fa-solid fa-expand', label: 'Expand', action: 'expand' },
         { icon: 'fa-solid fa-circle-info', label: 'Open Detail', action: 'details' },
-        { icon: 'fa-solid fa-bullseye', label: 'Set as Start', action: 'set_start' },
         { icon: 'fa-solid fa-route', label: 'Find Path From...', action: 'find_path' },
         { icon: 'fa-solid fa-eye-slash', label: 'Hide Type', action: 'hide_type' },
       ];
@@ -752,9 +828,6 @@ window.__engram_graph = {
             onDblClickCb(node.id);
           } else if (item.action === 'details' && onClickCb) {
             onClickCb(node.id);
-          } else if (item.action === 'set_start') {
-            self._startNodeId = node.id;
-            graph.nodeColor(graph.nodeColor()); // refresh
           } else if (item.action === 'find_path') {
             // Set start node for sidebar Find Path
             self._findPathFrom = node.id;
@@ -954,7 +1027,8 @@ window.__engram_graph = {
         var tgtType = tgt ? (tgt.node_type || 'Entity').toLowerCase() : '';
         var edgeVisible = !self._hiddenRels.has(rel)
           && !self._hiddenTypes.has(srcType)
-          && !self._hiddenTypes.has(tgtType);
+          && !self._hiddenTypes.has(tgtType)
+          && !(self._temporalCurrentOnly && l.valid_to);
         if (edgeVisible) {
           nodeHasVisibleEdge[srcId] = true;
           nodeHasVisibleEdge[tgtId] = true;
@@ -993,9 +1067,39 @@ window.__engram_graph = {
   setTemporalMode: function(currentOnly) {
     this._temporalCurrentOnly = currentOnly;
     if (this.instance) {
-      this.instance.linkVisibility(this.instance.linkVisibility());
-      this.instance.linkColor(this.instance.linkColor());
-      this.instance.linkWidth(this.instance.linkWidth());
+      // Recalculate orphaned nodes accounting for temporal filter
+      var self = this;
+      var data = self.instance.graphData();
+      self._orphanedNodes = new Set();
+      var nodeHasVisibleEdge = {};
+      data.links.forEach(function(l) {
+        var src = typeof l.source === 'object' ? l.source : null;
+        var tgt = typeof l.target === 'object' ? l.target : null;
+        var srcId = src ? src.id : l.source;
+        var tgtId = tgt ? tgt.id : l.target;
+        var rel = (l.label || '').toLowerCase();
+        var srcType = src ? (src.node_type || 'Entity').toLowerCase() : '';
+        var tgtType = tgt ? (tgt.node_type || 'Entity').toLowerCase() : '';
+        var edgeVisible = !self._hiddenRels.has(rel)
+          && !self._hiddenTypes.has(srcType)
+          && !self._hiddenTypes.has(tgtType)
+          && !(self._temporalCurrentOnly && l.valid_to);
+        if (edgeVisible) {
+          nodeHasVisibleEdge[srcId] = true;
+          nodeHasVisibleEdge[tgtId] = true;
+        }
+      });
+      data.nodes.forEach(function(n) {
+        var nt = (n.node_type || 'Entity').toLowerCase();
+        if (!self._hiddenTypes.has(nt) && !nodeHasVisibleEdge[n.id]) {
+          self._orphanedNodes.add(n.id);
+        }
+      });
+      // Refresh all visual properties
+      self.instance.nodeVisibility(self.instance.nodeVisibility());
+      self.instance.linkVisibility(self.instance.linkVisibility());
+      self.instance.linkColor(self.instance.linkColor());
+      self.instance.linkWidth(self.instance.linkWidth());
     }
   },
 
@@ -1098,22 +1202,77 @@ window.__engram_graph = {
     }
 
     if (this.instance) {
+      var data = this.instance.graphData();
+      var existingNodeIds = new Set(data.nodes.map(function(n) { return n.id; }));
+      var existingEdgeKeys = new Set();
+      data.links.forEach(function(l) {
+        var src = typeof l.source === 'object' ? l.source.id : l.source;
+        var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+        existingEdgeKeys.add(src + '>' + tgt);
+        existingEdgeKeys.add(tgt + '>' + src);
+      });
+
+      // Add missing path nodes and edges to the graph
+      var newNodes = [];
+      var newLinks = [];
+      var self = this;
+
+      this._pathNodes.forEach(function(nodeId) {
+        if (!existingNodeIds.has(nodeId)) {
+          newNodes.push({
+            id: nodeId,
+            label: nodeId,
+            display_label: nodeId,
+            title: 'Path node',
+            node_type: 'Entity',
+            confidence: 0.5,
+            size: 5,
+            _pathOnly: true
+          });
+          existingNodeIds.add(nodeId);
+        }
+      });
+
+      // For each consecutive pair in each path, ensure a connecting edge exists
+      for (var p = 0; p < paths.length; p++) {
+        var path = paths[p];
+        for (var i = 0; i < path.length - 1; i++) {
+          var a = path[i], b = path[i+1];
+          if (!existingEdgeKeys.has(a + '>' + b)) {
+            newLinks.push({
+              source: a,
+              target: b,
+              label: 'path',
+              _pathOnly: true
+            });
+            existingEdgeKeys.add(a + '>' + b);
+            existingEdgeKeys.add(b + '>' + a);
+          }
+        }
+      }
+
+      if (newNodes.length > 0 || newLinks.length > 0) {
+        this.instance.graphData({
+          nodes: data.nodes.concat(newNodes),
+          links: data.links.concat(newLinks)
+        });
+      }
+
       // Temporarily unbundle edges along paths for detail
       if (this._bundlingEnabled && this._originalLinks) {
-        var data = this.instance.graphData();
+        var data2 = this.instance.graphData();
         var unbundledLinks = [];
         var pathPairs = this._pathHighlight;
-        data.links.forEach(function(l) {
+        data2.links.forEach(function(l) {
           var src = typeof l.source === 'object' ? l.source.id : l.source;
           var tgt = typeof l.target === 'object' ? l.target.id : l.target;
           if (l._bundled && (pathPairs.has(src + '>' + tgt) || pathPairs.has(tgt + '>' + src))) {
-            // Unbundle: show individual children
             l._children.forEach(function(c) { unbundledLinks.push(c); });
           } else {
             unbundledLinks.push(l);
           }
         });
-        this.instance.graphData({ nodes: data.nodes, links: unbundledLinks });
+        this.instance.graphData({ nodes: data2.nodes, links: unbundledLinks });
       }
 
       this.instance.nodeVisibility(this.instance.nodeVisibility());
@@ -1155,6 +1314,16 @@ window.__engram_graph = {
     this._pathHighlight = new Set();
     this._pathNodes = new Set();
     this._findPathFrom = null;
+
+    // Remove path-only nodes and edges that were injected by showPaths
+    if (this.instance) {
+      var data = this.instance.graphData();
+      var cleanNodes = data.nodes.filter(function(n) { return !n._pathOnly; });
+      var cleanLinks = data.links.filter(function(l) { return !l._pathOnly; });
+      if (cleanNodes.length !== data.nodes.length || cleanLinks.length !== data.links.length) {
+        this.instance.graphData({ nodes: cleanNodes, links: cleanLinks });
+      }
+    }
 
     // Re-bundle if bundling is enabled
     if (this.instance && this._bundlingEnabled && this._originalLinks) {

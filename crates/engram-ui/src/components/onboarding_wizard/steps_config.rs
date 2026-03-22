@@ -317,11 +317,13 @@ pub(crate) fn render_step_seed(
     new_entity_type: ReadSignal<String>,
     set_new_entity_type: WriteSignal<String>,
     analyzing: ReadSignal<bool>,
-    seed_result: ReadSignal<Option<String>>,
+    _seed_result: ReadSignal<Option<String>>,
     set_seed_result: WriteSignal<Option<String>>,
     do_analyze: Action<(), ()>,
-    do_ingest: Action<(), ()>,
+    _do_ingest: Action<(), ()>,
     set_step: WriteSignal<u32>,
+    _seed_expansion_entities: ReadSignal<Vec<(String, String, f32, bool)>>,
+    _set_seed_expansion_entities: WriteSignal<Vec<(String, String, f32, bool)>>,
     seed_review_connections: ReadSignal<Vec<crate::components::relation_review::ReviewConnection>>,
     set_seed_review_connections: WriteSignal<Vec<crate::components::relation_review::ReviewConnection>>,
     seed_known_rel_types: ReadSignal<Vec<String>>,
@@ -502,41 +504,55 @@ pub(crate) fn render_step_seed(
                 </div>
             })}
 
-            // Phase 1 -> Phase 2 transition: "Review Relations" button
+            // Phase 1 -> Phase 2 transition: "Review" button
             {move || (seed_phase.get() == 1 && !analyzing.get()).then(|| {
                 let api = use_context::<crate::api::ApiClient>().expect("ApiClient");
-                let api2 = api.clone();
                 view! {
                 <div class="flex gap-sm mt-1">
                     <button class="btn btn-primary" on:click=move |_| {
-                        // Fetch tiered connections from API
                         let api = api.clone();
                         let sid = seed_session_id.get_untracked();
                         wasm_bindgen_futures::spawn_local(async move {
-                            // Fetch connections
-                            let url = format!("/ingest/seed/connections?session_id={}", sid);
+                            // Fetch paginated review items
+                            let url = format!("/ingest/seed/connections?session_id={}&page=0&page_size=200", sid);
                             if let Ok(text) = api.get_text(&url).await {
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                    let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+                                    if status == "enriching" || status == "pending" {
+                                        set_seed_result.set(Some("Enrichment still in progress... try again in a few seconds.".to_string()));
+                                        return;
+                                    }
+                                    if status == "error" {
+                                        let err = json.get("status_error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                                        set_seed_result.set(Some(format!("Enrichment failed: {}", err)));
+                                        return;
+                                    }
+                                    set_seed_result.set(None);
+
+                                    // Parse review items
                                     let mut conns = Vec::new();
-                                    if let Some(groups) = json.get("groups").and_then(|g| g.as_array()) {
-                                        for group in groups {
-                                            let tier = group.get("tier").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                                            if let Some(arr) = group.get("connections").and_then(|c| c.as_array()) {
-                                                for c in arr {
-                                                    conns.push(crate::components::relation_review::ReviewConnection {
-                                                        idx: c.get("idx").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-                                                        from: c.get("from").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                                        to: c.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                                        rel_type: c.get("rel_type").and_then(|v| v.as_str()).unwrap_or("related_to").to_string(),
-                                                        confidence: c.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
-                                                        source: c.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                                        tier: tier.clone(),
-                                                    });
-                                                }
-                                            }
+                                    if let Some(items) = json.get("items").and_then(|v| v.as_array()) {
+                                        for item in items {
+                                            let from = item.get("from").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let to = item.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let rel = item.get("rel_type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let conf = item.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                                            let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let tier = item.get("tier").and_then(|v| v.as_str()).unwrap_or("uncertain").to_string();
+                                            let idx = item.get("idx").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                            conns.push(crate::components::relation_review::ReviewConnection {
+                                                idx,
+                                                from,
+                                                to,
+                                                rel_type: rel,
+                                                confidence: conf,
+                                                source,
+                                                tier,
+                                            });
                                         }
                                     }
                                     set_seed_review_connections.set(conns);
+                                    set_seed_phase.set(2);
                                 }
                             }
                             // Fetch known relation types
@@ -548,11 +564,10 @@ pub(crate) fn render_step_seed(
                                     set_seed_known_rel_types.set(types);
                                 }
                             }
-                            set_seed_phase.set(2);
                         });
                     }
                         disabled=move || analyzing.get()>
-                        <i class="fa-solid fa-check-double"></i>" Review Relations"
+                        <i class="fa-solid fa-check-double"></i>" Review All"
                     </button>
                     <button class="btn btn-secondary" on:click=move |_| {
                         set_seed_phase.set(0);
@@ -566,7 +581,7 @@ pub(crate) fn render_step_seed(
                 </div>
             }})}
 
-            // Phase 2: Relation Review with RelationReviewPanel
+            // Phase 2: Merged review (node-edge-node) with RelationReviewPanel
             {move || (seed_phase.get() == 2).then(|| {
                 let api = use_context::<crate::api::ApiClient>().expect("ApiClient");
                 let on_confirm = Callback::new(move |decisions: crate::components::relation_review::ReviewDecisions| {
@@ -574,7 +589,7 @@ pub(crate) fn render_step_seed(
                     let sid = seed_session_id.get_untracked();
                     set_seed_review_submitting.set(true);
                     wasm_bindgen_futures::spawn_local(async move {
-                        // POST confirm-relations
+                        // POST confirm-relations (only accepted items)
                         let body = serde_json::json!({
                             "session_id": sid,
                             "accepted": decisions.accepted,
@@ -609,9 +624,9 @@ pub(crate) fn render_step_seed(
 
                 view! {
                     <div class="mt-1">
-                        <h4><i class="fa-solid fa-check-double"></i>" Review Relations"</h4>
+                        <h4><i class="fa-solid fa-check-double"></i>" Review All Relations"</h4>
                         <p class="wizard-desc" style="margin-bottom: 0.5rem;">
-                            "Relations classified by SPARQL (Wikidata) and GLiNER2. Confirmed are auto-accepted. Review the rest."
+                            "All discovered relations: SPARQL (Wikidata), GLiNER2, org leadership, co-occurrence. Check items to accept, edit relation types, or skip."
                         </p>
 
                         {move || {
@@ -619,7 +634,7 @@ pub(crate) fn render_step_seed(
                             if conns.is_empty() {
                                 view! {
                                     <div class="wizard-info-box">
-                                        <p><i class="fa-solid fa-circle-info"></i>" No relations discovered yet. The enrichment may still be running. Wait for it to complete, then click Review Relations again."</p>
+                                        <p><i class="fa-solid fa-circle-info"></i>" No relations discovered yet. The enrichment may still be running. Click 'Review All' again."</p>
                                     </div>
                                 }.into_any()
                             } else {

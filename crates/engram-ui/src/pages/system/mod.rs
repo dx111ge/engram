@@ -210,7 +210,7 @@ pub fn SystemPage() -> impl IntoView {
     let (_import_status, _set_import_status) = signal(String::new());
 
     // Quantization signal declared early so config Effect can set it
-    let (quant_enabled, set_quant_enabled) = signal(true);
+    let (_quant_enabled, set_quant_enabled) = signal(true);
 
     Effect::new(move |_| {
         if let Some(cfg) = config.get().flatten() {

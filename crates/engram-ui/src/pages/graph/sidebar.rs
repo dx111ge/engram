@@ -509,8 +509,13 @@ pub(super) fn find_path_view(
                             if let Ok(result) = js_sys::eval(&code) {
                                 if let Some(s) = result.as_string() {
                                     if let Ok(paths) = serde_json::from_str::<Vec<Vec<String>>>(&s) {
-                                        let sel = vec![false; paths.len()];
-                                        set_path_results.set(paths.clone());
+                                        // Dedup paths by node sequence (keep first occurrence)
+                                        let mut seen = std::collections::HashSet::new();
+                                        let deduped: Vec<Vec<String>> = paths.into_iter()
+                                            .filter(|p| seen.insert(p.clone()))
+                                            .collect();
+                                        let sel = vec![false; deduped.len()];
+                                        set_path_results.set(deduped);
                                         set_path_selected.set(sel);
                                         // Don't auto-show paths on canvas since all start unchecked
                                         let _ = js_sys::eval("window.__engram_graph.clearPath()");
@@ -596,7 +601,6 @@ pub(super) fn node_preview_view(
     node_detail: ReadSignal<Option<crate::api::types::NodeResponse>>,
     set_detail_node_id: WriteSignal<Option<String>>,
     set_detail_modal_open: WriteSignal<bool>,
-    set_start_node: WriteSignal<Option<String>>,
     set_path_from: WriteSignal<Option<String>>,
     set_path_results: WriteSignal<Vec<Vec<String>>>,
     set_path_selected: WriteSignal<Vec<bool>>,
@@ -613,7 +617,6 @@ pub(super) fn node_preview_view(
         } else { None },
         move || node_detail.get().map(|detail| {
             let label = detail.label.clone();
-            let label_for_start = label.clone();
             let label_for_open = label.clone();
             view! {
                 <div class="card node-info-panel">
@@ -636,12 +639,6 @@ pub(super) fn node_preview_view(
                                 set_detail_modal_open.set(true);
                             }>
                             <i class="fa-solid fa-expand"></i>" Open"
-                        </button>
-                        <button class="btn btn-sm btn-secondary" title="Set as start node"
-                            on:click=move |_| {
-                                set_start_node.set(Some(label_for_start.clone()));
-                            }>
-                            <i class="fa-solid fa-bullseye"></i>" Start"
                         </button>
                         <button class="btn btn-sm btn-secondary" title="Find paths from this node"
                             on:click={

@@ -724,42 +724,35 @@ pub async fn ingest_review(
     let session_id = query.get("session")
         .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "session query param required"))?;
 
+    let page: usize = query.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
+    let page_size: usize = query.get("page_size").and_then(|p| p.parse().ok()).unwrap_or(20);
+
     let sessions = state.ingest_sessions.read().unwrap();
     let session = sessions.get(session_id)
         .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "ingest session not found"))?;
 
-    let mut confirmed = Vec::new();
-    let mut likely = Vec::new();
-    let mut uncertain = Vec::new();
-    let mut no_relation = Vec::new();
-
-    for (idx, rel) in session.relations.iter().enumerate() {
-        let entry = serde_json::json!({
-            "idx": idx,
+    let total = session.relations.len();
+    let start = (page * page_size).min(total);
+    let end = ((page + 1) * page_size).min(total);
+    let items: Vec<serde_json::Value> = session.relations[start..end].iter().enumerate().map(|(i, rel)| {
+        serde_json::json!({
+            "idx": start + i,
             "from": rel.from,
             "to": rel.to,
             "rel_type": rel.rel_type,
             "confidence": rel.confidence,
-            "method": rel.method,
+            "source": rel.method,
             "tier": rel.tier,
-        });
-        match rel.tier {
-            crate::state::ConnectionTier::Confirmed => confirmed.push(entry),
-            crate::state::ConnectionTier::Likely => likely.push(entry),
-            crate::state::ConnectionTier::Uncertain => uncertain.push(entry),
-            crate::state::ConnectionTier::NoRelation => no_relation.push(entry),
-        }
-    }
+        })
+    }).collect();
 
     Ok(Json(serde_json::json!({
         "session_id": session_id,
         "entities": session.entities,
-        "groups": [
-            { "tier": "confirmed", "label": "Confirmed", "connections": confirmed },
-            { "tier": "likely", "label": "Likely (needs confirmation)", "connections": likely },
-            { "tier": "uncertain", "label": "Uncertain (careful review)", "connections": uncertain },
-            { "tier": "no_relation", "label": "Co-occurred but unclassified", "connections": no_relation },
-        ]
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": items,
     })))
 }
 
@@ -788,7 +781,12 @@ pub async fn ingest_review_confirm(
     let modified_map: std::collections::HashMap<usize, String> = req.modified.iter()
         .map(|m| (m.idx, m.new_rel_type.clone()))
         .collect();
-    let skipped_set: std::collections::HashSet<usize> = req.skipped.iter().copied().collect();
+
+    // Build set of explicitly accepted indices (no auto-accept)
+    let mut keep: std::collections::HashSet<usize> = accepted_set;
+    for m in &req.modified {
+        keep.insert(m.idx);
+    }
 
     let mut facts_stored = 0u32;
     let mut relations_created = 0u32;
@@ -800,8 +798,20 @@ pub async fn ingest_review_confirm(
             source_id: "ingest-review".to_string(),
         };
 
-        // Store all entities
+        // Collect entity labels referenced by accepted relations
+        let mut needed_entities: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (idx, rel) in session.relations.iter().enumerate() {
+            if keep.contains(&idx) {
+                needed_entities.insert(rel.from.to_lowercase());
+                needed_entities.insert(rel.to.to_lowercase());
+            }
+        }
+
+        // Store only entities referenced by accepted relations
         for ent in &session.entities {
+            if !needed_entities.contains(&ent.label.to_lowercase()) {
+                continue;
+            }
             match g.store_with_confidence(&ent.label, ent.confidence, &prov) {
                 Ok(_) => {
                     let _ = g.set_node_type(&ent.label, &ent.entity_type);
@@ -811,25 +821,22 @@ pub async fn ingest_review_confirm(
             }
         }
 
-        // Store only accepted/modified relations (skip confirmed-tier auto-accepted by default)
+        // Store only explicitly accepted relations
         for (idx, rel) in session.relations.iter().enumerate() {
-            if skipped_set.contains(&idx) { continue; }
+            if !keep.contains(&idx) { continue; }
 
-            let accept = accepted_set.contains(&idx) || modified_map.contains_key(&idx)
-                || rel.tier == crate::state::ConnectionTier::Confirmed;
-
-            if accept {
-                let rel_type = modified_map.get(&idx).unwrap_or(&rel.rel_type);
-                if g.find_node_id(&rel.from).ok().flatten().is_none() {
-                    let _ = g.store_with_confidence(&rel.from, 0.60, &prov);
-                }
-                if g.find_node_id(&rel.to).ok().flatten().is_none() {
-                    let _ = g.store_with_confidence(&rel.to, 0.60, &prov);
-                }
-                match g.relate(&rel.from, &rel.to, rel_type, &prov) {
-                    Ok(_) => relations_created += 1,
-                    Err(_) => {}
-                }
+            let rel_type = modified_map.get(&idx).unwrap_or(&rel.rel_type);
+            if g.find_node_id(&rel.from).ok().flatten().is_none() {
+                let _ = g.store_with_confidence(&rel.from, 0.60, &prov);
+                facts_stored += 1;
+            }
+            if g.find_node_id(&rel.to).ok().flatten().is_none() {
+                let _ = g.store_with_confidence(&rel.to, 0.60, &prov);
+                facts_stored += 1;
+            }
+            match g.relate(&rel.from, &rel.to, rel_type, &prov) {
+                Ok(_) => relations_created += 1,
+                Err(_) => {}
             }
         }
     }

@@ -859,18 +859,39 @@ impl crate::rel_traits::RelationExtractor for Gliner2PipelineBackend {
             }
         };
 
-        // Map head/tail text back to entity indices
+        // Map head/tail text back to entity indices (exact match + span fallback).
+        // When entities have span=(0,0) (seed flow), use case-insensitive substring matching.
         relations
             .into_iter()
             .filter_map(|rel| {
-                let head_idx = input
-                    .entities
-                    .iter()
-                    .position(|e| e.text == rel.head || e.span == (rel.head_start, rel.head_end));
-                let tail_idx = input
-                    .entities
-                    .iter()
-                    .position(|e| e.text == rel.tail || e.span == (rel.tail_start, rel.tail_end));
+                let head_idx = input.entities.iter().position(|e| {
+                    if e.text == rel.head {
+                        return true;
+                    }
+                    if e.span != (0, 0) && e.span == (rel.head_start, rel.head_end) {
+                        return true;
+                    }
+                    if e.span == (0, 0) {
+                        let ext = rel.head.to_lowercase();
+                        let ent = e.text.to_lowercase();
+                        return ext.contains(&ent) || ent.contains(&ext);
+                    }
+                    false
+                });
+                let tail_idx = input.entities.iter().position(|e| {
+                    if e.text == rel.tail {
+                        return true;
+                    }
+                    if e.span != (0, 0) && e.span == (rel.tail_start, rel.tail_end) {
+                        return true;
+                    }
+                    if e.span == (0, 0) {
+                        let ext = rel.tail.to_lowercase();
+                        let ent = e.text.to_lowercase();
+                        return ext.contains(&ent) || ent.contains(&ext);
+                    }
+                    false
+                });
 
                 match (head_idx, tail_idx) {
                     (Some(h), Some(t)) => Some(crate::rel_traits::CandidateRelation {

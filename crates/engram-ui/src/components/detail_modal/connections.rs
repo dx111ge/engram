@@ -26,7 +26,15 @@ pub(super) fn render_connections_tab(
                                 let to = e.to.clone();
                                 let rel = e.relationship.clone();
                                 let conf = e.confidence;
+                                let valid_from = e.valid_from.clone();
+                                let valid_to = e.valid_to.clone();
                                 let to_click = to.clone();
+                                let date_range = match (valid_from.as_deref(), valid_to.as_deref()) {
+                                    (Some(vf), Some(vt)) => format!(" [{} - {}]", vf, vt),
+                                    (Some(vf), None) => format!(" [{} - present]", vf),
+                                    (None, Some(vt)) => format!(" [? - {}]", vt),
+                                    (None, None) => String::new(),
+                                };
                                 view! {
                                     <div class="prop-row" style="cursor: pointer; padding: 0.35rem 0.5rem; border-radius: 4px;"
                                         title="Click to navigate"
@@ -40,6 +48,11 @@ pub(super) fn render_connections_tab(
                                             <i class="fa-solid fa-arrow-right" style="font-size: 0.65rem; opacity: 0.5;"></i>
                                             <strong>{to}</strong>
                                             <span class="text-secondary" style="font-size: 0.75rem;">{format!("{:.0}%", conf * 100.0)}</span>
+                                            {if !date_range.is_empty() {
+                                                view! { <span style="font-size: 0.65rem; color: rgba(255,255,255,0.35);">{date_range}</span> }.into_any()
+                                            } else {
+                                                view! { <span></span> }.into_any()
+                                            }}
                                         </span>
                                     </div>
                                 }
@@ -64,7 +77,15 @@ pub(super) fn render_connections_tab(
                                 let from = e.from.clone();
                                 let rel = e.relationship.clone();
                                 let conf = e.confidence;
+                                let valid_from = e.valid_from.clone();
+                                let valid_to = e.valid_to.clone();
                                 let from_click = from.clone();
+                                let date_range = match (valid_from.as_deref(), valid_to.as_deref()) {
+                                    (Some(vf), Some(vt)) => format!(" [{} - {}]", vf, vt),
+                                    (Some(vf), None) => format!(" [{} - present]", vf),
+                                    (None, Some(vt)) => format!(" [? - {}]", vt),
+                                    (None, None) => String::new(),
+                                };
                                 view! {
                                     <div class="prop-row" style="cursor: pointer; padding: 0.35rem 0.5rem; border-radius: 4px;"
                                         title="Click to navigate"
@@ -78,6 +99,11 @@ pub(super) fn render_connections_tab(
                                         <span style="font-size: 0.8rem; display: flex; align-items: center; gap: 0.5rem;">
                                             <span style="color: var(--accent-bright);">{rel}</span>
                                             <span class="text-secondary" style="font-size: 0.75rem;">{format!("{:.0}%", conf * 100.0)}</span>
+                                            {if !date_range.is_empty() {
+                                                view! { <span style="font-size: 0.65rem; color: rgba(255,255,255,0.35);">{date_range}</span> }.into_any()
+                                            } else {
+                                                view! { <span></span> }.into_any()
+                                            }}
                                         </span>
                                     </div>
                                 }

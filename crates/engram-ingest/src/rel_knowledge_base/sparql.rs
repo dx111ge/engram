@@ -111,14 +111,14 @@ impl KbRelationExtractor {
     /// Property expansion: fetch key Wikidata properties for all linked entities.
     /// Discovers NEW entities (e.g., "Lockheed Martin" as manufacturer of HIMARS)
     /// and returns them as (entity_label, property_label, new_entity_label) triples.
-    /// Returns (from_label, rel_type, to_label, valid_from, valid_to) tuples.
+    /// Returns (from_label, rel_type, to_label, to_qid, valid_from, valid_to) tuples.
     pub(super) fn property_expansion(
         &self,
         endpoint: &KbEndpoint,
         qids: &[(&str, usize)], // (QID URI, entity_index)
         entity_labels: &[String],
         language: &str,
-    ) -> Vec<(String, String, String, Option<String>, Option<String>)> {
+    ) -> Vec<(String, String, String, String, Option<String>, Option<String>)> {
         if qids.is_empty() {
             return Vec::new();
         }
@@ -132,9 +132,9 @@ impl KbRelationExtractor {
         // Also fetches P580 (start time) and P582 (end time) temporal qualifiers
         // via statement nodes when available.
         let query = format!(
-            r#"SELECT ?entity ?entityLabel ?propLabel ?value ?valueLabel ?startTime ?endTime WHERE {{
+            r#"SELECT ?entity ?entityLabel ?propNodeLabel ?value ?valueLabel ?startTime ?endTime ?qualifierLabel WHERE {{
                 VALUES ?entity {{ {values} }}
-                VALUES ?propNode {{ wd:P39 wd:P27 wd:P17 wd:P159 wd:P176 wd:P495 wd:P36 }}
+                VALUES ?propNode {{ wd:P39 wd:P27 wd:P17 wd:P159 wd:P176 wd:P495 wd:P36 wd:P102 wd:P108 wd:P463 wd:P69 }}
                 ?propNode wikibase:claim ?propclaim .
                 ?propNode wikibase:statementProperty ?stmtprop .
                 ?entity ?propclaim ?stmt .
@@ -142,6 +142,7 @@ impl KbRelationExtractor {
                 FILTER(isIRI(?value))
                 OPTIONAL {{ ?stmt pq:P580 ?startTime . }}
                 OPTIONAL {{ ?stmt pq:P582 ?endTime . }}
+                OPTIONAL {{ ?stmt pq:P642 ?qualifier . }}
                 SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,{lang}" }}
             }} LIMIT 300"#,
             values = values,
@@ -164,7 +165,7 @@ impl KbRelationExtractor {
         if let Some(bindings) = json.pointer("/results/bindings").and_then(|b| b.as_array()) {
             for binding in bindings {
                 let entity_qid = binding.pointer("/entity/value").and_then(|v| v.as_str()).unwrap_or("");
-                let prop_label = binding.pointer("/propLabel/value").and_then(|v| v.as_str()).unwrap_or("");
+                let prop_label = binding.pointer("/propNodeLabel/value").and_then(|v| v.as_str()).unwrap_or("");
                 let value_label = binding.pointer("/valueLabel/value").and_then(|v| v.as_str()).unwrap_or("");
 
                 // Skip self-references, empty values, and empty property labels
@@ -184,8 +185,23 @@ impl KbRelationExtractor {
                     None => continue,
                 };
 
+                let rel_type = wikidata_prop_to_rel_type(prop_label);
+
+                // P39 (holds_position): skip generic role titles that lack context.
+                // "President of Russia" is useful (contains "of [proper noun]").
+                // "party leader", "chairperson", "recruiter" are generic -- they'd
+                // create meaningless nodes. The actual org/party is found via P102.
+                if rel_type == "holds_position" && is_generic_position(value_label) {
+                    tracing::debug!(value = value_label, "skipping generic P39 position");
+                    continue;
+                }
+
+                let node_label = value_label.to_string();
+                let value_uri = binding.pointer("/value/value").and_then(|v| v.as_str()).unwrap_or("");
+                let to_qid = extract_qid(value_uri).to_string();
+
                 // Deduplicate
-                let key = (entity_label.clone(), value_label.to_string());
+                let key = (entity_label.clone(), node_label.clone());
                 if seen.contains(&key) { continue; }
                 seen.insert(key);
 
@@ -197,10 +213,7 @@ impl KbRelationExtractor {
                     .and_then(|v| v.as_str())
                     .map(|s| s.chars().take(10).collect::<String>()); // YYYY-MM-DD
 
-                // Map Wikidata property URIs to readable relation types
-                let rel_type = wikidata_prop_to_rel_type(prop_label);
-
-                results.push((entity_label, rel_type, value_label.to_string(), start_time, end_time));
+                results.push((entity_label, rel_type, node_label, to_qid, start_time, end_time));
             }
         }
 
@@ -290,6 +303,90 @@ impl KbRelationExtractor {
             }
         }
 
+        results
+    }
+
+    /// Org leadership enrichment: for discovered organizations/parties/countries,
+    /// fetch their current leaders via P488 (chairperson), P169 (CEO), P112 (founder),
+    /// P6 (head of government), P35 (head of state).
+    /// Only returns CURRENT leaders (no end date).
+    pub(super) fn org_leadership_enrichment(
+        &self,
+        endpoint: &KbEndpoint,
+        org_qids: &[(&str, &str)], // (QID, org_label)
+        language: &str,
+    ) -> Vec<(String, String, String, String)> {
+        if org_qids.is_empty() {
+            return Vec::new();
+        }
+
+        let values: String = org_qids.iter()
+            .map(|(qid, _)| format!("wd:{}", extract_qid(qid)))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let query = format!(
+            r#"SELECT ?org ?orgLabel ?rolePropLabel ?leader ?leaderLabel WHERE {{
+                VALUES ?org {{ {values} }}
+                VALUES ?roleProp {{ wd:P488 wd:P169 wd:P112 wd:P6 wd:P35 }}
+                ?roleProp wikibase:claim ?propclaim .
+                ?roleProp wikibase:statementProperty ?stmtprop .
+                ?org ?propclaim ?stmt .
+                ?stmt ?stmtprop ?leader .
+                FILTER(isIRI(?leader))
+                FILTER NOT EXISTS {{ ?stmt pq:P582 ?endTime . }}
+                SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,{lang}" }}
+            }} LIMIT 200"#,
+            values = values,
+            lang = language,
+        );
+
+        let json = match self.sparql_query(endpoint, &query) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("org leadership SPARQL failed: {e}");
+                return Vec::new();
+            }
+        };
+
+        let qid_to_org: HashMap<String, String> = org_qids.iter()
+            .map(|(qid, label)| (extract_qid(qid).to_string(), label.to_string()))
+            .collect();
+
+        let mut results = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        if let Some(bindings) = json.pointer("/results/bindings").and_then(|b| b.as_array()) {
+            for binding in bindings {
+                let org_uri = binding.pointer("/org/value").and_then(|v| v.as_str()).unwrap_or("");
+                let role_label = binding.pointer("/rolePropLabel/value").and_then(|v| v.as_str()).unwrap_or("");
+                let leader_label = binding.pointer("/leaderLabel/value").and_then(|v| v.as_str()).unwrap_or("");
+                let leader_uri = binding.pointer("/leader/value").and_then(|v| v.as_str()).unwrap_or("");
+
+                if leader_label.is_empty() || leader_label.starts_with("http://") {
+                    continue;
+                }
+                if leader_label.starts_with('Q') && leader_label[1..].chars().all(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+
+                let org_label = match qid_to_org.get(extract_qid(org_uri)) {
+                    Some(l) => l.clone(),
+                    None => continue,
+                };
+
+                let key = (org_label.clone(), leader_label.to_string());
+                if seen.contains(&key) { continue; }
+                seen.insert(key);
+
+                let role_rel = org_role_to_rel_type(role_label);
+                let leader_qid = extract_qid(leader_uri).to_string();
+
+                results.push((org_label, role_rel, leader_label.to_string(), leader_qid));
+            }
+        }
+
+        tracing::info!(orgs = org_qids.len(), leaders = results.len(), "org leadership enrichment");
         results
     }
 }

@@ -580,6 +580,10 @@ pub struct RenameEdgeRequest {
     pub to: String,
     pub old_rel_type: String,
     pub new_rel_type: String,
+    /// Optional: set valid_from date ("YYYY-MM-DD") or null to clear.
+    pub valid_from: Option<String>,
+    /// Optional: set valid_to date ("YYYY-MM-DD") or null to clear.
+    pub valid_to: Option<String>,
 }
 
 /// Response for `PATCH /edge`.
@@ -590,6 +594,10 @@ pub struct RenameEdgeResponse {
     pub to: String,
     pub old_rel_type: String,
     pub new_rel_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_to: Option<String>,
 }
 
 // ── Edge delete types ──

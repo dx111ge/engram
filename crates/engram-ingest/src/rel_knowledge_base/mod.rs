@@ -69,6 +69,10 @@ pub struct KbRelationExtractor {
     web_search_url: Option<String>,
     /// Optional GLiNER2 backend for classifying unresolved co-occurrence pairs.
     gliner2_backend: Option<Arc<dyn RelationExtractor>>,
+    /// When true, Steps 3b/3c collect expansion results instead of writing to graph.
+    pub defer_graph_writes: bool,
+    /// Deferred expansion results: (from_label, rel_type, to_label, node_type, valid_from, valid_to).
+    deferred_expansion: Mutex<Vec<(String, String, String, String, Option<String>, Option<String>)>>,
 }
 
 impl KbRelationExtractor {
@@ -90,6 +94,8 @@ impl KbRelationExtractor {
             web_search_api_key: None,
             web_search_url: None,
             gliner2_backend: None,
+            defer_graph_writes: false,
+            deferred_expansion: Mutex::new(Vec::new()),
         }
     }
 
@@ -117,6 +123,16 @@ impl KbRelationExtractor {
     /// Set the GLiNER2 backend for classifying unresolved co-occurrence pairs.
     pub fn set_gliner2_backend(&mut self, backend: Arc<dyn RelationExtractor>) {
         self.gliner2_backend = Some(backend);
+    }
+
+    /// Take all deferred expansion results (drains the buffer).
+    /// Returns (from_label, rel_type, to_label, node_type, valid_from, valid_to).
+    pub fn take_deferred_expansion(&self) -> Vec<(String, String, String, String, Option<String>, Option<String>)> {
+        if let Ok(mut buf) = self.deferred_expansion.lock() {
+            std::mem::take(&mut *buf)
+        } else {
+            Vec::new()
+        }
     }
 
     /// Publish a seed enrichment event if event_bus is configured.
@@ -376,56 +392,157 @@ impl RelationExtractor for KbRelationExtractor {
                 }
 
                 // 3b: Property expansion -- discover NEW entities
+                let expansion = self.property_expansion(endpoint, &qids, &entity_labels, &input.language);
                 {
-                    let expansion = self.property_expansion(endpoint, &qids, &entity_labels, &input.language);
 
                     if !expansion.is_empty() {
-                        let provenance = engram_core::graph::Provenance {
-                            source_type: engram_core::graph::SourceType::Api,
-                            source_id: format!("kb:{}", endpoint.name),
-                        };
+                        tracing::info!(
+                            count = expansion.len(),
+                            defer = self.defer_graph_writes,
+                            "Step 3b: property expansion results"
+                        );
+                        if self.defer_graph_writes {
+                            tracing::info!("Step 3b: deferring {} expansion items to session", expansion.len());
+                            // Deferred mode: collect results for session review
+                            if let Ok(mut buf) = self.deferred_expansion.lock() {
+                                for (from_label, rel_type, to_label, _to_qid, valid_from, valid_to) in &expansion {
+                                    let node_type = match rel_type.as_str() {
+                                        "citizen_of" | "located_in" | "origin_country" | "capital_of" => "location",
+                                        "headquartered_in" => "location",
+                                        "manufactured_by" => "organization",
+                                        "holds_position" => "position",
+                                        "governed_by" => "person",
+                                        "member_of" | "employed_by" => "organization",
+                                        "educated_at" => "organization",
+                                        _ => "entity",
+                                    };
+                                    buf.push((
+                                        from_label.clone(),
+                                        rel_type.clone(),
+                                        to_label.clone(),
+                                        node_type.to_string(),
+                                        valid_from.clone(),
+                                        valid_to.clone(),
+                                    ));
+                                    stats.relations_found += 1;
 
-                        if let Ok(mut g) = self.graph.write() {
-                            for (from_label, rel_type, to_label, valid_from, valid_to) in &expansion {
-                                let _ = g.store_with_confidence(to_label, 0.70, &provenance);
-
-                                let node_type = match rel_type.as_str() {
-                                    "citizen_of" | "located_in" | "origin_country" | "capital_of" => "location",
-                                    "headquartered_in" => "location",
-                                    "manufactured_by" => "organization",
-                                    "holds_position" => "position",
-                                    "governed_by" => "person",
-                                    _ => "entity",
-                                };
-                                let _ = g.set_node_type(to_label, node_type);
-
-                                if g.find_node_id(from_label).ok().flatten().is_none() {
-                                    let _ = g.store_with_confidence(from_label, 0.70, &provenance);
+                                    self.emit(engram_core::events::GraphEvent::SeedSparqlRelation {
+                                        session_id: session_id.clone(),
+                                        from: Arc::from(from_label.as_str()),
+                                        to: Arc::from(to_label.as_str()),
+                                        rel_type: Arc::from(rel_type.as_str()),
+                                    });
                                 }
+                            }
+                        } else {
+                            let provenance = engram_core::graph::Provenance {
+                                source_type: engram_core::graph::SourceType::Api,
+                                source_id: format!("kb:{}", endpoint.name),
+                            };
 
-                                // Use temporal relate if SPARQL returned date bounds
-                                let result = if valid_from.is_some() || valid_to.is_some() {
-                                    g.relate_with_temporal(
-                                        from_label, to_label, rel_type, 0.8,
-                                        valid_from.as_deref(), valid_to.as_deref(),
-                                        &provenance,
-                                    )
-                                } else {
-                                    g.relate(from_label, to_label, rel_type, &provenance)
-                                };
-                                match result {
-                                    Ok(_) => stats.relations_found += 1,
-                                    Err(e) => {
-                                        eprintln!("[KB] relate FAILED: {} -[{}]-> {}: {}", from_label, rel_type, to_label, e);
+                            if let Ok(mut g) = self.graph.write() {
+                                for (from_label, rel_type, to_label, _to_qid, valid_from, valid_to) in &expansion {
+                                    let _ = g.store_with_confidence(to_label, 0.70, &provenance);
+
+                                    let node_type = match rel_type.as_str() {
+                                        "citizen_of" | "located_in" | "origin_country" | "capital_of" => "location",
+                                        "headquartered_in" => "location",
+                                        "manufactured_by" => "organization",
+                                        "holds_position" => "position",
+                                        "governed_by" => "person",
+                                        "member_of" | "employed_by" => "organization",
+                                        "educated_at" => "organization",
+                                        _ => "entity",
+                                    };
+                                    let _ = g.set_node_type(to_label, node_type);
+
+                                    if g.find_node_id(from_label).ok().flatten().is_none() {
+                                        let _ = g.store_with_confidence(from_label, 0.70, &provenance);
+                                    }
+
+                                    // Use temporal relate if SPARQL returned date bounds
+                                    let result = if valid_from.is_some() || valid_to.is_some() {
+                                        g.relate_with_temporal(
+                                            from_label, to_label, rel_type, 0.8,
+                                            valid_from.as_deref(), valid_to.as_deref(),
+                                            &provenance,
+                                        )
+                                    } else {
+                                        g.relate(from_label, to_label, rel_type, &provenance)
+                                    };
+                                    match result {
+                                        Ok(_) => stats.relations_found += 1,
+                                        Err(e) => {
+                                            tracing::warn!("relate failed: {} -[{}]-> {}: {}", from_label, rel_type, to_label, e);
+                                        }
+                                    }
+
+                                    self.emit(engram_core::events::GraphEvent::SeedSparqlRelation {
+                                        session_id: session_id.clone(),
+                                        from: Arc::from(from_label.as_str()),
+                                        to: Arc::from(to_label.as_str()),
+                                        rel_type: Arc::from(rel_type.as_str()),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3b2: Org leadership enrichment -- fetch current leaders of discovered orgs
+                {
+                    let org_rel_types: &[&str] = &["member_of", "employed_by", "headquartered_in"];
+                    let mut org_qids_for_enrichment: Vec<(String, String)> = Vec::new();
+                    let mut seen_org_qids: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for (_, rel_type, to_label, to_qid, _, _) in &expansion {
+                        if org_rel_types.contains(&rel_type.as_str()) && !to_qid.is_empty() {
+                            if seen_org_qids.insert(to_qid.clone()) {
+                                org_qids_for_enrichment.push((to_qid.clone(), to_label.clone()));
+                            }
+                        }
+                    }
+
+                    if !org_qids_for_enrichment.is_empty() {
+                        let org_refs: Vec<(&str, &str)> = org_qids_for_enrichment.iter()
+                            .map(|(qid, label)| (qid.as_str(), label.as_str()))
+                            .collect();
+                        let leaders = self.org_leadership_enrichment(endpoint, &org_refs, &input.language);
+
+                        if self.defer_graph_writes {
+                            if let Ok(mut buf) = self.deferred_expansion.lock() {
+                                for (org_label, role_rel, leader_label, _leader_qid) in &leaders {
+                                    buf.push((
+                                        leader_label.clone(),
+                                        role_rel.clone(),
+                                        org_label.clone(),
+                                        "person".to_string(),
+                                        None,
+                                        None,
+                                    ));
+                                    stats.relations_found += 1;
+
+                                    self.emit(engram_core::events::GraphEvent::SeedSparqlRelation {
+                                        session_id: session_id.clone(),
+                                        from: Arc::from(leader_label.as_str()),
+                                        to: Arc::from(org_label.as_str()),
+                                        rel_type: Arc::from(role_rel.as_str()),
+                                    });
+                                }
+                            }
+                        } else {
+                            let provenance = engram_core::graph::Provenance {
+                                source_type: engram_core::graph::SourceType::Api,
+                                source_id: format!("kb:{}", endpoint.name),
+                            };
+                            if let Ok(mut g) = self.graph.write() {
+                                for (org_label, role_rel, leader_label, _leader_qid) in &leaders {
+                                    let _ = g.store_with_confidence(leader_label, 0.70, &provenance);
+                                    let _ = g.set_node_type(leader_label, "person");
+                                    match g.relate(leader_label, org_label, role_rel, &provenance) {
+                                        Ok(_) => stats.relations_found += 1,
+                                        Err(e) => tracing::warn!("relate failed: {} -[{}]-> {}: {}", leader_label, role_rel, org_label, e),
                                     }
                                 }
-
-                                self.emit(engram_core::events::GraphEvent::SeedSparqlRelation {
-                                    session_id: session_id.clone(),
-                                    from: Arc::from(from_label.as_str()),
-                                    to: Arc::from(to_label.as_str()),
-                                    rel_type: Arc::from(rel_type.as_str()),
-                                });
                             }
                         }
                     }
@@ -442,19 +559,36 @@ impl RelationExtractor for KbRelationExtractor {
                     );
 
                     if !path_results.is_empty() {
-                        let provenance = engram_core::graph::Provenance {
-                            source_type: engram_core::graph::SourceType::Api,
-                            source_id: format!("kb:{}", endpoint.name),
-                        };
+                        if self.defer_graph_writes {
+                            // Deferred mode: collect results for session review
+                            if let Ok(mut buf) = self.deferred_expansion.lock() {
+                                for (from_label, rel_type, to_label) in &path_results {
+                                    buf.push((
+                                        from_label.clone(),
+                                        rel_type.clone(),
+                                        to_label.clone(),
+                                        "entity".to_string(),
+                                        None,
+                                        None,
+                                    ));
+                                    stats.relations_found += 1;
+                                }
+                            }
+                        } else {
+                            let provenance = engram_core::graph::Provenance {
+                                source_type: engram_core::graph::SourceType::Api,
+                                source_id: format!("kb:{}", endpoint.name),
+                            };
 
-                        if let Ok(mut g) = self.graph.write() {
-                            for (from_label, rel_type, to_label) in &path_results {
-                                let _ = g.store_with_confidence(to_label, 0.65, &provenance);
-                                let _ = g.store_with_confidence(from_label, 0.65, &provenance);
+                            if let Ok(mut g) = self.graph.write() {
+                                for (from_label, rel_type, to_label) in &path_results {
+                                    let _ = g.store_with_confidence(to_label, 0.65, &provenance);
+                                    let _ = g.store_with_confidence(from_label, 0.65, &provenance);
 
-                                match g.relate(from_label, to_label, rel_type, &provenance) {
-                                    Ok(_) => stats.relations_found += 1,
-                                    Err(_) => {}
+                                    match g.relate(from_label, to_label, rel_type, &provenance) {
+                                        Ok(_) => stats.relations_found += 1,
+                                        Err(_) => {}
+                                    }
                                 }
                             }
                         }
@@ -570,12 +704,6 @@ impl RelationExtractor for KbRelationExtractor {
 
             if !unresolved.is_empty() {
                 if let Some(ref gliner2) = self.gliner2_backend {
-                    tracing::info!(
-                        unresolved = unresolved.len(),
-                        "Step 5: GLiNER2 classifying unresolved co-occurrence pairs"
-                    );
-
-                    // Build a synthetic input with article text (not caller's empty string)
                     let gliner_text = if input.text.is_empty() { article_text.clone() } else { input.text.clone() };
                     let gliner_input = RelationExtractionInput {
                         text: gliner_text,
@@ -695,8 +823,10 @@ impl RelationExtractor for KbRelationExtractor {
         }
 
         total_stats.lookup_ms = start.elapsed().as_millis() as u64;
+        let elapsed = total_stats.lookup_ms;
         *self.last_stats.lock().unwrap() = Some(total_stats);
 
+        tracing::info!(relations = all_relations.len(), ms = elapsed, "KB extract_relations complete");
         all_relations
     }
 
@@ -788,6 +918,49 @@ fn uri_to_label(uri: &str) -> String {
     result
 }
 
+/// Check if a P39 position title is generic (no specific context).
+/// Generic positions like "party leader", "chairperson", "recruiter" create
+/// meaningless nodes. Specific ones like "President of Russia" contain a
+/// proper noun context (typically via " of ").
+pub(super) fn is_generic_position(value_label: &str) -> bool {
+    // Positions containing " of " have specific context: "President of Russia"
+    if value_label.contains(" of ") {
+        return false;
+    }
+    // Check for proper nouns after the first word (uppercase words = specific)
+    // "Prime Minister" is title-case generic, but "NATO Secretary General" has "NATO"
+    let words: Vec<&str> = value_label.split_whitespace().collect();
+    if words.len() <= 1 {
+        return true; // single word like "recruiter" or "chairperson"
+    }
+    // If any word after the first is fully uppercase (acronym like NATO, CIS),
+    // it's specific
+    for w in &words[1..] {
+        if w.len() >= 2 && w.chars().all(|c| c.is_uppercase()) {
+            return false;
+        }
+    }
+    // No " of ", no acronyms = generic role title
+    true
+}
+
+/// Map org leadership role labels to relation types.
+pub(super) fn org_role_to_rel_type(role_label: &str) -> String {
+    let label = if role_label.contains('/') {
+        uri_to_label(role_label)
+    } else {
+        role_label.to_lowercase().replace(' ', "_")
+    };
+    match label.as_str() {
+        "p488" | "chairperson" => "leads".to_string(),
+        "p169" | "chief_executive_officer" => "leads".to_string(),
+        "p112" | "founded_by" => "founded".to_string(),
+        "p6" | "head_of_government" => "governed_by".to_string(),
+        "p35" | "head_of_state" => "head_of_state".to_string(),
+        _ => "leads".to_string(),
+    }
+}
+
 /// Map Wikidata property labels to engram relation types.
 pub(crate) fn wikidata_prop_to_rel_type(prop_label: &str) -> String {
     if prop_label.is_empty() {
@@ -810,6 +983,10 @@ pub(crate) fn wikidata_prop_to_rel_type(prop_label: &str) -> String {
         "p495" | "country_of_origin" => "origin_country".to_string(),
         "p36" | "capital" => "capital_of".to_string(),
         "p6" | "head_of_government" => "governed_by".to_string(),
+        "p102" | "member_of_political_party" => "member_of".to_string(),
+        "p108" | "employer" => "employed_by".to_string(),
+        "p463" | "member_of" => "member_of".to_string(),
+        "p69" | "educated_at" => "educated_at".to_string(),
         _ => label,
     }
 }

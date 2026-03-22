@@ -227,9 +227,21 @@ pub struct SeedSession {
     pub entities: Vec<SeedEntity>,
     /// Entity links to Wikidata (label, canonical, description, qid).
     pub entity_links: Vec<SeedEntityLink>,
-    /// Candidate connections discovered in Steps 2+3.
-    pub connections: Vec<SeedConnection>,
+    /// All items for human review: triples (node-edge-node) and standalone nodes.
+    pub review_items: Vec<SeedReviewItem>,
     pub confirmed: bool,
+    /// Enrichment status: "pending", "enriching", "complete", "error"
+    pub status: String,
+    /// Error message if status is "error"
+    pub status_error: Option<String>,
+}
+
+/// An entity discovered during SPARQL property expansion (not in original NER).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SeedExpansionEntity {
+    pub label: String,
+    pub node_type: String,
+    pub confidence: f32,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -285,6 +297,20 @@ pub struct SeedConnection {
     pub source: String,
     pub confidence: f32,
     pub tier: ConnectionTier,
+}
+
+/// A single item in the merged seed review screen.
+/// Either a triple (from--rel-->to) or a standalone node (from only).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SeedReviewItem {
+    pub from: String,
+    pub to: Option<String>,
+    pub rel_type: Option<String>,
+    pub source: String,
+    pub confidence: f32,
+    pub tier: ConnectionTier,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
 }
 
 /// An ingest review session: stores pipeline results for human review before committing.

@@ -347,11 +347,30 @@ pub async fn rename_edge(
 ) -> ApiResult<RenameEdgeResponse> {
     let mut g = state.graph.write().map_err(|_| write_lock_err())?;
 
-    let renamed = g
-        .rename_edge(&req.from, &req.to, &req.old_rel_type, &req.new_rel_type)
-        .map_err(|e| api_err(StatusCode::NOT_FOUND, e.to_string()))?;
+    let is_rename = req.old_rel_type != req.new_rel_type;
+    let has_temporal = req.valid_from.is_some() || req.valid_to.is_some();
 
-    if renamed {
+    let renamed = if is_rename {
+        g.rename_edge(&req.from, &req.to, &req.old_rel_type, &req.new_rel_type)
+            .map_err(|e| api_err(StatusCode::NOT_FOUND, e.to_string()))?
+    } else {
+        true // no rename needed, but may still update temporal
+    };
+
+    // Update temporal dates if provided (use new_rel_type for lookup after rename)
+    let mut temporal_updated = false;
+    if has_temporal && renamed {
+        let rel_type_for_lookup = &req.new_rel_type;
+        let vf = req.valid_from.as_deref();
+        let vt = req.valid_to.as_deref();
+        temporal_updated = g
+            .update_edge_temporal(&req.from, &req.to, rel_type_for_lookup, vf, vt)
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    let changed = (is_rename && renamed) || temporal_updated;
+
+    if changed {
         let brain_path = g.path().to_path_buf();
         drop(g);
         state.mark_dirty();
@@ -359,15 +378,17 @@ pub async fn rename_edge(
         // Best-effort relation gazetteer update: teach future ingests the new type
         #[cfg(feature = "ingest")]
         {
-            if let Ok(mut gaz) = engram_ingest::RelationGazetteer::load(&brain_path) {
-                let normalized = req.new_rel_type.to_lowercase().replace(' ', "_").replace('-', "_");
-                gaz.insert(engram_ingest::RelGazetteerEntry {
-                    head: req.from.to_lowercase(),
-                    tail: req.to.to_lowercase(),
-                    rel_type: normalized,
-                    confidence: 0.95,
-                });
-                let _ = gaz.save();
+            if is_rename {
+                if let Ok(mut gaz) = engram_ingest::RelationGazetteer::load(&brain_path) {
+                    let normalized = req.new_rel_type.to_lowercase().replace(' ', "_").replace('-', "_");
+                    gaz.insert(engram_ingest::RelGazetteerEntry {
+                        head: req.from.to_lowercase(),
+                        tail: req.to.to_lowercase(),
+                        rel_type: normalized,
+                        confidence: 0.95,
+                    });
+                    let _ = gaz.save();
+                }
             }
         }
     } else {
@@ -375,10 +396,12 @@ pub async fn rename_edge(
     }
 
     Ok(Json(RenameEdgeResponse {
-        renamed,
+        renamed: changed,
         from: req.from,
         to: req.to,
         old_rel_type: req.old_rel_type,
         new_rel_type: req.new_rel_type,
+        valid_from: req.valid_from,
+        valid_to: req.valid_to,
     }))
 }

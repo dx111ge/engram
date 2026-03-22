@@ -185,7 +185,7 @@ pub fn SecurityPage() -> impl IntoView {
 
     let api_del_user = api.clone();
     let load_users_after_del = load_users.clone();
-    let delete_user = Action::new_local(move |username: &String| {
+    let _delete_user = Action::new_local(move |username: &String| {
         let api = api_del_user.clone();
         let username = username.clone();
         let reload = load_users_after_del.clone();
@@ -377,7 +377,7 @@ pub fn SecurityPage() -> impl IntoView {
                         <tbody>
                             {move || users.get().into_iter().map(|u| {
                                 let uname = u.username.clone();
-                                let uname_del = uname.clone();
+                                let _uname_del = uname.clone();
                                 let role = u.role.clone().unwrap_or_else(|| "user".to_string());
                                 let trust = u.trust_level.unwrap_or(0.5);
                                 let active = u.active.unwrap_or(true);

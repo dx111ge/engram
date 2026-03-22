@@ -470,6 +470,26 @@ impl Graph {
         Ok(true)
     }
 
+    /// Update the temporal dates of an edge. Returns true if the edge was found and updated.
+    pub fn update_edge_temporal(
+        &mut self,
+        from_label: &str,
+        to_label: &str,
+        rel_type: &str,
+        valid_from: Option<&str>,
+        valid_to: Option<&str>,
+    ) -> Result<bool> {
+        let slot = match self.find_edge_slot(from_label, to_label, rel_type)? {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        self.brain.update_edge_field(slot, |e| {
+            e.valid_from = valid_from.map(parse_date_to_unix).unwrap_or(0);
+            e.valid_to = valid_to.map(parse_date_to_unix).unwrap_or(0);
+        })?;
+        Ok(true)
+    }
+
     /// Update the confidence of an edge by slot index.
     pub fn update_edge_confidence(&mut self, slot: u64, confidence: f32) -> Result<()> {
         self.brain.update_edge_field(slot, |e| {

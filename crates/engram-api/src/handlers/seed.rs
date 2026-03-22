@@ -135,8 +135,10 @@ pub async fn seed_start(
         area_of_interest: Some(aoi.clone()),
         entities: entities.clone(),
         entity_links: Vec::new(),
-        connections: Vec::new(),
+        review_items: Vec::new(),
         confirmed: false,
+        status: "pending".to_string(),
+        status_error: None,
     };
 
     state.seed_sessions.write().unwrap().insert(session_id.clone(), session);
@@ -191,12 +193,20 @@ pub async fn seed_confirm_aoi(
         session.entities.clone()
     };
 
+    // Mark session as enriching
+    {
+        let mut sessions = state.seed_sessions.write().unwrap();
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.status = "enriching".to_string();
+        }
+    }
+
     // Run entity linking + AoI article co-occurrence in background
     let sid = session_id.clone();
     let sessions_arc = state.seed_sessions.clone();
     tokio::task::spawn_blocking(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         use engram_ingest::RelationExtractor;
-
         let kb_endpoints: Vec<engram_ingest::KbEndpoint> = config_snap.kb_endpoints
             .unwrap_or_default()
             .iter()
@@ -212,6 +222,9 @@ pub async fn seed_confirm_aoi(
             })
             .collect();
 
+        // Subscribe to event bus BEFORE extraction to capture entity link events
+        let link_rx = event_bus.subscribe();
+
         let mut extractor = engram_ingest::KbRelationExtractor::with_config(
             kb_endpoints,
             graph.clone(),
@@ -222,6 +235,8 @@ pub async fn seed_confirm_aoi(
             config_snap.web_search_api_key,
             config_snap.web_search_url,
         );
+        // Defer property expansion writes to session for user review
+        extractor.defer_graph_writes = true;
 
         // Wire GLiNER2 for co-occurrence pair classification
         #[cfg(feature = "gliner2")]
@@ -237,7 +252,7 @@ pub async fn seed_confirm_aoi(
                             "located_in".into(), "founded".into(),
                             "leads".into(), "supports".into(),
                         ]);
-                    let threshold = config_snap.rel_threshold.unwrap_or(0.85);
+                    let threshold = 0.3; // RE scores are 0.2-0.6; NER threshold (0.85) kills all results
                     let pb = engram_ingest::gliner2_backend::Gliner2PipelineBackend::new(
                         backend,
                         vec!["person".into(), "organization".into(), "location".into(),
@@ -273,26 +288,98 @@ pub async fn seed_confirm_aoi(
             area_of_interest: Some(aoi),
         };
 
+        tracing::info!("seed enrichment: starting extract_relations for {} entities", input.entities.len());
         let relations = extractor.extract_relations(&input);
+        tracing::info!("seed enrichment: extract_relations returned {} relations", relations.len());
 
-        // Store connections in session
+        // Collect deferred expansion results
+        let deferred = extractor.take_deferred_expansion();
+        tracing::info!("seed enrichment: {} deferred expansion items", deferred.len());
+
+        // Build unified review_items from relations + deferred expansion
         if let Ok(mut sessions) = sessions_arc.write() {
             if let Some(session) = sessions.get_mut(&sid) {
+                // Direct relations (between seed entities)
                 for rel in &relations {
                     if rel.head_idx < session.entities.len() && rel.tail_idx < session.entities.len() {
                         let is_sparql = rel.confidence >= 0.70 && rel.rel_type != "related_to";
-                        session.connections.push(crate::state::SeedConnection {
+                        session.review_items.push(crate::state::SeedReviewItem {
                             from: session.entities[rel.head_idx].label.clone(),
-                            to: session.entities[rel.tail_idx].label.clone(),
-                            rel_type: rel.rel_type.clone(),
+                            to: Some(session.entities[rel.tail_idx].label.clone()),
+                            rel_type: Some(rel.rel_type.clone()),
                             source: format!("{:?}", rel.method),
                             confidence: rel.confidence,
                             tier: crate::state::ConnectionTier::from_confidence(rel.confidence, is_sparql),
+                            valid_from: None,
+                            valid_to: None,
                         });
                     }
                 }
 
-                // Entity links are populated via SSE events during extraction
+                // Deferred expansion (SPARQL property expansion + org enrichment + shortest paths)
+                for (from_label, rel_type, to_label, _node_type, valid_from, valid_to) in &deferred {
+                    session.review_items.push(crate::state::SeedReviewItem {
+                        from: from_label.clone(),
+                        to: Some(to_label.clone()),
+                        rel_type: Some(rel_type.clone()),
+                        source: "SPARQL".to_string(),
+                        confidence: 0.80,
+                        tier: crate::state::ConnectionTier::Confirmed,
+                        valid_from: valid_from.clone(),
+                        valid_to: valid_to.clone(),
+                    });
+                }
+
+                // Drain entity link events
+                let mut rx = link_rx;
+                while let Ok(event) = rx.try_recv() {
+                    if let engram_core::events::GraphEvent::SeedEntityLinked {
+                        label, canonical, qid, ..
+                    } = event {
+                        let already = session.entity_links.iter().any(|l| l.label == label.as_ref());
+                        if !already {
+                            session.entity_links.push(crate::state::SeedEntityLink {
+                                label: label.to_string(),
+                                canonical: canonical.to_string(),
+                                description: String::new(),
+                                qid: qid.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        })); // end catch_unwind
+        match result {
+            Ok(()) => {
+                // Mark session as complete
+                if let Ok(mut sessions) = sessions_arc.write() {
+                    if let Some(session) = sessions.get_mut(&sid) {
+                        session.status = "complete".to_string();
+                        tracing::info!(
+                            session_id = %sid,
+                            review_items = session.review_items.len(),
+                            "seed enrichment complete"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = e.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                tracing::error!("seed enrichment panicked: {}", msg);
+                // Mark session as error
+                if let Ok(mut sessions) = sessions_arc.write() {
+                    if let Some(session) = sessions.get_mut(&sid) {
+                        session.status = "error".to_string();
+                        session.status_error = Some(msg);
+                    }
+                }
             }
         }
     });
@@ -368,7 +455,7 @@ pub async fn seed_commit(
             source_id: "seed-enrichment".to_string(),
         };
 
-        // Store all entities
+        // Store seed entities (reviewed in Phase 1)
         for entity in &session.entities {
             match g.store_with_confidence(&entity.label, entity.confidence, &prov) {
                 Ok(_) => {
@@ -385,23 +472,38 @@ pub async fn seed_commit(
                 let _ = g.set_property(&link.label, "canonical_name", &link.canonical);
             }
             if !link.qid.is_empty() {
-                let _ = g.set_property(&link.label, "wikidata_qid", &link.qid);
+                let _ = g.set_property(&link.label, "kb_id:wikidata", &link.qid);
             }
         }
 
-        // Create all edges
-        for conn in &session.connections {
-            // Auto-create nodes if they don't exist
-            if g.find_node_id(&conn.from).ok().flatten().is_none() {
-                let _ = g.store_with_confidence(&conn.from, 0.60, &prov);
-            }
-            if g.find_node_id(&conn.to).ok().flatten().is_none() {
-                let _ = g.store_with_confidence(&conn.to, 0.60, &prov);
+        // Write accepted review items only
+        for item in &session.review_items {
+            // Ensure from-node exists
+            if g.find_node_id(&item.from).ok().flatten().is_none() {
+                let _ = g.store_with_confidence(&item.from, item.confidence, &prov);
+                facts_stored += 1;
             }
 
-            match g.relate(&conn.from, &conn.to, &conn.rel_type, &prov) {
-                Ok(_) => relations_created += 1,
-                Err(_) => {}
+            if let (Some(to), Some(rel_type)) = (&item.to, &item.rel_type) {
+                // Triple: create to-node + edge
+                if g.find_node_id(to).ok().flatten().is_none() {
+                    let _ = g.store_with_confidence(to, item.confidence, &prov);
+                    facts_stored += 1;
+                }
+
+                let result = if item.valid_from.is_some() || item.valid_to.is_some() {
+                    g.relate_with_temporal(
+                        &item.from, to, rel_type, item.confidence,
+                        item.valid_from.as_deref(), item.valid_to.as_deref(),
+                        &prov,
+                    )
+                } else {
+                    g.relate(&item.from, to, rel_type, &prov)
+                };
+                match result {
+                    Ok(_) => relations_created += 1,
+                    Err(_) => {}
+                }
             }
         }
     }
@@ -431,7 +533,7 @@ pub async fn seed_commit() -> impl axum::response::IntoResponse {
      Json(ErrorResponse { error: "ingest feature not enabled".into() }))
 }
 
-/// GET /ingest/seed/connections?session_id=xxx -- get tiered connections for review.
+/// GET /ingest/seed/connections?session_id=xxx&page=0&page_size=20 -- paginated review items.
 #[cfg(feature = "ingest")]
 pub async fn seed_connections(
     State(state): State<AppState>,
@@ -440,42 +542,46 @@ pub async fn seed_connections(
     let session_id = query.get("session_id")
         .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "session_id required"))?;
 
+    let page: usize = query.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
+    let page_size: usize = query.get("page_size").and_then(|p| p.parse().ok()).unwrap_or(20);
+
     let sessions = state.seed_sessions.read().unwrap();
     let session = sessions.get(session_id)
         .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "session not found"))?;
 
-    // Group connections by tier
-    let mut confirmed = Vec::new();
-    let mut likely = Vec::new();
-    let mut uncertain = Vec::new();
-    let mut no_relation = Vec::new();
+    let total = session.review_items.len();
+    let start = (page * page_size).min(total);
+    let end = ((page + 1) * page_size).min(total);
+    let items: Vec<serde_json::Value> = session.review_items[start..end].iter().enumerate().map(|(i, item)| {
+        serde_json::json!({
+            "idx": start + i,
+            "from": item.from,
+            "to": item.to,
+            "rel_type": item.rel_type,
+            "source": item.source,
+            "confidence": item.confidence,
+            "tier": item.tier,
+            "valid_from": item.valid_from,
+            "valid_to": item.valid_to,
+        })
+    }).collect();
 
-    for (idx, conn) in session.connections.iter().enumerate() {
-        let entry = serde_json::json!({
-            "idx": idx,
-            "from": conn.from,
-            "to": conn.to,
-            "rel_type": conn.rel_type,
-            "confidence": conn.confidence,
-            "source": conn.source,
-            "tier": conn.tier,
-        });
-        match conn.tier {
-            crate::state::ConnectionTier::Confirmed => confirmed.push(entry),
-            crate::state::ConnectionTier::Likely => likely.push(entry),
-            crate::state::ConnectionTier::Uncertain => uncertain.push(entry),
-            crate::state::ConnectionTier::NoRelation => no_relation.push(entry),
-        }
-    }
+    tracing::info!(
+        session_id = %session_id,
+        status = %session.status,
+        total_items = total,
+        page = page,
+        "seed_connections response"
+    );
 
     Ok(Json(serde_json::json!({
         "session_id": session_id,
-        "groups": [
-            { "tier": "confirmed", "label": "Confirmed (SPARQL + high-confidence GLiNER2)", "connections": confirmed },
-            { "tier": "likely", "label": "Likely (GLiNER2 50-70%)", "connections": likely },
-            { "tier": "uncertain", "label": "Uncertain (GLiNER2 < 50%)", "connections": uncertain },
-            { "tier": "no_relation", "label": "Co-occurred but unclassified", "connections": no_relation },
-        ]
+        "status": session.status,
+        "status_error": session.status_error,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": items,
     })))
 }
 
@@ -485,7 +591,7 @@ pub async fn seed_connections() -> impl axum::response::IntoResponse {
      Json(ErrorResponse { error: "ingest feature not enabled".into() }))
 }
 
-/// POST /ingest/seed/confirm-relations -- review and confirm relations before commit.
+/// POST /ingest/seed/confirm-relations -- accept/reject review items before commit.
 #[cfg(feature = "ingest")]
 pub async fn seed_confirm_relations(
     State(state): State<AppState>,
@@ -497,33 +603,26 @@ pub async fn seed_confirm_relations(
 
     // Apply modifications
     for m in &req.modified {
-        if m.idx < session.connections.len() {
-            session.connections[m.idx].rel_type = m.new_rel_type.clone();
-            session.connections[m.idx].tier = crate::state::ConnectionTier::Confirmed;
+        if m.idx < session.review_items.len() {
+            session.review_items[m.idx].rel_type = Some(m.new_rel_type.clone());
+            session.review_items[m.idx].tier = crate::state::ConnectionTier::Confirmed;
         }
     }
 
-    // Build set of accepted + modified indices
+    // Build set of accepted indices (explicit accepts + modifications only)
     let mut keep: std::collections::HashSet<usize> = req.accepted.iter().copied().collect();
     for m in &req.modified {
         keep.insert(m.idx);
     }
-    // Also keep all Confirmed tier that weren't explicitly skipped
-    let skipped: std::collections::HashSet<usize> = req.skipped.iter().copied().collect();
-    for (idx, conn) in session.connections.iter().enumerate() {
-        if conn.tier == crate::state::ConnectionTier::Confirmed && !skipped.contains(&idx) {
-            keep.insert(idx);
-        }
-    }
 
-    // Filter connections to only kept ones
-    let filtered: Vec<crate::state::SeedConnection> = session.connections.iter().enumerate()
+    // Filter to only accepted items
+    let filtered: Vec<crate::state::SeedReviewItem> = session.review_items.iter().enumerate()
         .filter(|(idx, _)| keep.contains(idx))
-        .map(|(_, c)| c.clone())
+        .map(|(_, item)| item.clone())
         .collect();
 
     let count = filtered.len();
-    session.connections = filtered;
+    session.review_items = filtered;
 
     Ok(Json(serde_json::json!({
         "status": "relations_confirmed",

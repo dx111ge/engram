@@ -316,7 +316,7 @@ pub(super) fn render_investigate_tab(detail: NodeResponse, api: ApiClient) -> le
                                     <span style="font-size: 0.7rem; color: rgba(255,255,255,0.4); text-transform: uppercase; margin-right: 0.5rem;">"Context:"</span>
                                     {labels.iter().enumerate().map(|(idx, label)| {
                                         let lbl = label.clone();
-                                        let lbl_toggle = label.clone();
+                                        let _lbl_toggle = label.clone();
                                         let is_active = chips.get(idx).copied().unwrap_or(false);
                                         let base_q2 = base_q.clone();
                                         view! {
@@ -402,7 +402,7 @@ pub(super) fn render_investigate_tab(detail: NodeResponse, api: ApiClient) -> le
                     visible_rels.iter().take(15).cloned().collect()
                 };
                 let has_more_rels = total_visible_rels > 15;
-                let total_rels_count = rels.len();
+                let _total_rels_count = rels.len();
 
                 Some(view! {
                     <div>
@@ -609,7 +609,7 @@ pub(super) fn render_investigate_tab(detail: NodeResponse, api: ApiClient) -> le
                                     }).collect::<Vec<_>>()}
                                 </div>
                                 {has_more_rels.then(|| {
-                                    let remaining = total_visible_rels - 15;
+                                    let _remaining = total_visible_rels - 15;
                                     view! {
                                         <button class="btn btn-secondary" style="font-size: 0.75rem; margin-top: 0.5rem; width: 100%;"
                                             on:click=move |_| { show_all_rels.set(!show_all_rels.get_untracked()); }>
