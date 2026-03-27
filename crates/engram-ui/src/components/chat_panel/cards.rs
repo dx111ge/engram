@@ -172,13 +172,21 @@ fn search_card(tool_name: &str, data: &serde_json::Value) -> String {
 }
 
 fn explain_card(data: &serde_json::Value) -> String {
-    let label = data.get("label").and_then(|v| v.as_str()).unwrap_or("Unknown");
-    let ntype = data.get("node_type").and_then(|v| v.as_str()).unwrap_or("Entity");
+    // API returns "entity" not "label", and node_type may be in properties or cooccurrences
+    let label = data.get("entity").or_else(|| data.get("label"))
+        .and_then(|v| v.as_str()).unwrap_or("Unknown");
+    let ntype = data.get("node_type").and_then(|v| v.as_str())
+        .or_else(|| data.get("properties").and_then(|p| p.get("node_type")).and_then(|v| v.as_str()))
+        .unwrap_or("Entity");
+    let canonical = data.get("properties")
+        .and_then(|p| p.get("canonical_name")).and_then(|v| v.as_str());
     let conf = data.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5);
     let edges_from = data.get("edges_from").and_then(|v| v.as_array());
     let edges_to = data.get("edges_to").and_then(|v| v.as_array());
     let ef_count = edges_from.map(|e| e.len()).unwrap_or(0);
     let et_count = edges_to.map(|e| e.len()).unwrap_or(0);
+    // Use canonical name in header if available
+    let display_name = canonical.unwrap_or(label);
 
     let mut html = format!(
         "<div class=\"chat-card\">\
@@ -186,7 +194,7 @@ fn explain_card(data: &serde_json::Value) -> String {
             <div class=\"chat-card-body\">\
                 <div class=\"chat-entity-row\">{} {}</div>\
                 <div class=\"chat-prop-row\"><span class=\"chat-prop-key\">Connections</span><span>{} outgoing, {} incoming</span></div>",
-        html_escape(label), type_badge(ntype), confidence_bar(conf), ef_count, et_count,
+        html_escape(display_name), type_badge(ntype), confidence_bar(conf), ef_count, et_count,
     );
 
     // Show properties if present

@@ -13,6 +13,7 @@ pub mod view;
 pub mod markdown;
 pub mod cards;
 pub mod intent;
+pub mod tool_cards;
 
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
@@ -468,7 +469,7 @@ pub fn ChatPanel(
     {
         let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::CustomEvent| {
             if let Some(tool_name) = ev.detail().as_string() {
-                if let Some(card_html) = help::generate_tool_card(&tool_name) {
+                if let Some(card_html) = tool_cards::generate_tool_card(&tool_name) {
                     set_messages.update(|msgs| {
                         msgs.push(ChatMessage {
                             role: ChatRole::Assistant,
@@ -476,6 +477,15 @@ pub fn ChatPanel(
                             display_html: Some(card_html),
                         });
                     });
+                    // Wire up autocomplete from tool_cards definitions
+                    let ac_fields = tool_cards::autocomplete_fields(&tool_name);
+                    if !ac_fields.is_empty() {
+                        let ac_js: String = ac_fields.iter()
+                            .map(|(id, endpoint)| format!("__ec_suggest('{}','{}','label');", id, endpoint))
+                            .collect();
+                        let code = format!("requestAnimationFrame(function(){{{}}});", ac_js);
+                        let _ = js_sys::eval(&code);
+                    }
                 }
             }
         }) as Box<dyn FnMut(web_sys::CustomEvent)>);
@@ -520,6 +530,269 @@ pub fn ChatPanel(
         }) as Box<dyn FnMut(web_sys::CustomEvent)>);
         let _ = web_sys::window().unwrap().add_event_listener_with_callback(
             "engram-tool-result",
+            cb.as_ref().unchecked_ref(),
+        );
+        cb.forget();
+    }
+
+    // ── Listen for engram-run-tool events (async tool execution from cards) ──
+
+    {
+        let api_run = api.clone();
+        let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::CustomEvent| {
+            if let Some(detail) = ev.detail().as_string() {
+                let parsed: serde_json::Value = match serde_json::from_str(&detail) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                let tool = parsed.get("tool").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let params = parsed.get("params").cloned().unwrap_or(serde_json::json!({}));
+
+                // Show thinking indicator
+                set_messages.update(|msgs| {
+                    msgs.push(ChatMessage {
+                        role: ChatRole::Context,
+                        content: format!("Running {}...", tool),
+                        display_html: None,
+                    });
+                });
+
+                let api = api_run.clone();
+                spawn_local(async move {
+                    let p = |key: &str| params.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+                    let result: Result<(String, String), String> = match tool.as_str() {
+                        "query" => {
+                            let body = serde_json::json!({"start": p("entity"), "depth": params.get("depth").and_then(|v| v.as_str()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1), "direction": p("dir")});
+                            api.post_text("/query", &body).await.map(|r| ("engram_query".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "search" => {
+                            let body = serde_json::json!({"query": p("q"), "limit": 20});
+                            api.post_text("/search", &body).await.map(|r| ("engram_search".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "explain" => {
+                            let entity = p("e");
+                            let encoded = js_sys::encode_uri_component(&entity);
+                            let result = api.get_text(&format!("/explain/{}", encoded.as_string().unwrap_or_default())).await;
+                            match result {
+                                Ok(json_str) => {
+                                    // Show data card first
+                                    let card_html = cards::render_tool_card("engram_explain", &json_str);
+                                    dispatch_graph_data("engram_explain", &json_str);
+                                    set_messages.update(|msgs| {
+                                        // Remove "Running..." message
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) {
+                                            msgs.remove(pos);
+                                        }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: json_str.chars().take(500).collect(),
+                                            display_html: Some(card_html),
+                                        });
+                                    });
+
+                                    // Now async LLM summary (non-blocking)
+                                    let config: Result<serde_json::Value, _> = api.get("/config").await;
+                                    if let Ok(cfg) = config {
+                                        let model = cfg.get("llm_model").and_then(|v| v.as_str()).unwrap_or("");
+                                        let endpoint = cfg.get("llm_endpoint").and_then(|v| v.as_str()).unwrap_or("");
+                                        if model.is_empty() || endpoint.is_empty() {
+                                            set_messages.update(|msgs| {
+                                                msgs.push(ChatMessage {
+                                                    role: ChatRole::System,
+                                                    content: "LLM not configured. Go to System > Language Model to set up.".into(),
+                                                    display_html: None,
+                                                });
+                                            });
+                                        } else {
+                                            let persona = cfg.get("llm_system_prompt").and_then(|v| v.as_str()).unwrap_or("");
+                                            set_messages.update(|msgs| {
+                                                msgs.push(ChatMessage {
+                                                    role: ChatRole::Context,
+                                                    content: "Summarizing...".into(),
+                                                    display_html: None,
+                                                });
+                                            });
+                                            let llm_req = serde_json::json!({
+                                                "model": model,
+                                                "temperature": 0.3,
+                                                "messages": [
+                                                    {"role": "system", "content": format!("{}\n\nSummarize the following entity data in 2-3 concise sentences. Mention confidence level, key relationships, and notable properties. Do not repeat raw JSON data.", persona)},
+                                                    {"role": "user", "content": format!("Summarize this entity:\n{}", json_str)}
+                                                ]
+                                            });
+                                            let llm_result: Result<crate::api::types::LlmProxyResponse, _> = api.post("/proxy/llm", &llm_req).await;
+                                            set_messages.update(|msgs| {
+                                                // Remove "Summarizing..." message
+                                                if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context && m.content == "Summarizing...") {
+                                                    msgs.remove(pos);
+                                                }
+                                            });
+                                            match llm_result {
+                                                Ok(resp) => {
+                                                    if let Some(text) = resp.choices.first().and_then(|c| c.message.as_ref()).and_then(|m| m.content.clone()) {
+                                                        let rendered = markdown::markdown_to_html(&text);
+                                                        set_messages.update(|msgs| {
+                                                            msgs.push(ChatMessage {
+                                                                role: ChatRole::Assistant,
+                                                                content: text,
+                                                                display_html: Some(rendered),
+                                                            });
+                                                        });
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    set_messages.update(|msgs| {
+                                                        msgs.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: format!("LLM summary failed: {}", e),
+                                                            display_html: None,
+                                                        });
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                    return; // already handled
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        }
+                        "similar" => {
+                            let entity = p("t");
+                            // Two-step: resolve entity first for better semantic search
+                            let encoded = js_sys::encode_uri_component(&entity);
+                            let explain_text = api.get_text(&format!("/explain/{}", encoded.as_string().unwrap_or_default())).await.unwrap_or_default();
+                            let search_text = if !explain_text.is_empty() {
+                                let ed: serde_json::Value = serde_json::from_str(&explain_text).unwrap_or_default();
+                                let cn = ed.get("properties").and_then(|p| p.get("canonical_name")).and_then(|v| v.as_str()).unwrap_or(&entity);
+                                let nt = ed.get("properties").and_then(|p| p.get("node_type")).and_then(|v| v.as_str()).unwrap_or("");
+                                format!("{} {}", cn, nt)
+                            } else {
+                                entity
+                            };
+                            let body = serde_json::json!({"text": search_text, "limit": 10});
+                            api.post_text("/similar", &body).await.map(|r| ("engram_similar".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "prove" | "shortest_path" => {
+                            let body = serde_json::json!({"from": p("from"), "to": p("to"), "max_depth": 6});
+                            api.post_text("/paths", &body).await.map(|r| ("engram_shortest_path".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "compare" => {
+                            let body = serde_json::json!({"entity_a": p("a"), "entity_b": p("b")});
+                            api.post_text("/chat/compare", &body).await.map(|r| ("engram_compare".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "most_connected" => {
+                            let limit = params.get("limit").and_then(|v| v.as_str()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(10);
+                            let body = serde_json::json!({"limit": limit});
+                            api.post_text("/chat/most_connected", &body).await.map(|r| ("engram_most_connected".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "timeline" => {
+                            let body = serde_json::json!({"entity": p("e"), "limit": 20});
+                            api.post_text("/chat/timeline", &body).await.map(|r| ("engram_timeline".into(), r)).map_err(|e| e.to_string())
+                        }
+                        // Write operations
+                        "store" => {
+                            let body = serde_json::json!({"entity": p("entity"), "type": p("type"), "confidence": params.get("conf").and_then(|v| v.as_str()).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.7), "source": p("src")});
+                            api.post_text("/store", &body).await.map(|r| ("engram_store".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "relate" => {
+                            let body = serde_json::json!({"from": p("from"), "to": p("to"), "relationship": p("rel"), "confidence": params.get("conf").and_then(|v| v.as_str()).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.7), "valid_from": p("vf")});
+                            api.post_text("/relate", &body).await.map(|r| ("engram_relate".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "reinforce" => {
+                            // Two-step: first fetch current, then show in chat for user to adjust
+                            let entity = p("e");
+                            let encoded = js_sys::encode_uri_component(&entity);
+                            match api.get_text(&format!("/explain/{}", encoded.as_string().unwrap_or_default())).await {
+                                Ok(json_str) => {
+                                    let card_html = cards::render_tool_card("engram_explain", &json_str);
+                                    set_messages.update(|msgs| {
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: format!("Current state of {}", entity),
+                                            display_html: Some(card_html),
+                                        });
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::System,
+                                            content: "To adjust confidence, use: store <entity> with the desired confidence value.".into(),
+                                            display_html: None,
+                                        });
+                                    });
+                                    return;
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        }
+                        "correct" => {
+                            let body = serde_json::json!({"entity": p("e"), "reason": p("reason")});
+                            api.post_text("/learn/correct", &body).await.map(|r| ("engram_correct".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "delete" => {
+                            let entity = p("e");
+                            let encoded = js_sys::encode_uri_component(&entity);
+                            api.delete(&format!("/node/{}", encoded.as_string().unwrap_or_default())).await.map(|r| ("engram_delete".into(), r)).map_err(|e| e.to_string())
+                        }
+                        _ => Err(format!("Unknown tool: {}", tool)),
+                    };
+
+                    match result {
+                        Ok((card_tool, json_str)) => {
+                            let card_html = cards::render_tool_card(&card_tool, &json_str);
+                            dispatch_graph_data(&card_tool, &json_str);
+                            set_messages.update(|msgs| {
+                                // Remove "Running..." message
+                                if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) {
+                                    msgs.remove(pos);
+                                }
+                                msgs.push(ChatMessage {
+                                    role: ChatRole::ToolResult,
+                                    content: if json_str.len() > 500 { format!("{}...", &json_str[..500]) } else { json_str },
+                                    display_html: Some(card_html),
+                                });
+                            });
+                        }
+                        Err(e) => {
+                            set_messages.update(|msgs| {
+                                if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) {
+                                    msgs.remove(pos);
+                                }
+                                msgs.push(ChatMessage {
+                                    role: ChatRole::System,
+                                    content: format!("Error: {}", e),
+                                    display_html: None,
+                                });
+                            });
+                        }
+                    }
+                });
+            }
+        }) as Box<dyn FnMut(web_sys::CustomEvent)>);
+        let _ = web_sys::window().unwrap().add_event_listener_with_callback(
+            "engram-run-tool",
+            cb.as_ref().unchecked_ref(),
+        );
+        cb.forget();
+    }
+
+    // ── Listen for LLM summary events (explain enrichment) ──
+
+    {
+        let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::CustomEvent| {
+            if let Some(text) = ev.detail().as_string() {
+                let rendered_html = markdown::markdown_to_html(&text);
+                set_messages.update(|msgs| {
+                    msgs.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: text,
+                        display_html: Some(rendered_html),
+                    });
+                });
+            }
+        }) as Box<dyn FnMut(web_sys::CustomEvent)>);
+        let _ = web_sys::window().unwrap().add_event_listener_with_callback(
+            "engram-llm-summary",
             cb.as_ref().unchecked_ref(),
         );
         cb.forget();
