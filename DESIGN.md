@@ -771,6 +771,30 @@ enum SourceType {
 }
 ```
 
+### Document Provenance (v1.1.0)
+
+Every ingested entity links back to its source document through a 4-node chain:
+
+```
+Entity --[mentioned_in]--> Fact --[extracted_from]--> Document --[published_by]--> Publisher
+```
+
+**Node types:**
+- **Entity** — the knowledge node (Putin, NATO, etc.)
+- **Fact** — a specific claim extracted from a document (`claim`, `extraction_method`, `event_date`)
+- **Document** (`Doc:{hash8}`) — a specific article/PDF/page. Properties: `content_hash`, `url`, `title`, `doc_date`, `content_length`, `mime_type`
+- **Publisher** (`Source:{type}:{id}`) — the origin/source (Reuters, Wikipedia, etc.)
+
+**Content caching:**
+Document content is stored in a segmented append-only blob store (`.brain.docs.N` files + `.brain.docs.idx` index). zstd compression, CRC32 per-entry, crash-safe via append-only writes. Content-addressable by SHA-256 hash — identical content is automatically deduplicated.
+
+Same URL with different content over time = different Document nodes (enabling temporal tracking).
+
+**API endpoints:**
+- `POST /provenance` — trace entity back to source documents
+- `POST /documents` — list ingested documents
+- `POST /documents/content` — read cached document content
+
 ---
 
 ## API Design
