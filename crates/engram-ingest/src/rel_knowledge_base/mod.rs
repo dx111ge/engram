@@ -21,6 +21,14 @@ use engram_core::graph::Graph;
 use crate::rel_traits::{CandidateRelation, RelationExtractionInput, RelationExtractor};
 use crate::types::{ExtractionMethod, KbStats};
 
+/// A web search result with URL preserved for document provenance.
+#[derive(Debug, Clone)]
+pub struct WebSearchResult {
+    pub title: String,
+    pub snippet: String,
+    pub url: String,
+}
+
 /// A discovered entity pair from co-occurrence (NO relation type assigned).
 /// Classification is deferred to SPARQL (ground truth) or GLiNER2 (text understanding).
 #[derive(Debug, Clone)]
@@ -73,6 +81,8 @@ pub struct KbRelationExtractor {
     pub defer_graph_writes: bool,
     /// Deferred expansion results: (from_label, rel_type, to_label, node_type, valid_from, valid_to).
     deferred_expansion: Mutex<Vec<(String, String, String, String, Option<String>, Option<String>)>>,
+    /// Document store for caching web search content as provenance.
+    doc_store: Option<Arc<RwLock<engram_core::storage::doc_store::DocStore>>>,
 }
 
 impl KbRelationExtractor {
@@ -96,7 +106,13 @@ impl KbRelationExtractor {
             gliner2_backend: None,
             defer_graph_writes: false,
             deferred_expansion: Mutex::new(Vec::new()),
+            doc_store: None,
         }
+    }
+
+    /// Set the document store for web search content caching.
+    pub fn set_doc_store(&mut self, store: Arc<RwLock<engram_core::storage::doc_store::DocStore>>) {
+        self.doc_store = Some(store);
     }
 
     /// Create with LLM, event bus, and web search configuration (for interactive seed flow).
@@ -325,8 +341,11 @@ impl RelationExtractor for KbRelationExtractor {
                         let search_query = format!("{} {}", &entity_labels[uidx], &area_of_interest);
                         let web_results = self.web_search(&search_query);
 
-                        for (_title, snippet) in &web_results {
-                            let snippet_lower = snippet.to_lowercase();
+                        // Store web search results as Document nodes for provenance
+                        self.store_web_search_documents(&web_results, &entity_labels);
+
+                        for result in &web_results {
+                            let snippet_lower = result.snippet.to_lowercase();
                             for (oidx, other_label) in entity_labels.iter().enumerate() {
                                 if oidx == uidx { continue; }
                                 if snippet_lower.contains(&other_label.to_lowercase()) {

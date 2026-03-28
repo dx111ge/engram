@@ -59,12 +59,15 @@ pub fn Dashboard() -> impl IntoView {
         }
     });
 
-    // 3 stat cards: Facts stored, Connections, Status
+    // 4 stat cards: Facts stored, Connections, Documents, Status
     let fact_count = Signal::derive(move || {
         stats.get().flatten().map(|s| s.nodes.to_string()).unwrap_or_else(|| "--".into())
     });
     let connection_count = Signal::derive(move || {
         stats.get().flatten().map(|s| s.edges.to_string()).unwrap_or_else(|| "--".into())
+    });
+    let document_count = Signal::derive(move || {
+        stats.get().flatten().map(|s| s.documents.to_string()).unwrap_or_else(|| "--".into())
     });
     let status_text = Signal::derive(move || {
         health.get().flatten().map(|h| {
@@ -176,6 +179,7 @@ pub fn Dashboard() -> impl IntoView {
         <div class="stat-grid">
             <StatCard icon="fa-solid fa-database" label="Facts stored" value=fact_count />
             <StatCard icon="fa-solid fa-arrows-left-right" label="Connections" value=connection_count />
+            <StatCard icon="fa-solid fa-file-lines" label="Documents" value=document_count />
             <StatCard icon="fa-solid fa-signal" label="Status" value=status_text />
         </div>
 

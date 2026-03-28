@@ -229,6 +229,7 @@ pub struct HealthResponse {
 pub struct StatsResponse {
     pub nodes: u64,
     pub edges: u64,
+    pub documents: u64,
 }
 
 #[derive(Serialize)]

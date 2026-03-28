@@ -5,8 +5,8 @@ use super::*;
 
 impl KbRelationExtractor {
     /// Search the web using the configured search provider.
-    /// Returns a list of (title, snippet) pairs from search results.
-    pub(super) fn web_search(&self, query: &str) -> Vec<(String, String)> {
+    /// Returns results with title, snippet, and URL for document provenance.
+    pub(super) fn web_search(&self, query: &str) -> Vec<WebSearchResult> {
         let provider = self.web_search_provider.as_deref().unwrap_or("duckduckgo");
         let mut results = Vec::new();
 
@@ -25,8 +25,13 @@ impl KbRelationExtractor {
                             for r in arr.iter().take(10) {
                                 let title = r.get("title").and_then(|t| t.as_str()).unwrap_or_default();
                                 let snippet = r.get("content").and_then(|c| c.as_str()).unwrap_or_default();
+                                let url = r.get("url").and_then(|u| u.as_str()).unwrap_or_default();
                                 if !title.is_empty() || !snippet.is_empty() {
-                                    results.push((title.to_string(), snippet.to_string()));
+                                    results.push(WebSearchResult {
+                                        title: title.to_string(),
+                                        snippet: snippet.to_string(),
+                                        url: url.to_string(),
+                                    });
                                 }
                             }
                         }
@@ -47,8 +52,13 @@ impl KbRelationExtractor {
                             for r in arr.iter().take(10) {
                                 let title = r.get("title").and_then(|t| t.as_str()).unwrap_or_default();
                                 let snippet = r.get("description").and_then(|d| d.as_str()).unwrap_or_default();
+                                let url = r.get("url").and_then(|u| u.as_str()).unwrap_or_default();
                                 if !title.is_empty() || !snippet.is_empty() {
-                                    results.push((title.to_string(), snippet.to_string()));
+                                    results.push(WebSearchResult {
+                                        title: title.to_string(),
+                                        snippet: snippet.to_string(),
+                                        url: url.to_string(),
+                                    });
                                 }
                             }
                         }
@@ -63,20 +73,28 @@ impl KbRelationExtractor {
                     .send()
                 {
                     if let Ok(data) = resp.json::<serde_json::Value>() {
-                        // Abstract
+                        let abs_url = data.get("AbstractURL").and_then(|u| u.as_str()).unwrap_or_default();
                         if let Some(abs) = data.get("AbstractText").and_then(|a| a.as_str()) {
                             if !abs.is_empty() {
                                 let heading = data.get("Heading").and_then(|h| h.as_str()).unwrap_or_default();
-                                results.push((heading.to_string(), abs.to_string()));
+                                results.push(WebSearchResult {
+                                    title: heading.to_string(),
+                                    snippet: abs.to_string(),
+                                    url: abs_url.to_string(),
+                                });
                             }
                         }
-                        // Related topics
                         if let Some(topics) = data.get("RelatedTopics").and_then(|r| r.as_array()) {
                             for t in topics.iter().take(5) {
                                 let text = t.get("Text").and_then(|x| x.as_str()).unwrap_or_default();
+                                let first_url = t.get("FirstURL").and_then(|u| u.as_str()).unwrap_or_default();
                                 if !text.is_empty() {
                                     let title = text.split(" - ").next().unwrap_or(text);
-                                    results.push((title.to_string(), text.to_string()));
+                                    results.push(WebSearchResult {
+                                        title: title.to_string(),
+                                        snippet: text.to_string(),
+                                        url: first_url.to_string(),
+                                    });
                                 }
                             }
                         }
@@ -86,6 +104,107 @@ impl KbRelationExtractor {
         }
 
         results
+    }
+
+    /// Store web search results as Document nodes in the graph and cache content in DocStore.
+    /// Creates: Document -> Publisher edges, and Fact -> Document for each entity mentioned.
+    pub(super) fn store_web_search_documents(
+        &self,
+        results: &[WebSearchResult],
+        entity_labels: &[String],
+    ) {
+        if results.is_empty() {
+            return;
+        }
+        let prov = engram_core::graph::Provenance {
+            source_type: engram_core::graph::SourceType::Api,
+            source_id: "web_search".to_string(),
+        };
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let mut graph = match self.graph.write() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+
+        for result in results {
+            if result.snippet.is_empty() {
+                continue;
+            }
+            // Compute content hash and create Document node
+            let content_hash = engram_core::storage::doc_store::DocStore::hash_content(
+                result.snippet.as_bytes(),
+            );
+            let hash_hex = engram_core::storage::doc_store::DocStore::hash_hex(&content_hash);
+            let doc_label = crate::document::doc_label(&hash_hex);
+
+            // Skip if Document already exists
+            if graph.find_node_id(&doc_label).ok().flatten().is_some() {
+                continue;
+            }
+
+            // Create Document node
+            if graph.store_with_confidence(&doc_label, 0.60, &prov).is_err() {
+                continue;
+            }
+            let _ = graph.set_node_type(&doc_label, "Document");
+            let _ = graph.set_property(&doc_label, "content_hash", &hash_hex);
+            let _ = graph.set_property(&doc_label, "title", &result.title);
+            if !result.url.is_empty() {
+                let _ = graph.set_property(&doc_label, "url", &result.url);
+            }
+            let _ = graph.set_property(&doc_label, "mime_type", "text/html");
+            let _ = graph.set_property(&doc_label, "ingested_at", &now_ts.to_string());
+            let _ = graph.set_property(&doc_label, "content_length",
+                &result.snippet.len().to_string());
+
+            // Create Publisher node from URL
+            let publisher_label = if !result.url.is_empty() {
+                let (stype, sid) = crate::learned_trust::extract_source_from_url(&result.url);
+                format!("Source:{}:{}", stype, sid)
+            } else {
+                "Source:web:search".to_string()
+            };
+            if graph.find_node_id(&publisher_label).ok().flatten().is_none() {
+                let _ = graph.store_with_confidence(&publisher_label, 0.50, &prov);
+                let _ = graph.set_node_type(&publisher_label, "Source");
+            }
+            let _ = graph.relate_upsert(&doc_label, &publisher_label, "published_by", &prov);
+
+            // Create Fact node from snippet and link entities mentioned in it
+            let fact_label = crate::pipeline::make_fact_label("web_search", &result.snippet);
+            if graph.find_node_id(&fact_label).ok().flatten().is_none() {
+                if graph.store_with_confidence(&fact_label, 0.50, &prov).is_ok() {
+                    let _ = graph.set_node_type(&fact_label, "Fact");
+                    let _ = graph.set_property(&fact_label, "claim", &result.snippet);
+                    let _ = graph.set_property(&fact_label, "status", "active");
+                    let _ = graph.set_property(&fact_label, "extracted_at", &now_ts.to_string());
+                    let _ = graph.set_property(&fact_label, "extraction_method", "WebSearch");
+
+                    // Edge: Fact -> Document (extracted_from)
+                    let _ = graph.relate_upsert(&fact_label, &doc_label, "extracted_from", &prov);
+
+                    // Edge: Entity -> Fact (mentioned_in) for each entity in the snippet
+                    let snippet_lower = result.snippet.to_lowercase();
+                    for label in entity_labels {
+                        if snippet_lower.contains(&label.to_lowercase()) {
+                            let _ = graph.relate_upsert(label, &fact_label, "mentioned_in", &prov);
+                        }
+                    }
+                }
+            }
+
+            // Cache content in DocStore
+            if let Some(ref store_arc) = self.doc_store {
+                if let Ok(mut store) = store_arc.write() {
+                    let mime = engram_core::storage::doc_store::MimeType::Html;
+                    let _ = store.store(result.snippet.as_bytes(), mime);
+                }
+            }
+        }
     }
 
     /// Link an entity to a Wikidata QID using Wikipedia search for disambiguation.

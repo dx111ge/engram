@@ -185,6 +185,7 @@ pub async fn seed_confirm_aoi(
     let session_id = req.session_id.clone();
     let aoi = req.area_of_interest.clone();
     let graph = state.graph.clone();
+    let doc_store = state.doc_store.clone();
     let event_bus = state.event_bus.clone();
     let config_snap = state.config.read().unwrap().clone();
 
@@ -239,6 +240,8 @@ pub async fn seed_confirm_aoi(
         );
         // Defer property expansion writes to session for user review
         extractor.defer_graph_writes = true;
+        // Wire DocStore for web search document provenance
+        extractor.set_doc_store(doc_store.clone());
 
         // Wire GLiNER2 for co-occurrence pair classification
         #[cfg(feature = "gliner2")]

@@ -83,7 +83,7 @@ fn is_specific_date(text: &str) -> bool {
 
 /// Generate a dedup-safe label for a Fact node: `Fact:{summary}-{hash4}`.
 /// Uses the first ~50 chars of the claim as a readable summary slug.
-fn make_fact_label(entity: &str, source_text: &str) -> String {
+pub fn make_fact_label(entity: &str, source_text: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     // Build a readable slug from the claim text (first ~50 chars, words only)

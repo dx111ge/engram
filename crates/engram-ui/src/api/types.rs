@@ -16,6 +16,8 @@ pub struct StatsResponse {
     pub nodes: u64,
     pub edges: u64,
     #[serde(default)]
+    pub documents: u64,
+    #[serde(default)]
     pub properties: u64,
     #[serde(default)]
     pub types: Vec<String>,
