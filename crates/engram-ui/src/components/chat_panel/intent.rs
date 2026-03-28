@@ -113,6 +113,21 @@ pub fn detect_intent(text: &str) -> ChatIntent {
         return ChatIntent { tool: "search", prefill: after_keyword(trimmed, &["search for ", "search ", "find ", "look up ", "lookup "]), prefill2: String::new() };
     }
 
+    // Provenance (source documents for an entity)
+    if starts_any(&lower, &["provenance of ", "provenance ", "sources for ", "source of ", "documents about ", "documents for ", "where does ", "where did "]) {
+        return ChatIntent { tool: "provenance", prefill: after_keyword(trimmed, &["provenance of ", "provenance ", "sources for ", "source of ", "documents about ", "documents for ", "where does ", "where did "]), prefill2: String::new() };
+    }
+    if lower.contains("come from") && !lower.contains("path") {
+        // "where does Putin come from" -> provenance
+        let entity = lower.replace("come from", "").replace("where does", "").replace("where did", "").trim().to_string();
+        return ChatIntent { tool: "provenance", prefill: entity, prefill2: String::new() };
+    }
+
+    // Documents list
+    if starts_any(&lower, &["list documents", "show documents", "ingested documents", "all documents"]) || lower == "documents" {
+        return ChatIntent { tool: "documents", prefill: String::new(), prefill2: String::new() };
+    }
+
     // Ingest
     if starts_any(&lower, &["ingest ", "import "]) {
         return ChatIntent { tool: "ingest", prefill: after_keyword(trimmed, &["ingest ", "import "]), prefill2: String::new() };
@@ -376,5 +391,32 @@ mod tests {
     fn test_isolated() {
         let i = detect_intent("show me isolated entities");
         assert_eq!(i.tool, "isolated");
+    }
+
+    #[test]
+    fn test_provenance_intent() {
+        let i = detect_intent("provenance of Putin");
+        assert_eq!(i.tool, "provenance");
+        assert_eq!(i.prefill, "Putin");
+
+        let i = detect_intent("sources for NATO");
+        assert_eq!(i.tool, "provenance");
+        assert_eq!(i.prefill, "NATO");
+
+        let i = detect_intent("documents about Ukraine");
+        assert_eq!(i.tool, "provenance");
+        assert_eq!(i.prefill, "Ukraine");
+    }
+
+    #[test]
+    fn test_documents_intent() {
+        let i = detect_intent("list documents");
+        assert_eq!(i.tool, "documents");
+
+        let i = detect_intent("show documents");
+        assert_eq!(i.tool, "documents");
+
+        let i = detect_intent("documents");
+        assert_eq!(i.tool, "documents");
     }
 }

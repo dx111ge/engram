@@ -175,6 +175,7 @@ pub fn ChatPanel(
                     "similar" => "tc-similar-t",
                     "compare" => "tc-compare-a",
                     "shortest_path" => "tc-sp-from",
+                    "provenance" => "tc-provenance-e",
                     _ => "",
                 };
                 if !id_prefix.is_empty() {
@@ -690,6 +691,15 @@ pub fn ChatPanel(
                         "timeline" => {
                             let body = serde_json::json!({"entity": p("e"), "limit": 20});
                             api.post_text("/chat/timeline", &body).await.map(|r| ("engram_timeline".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "provenance" => {
+                            let body = serde_json::json!({"entity": p("e")});
+                            api.post_text("/provenance", &body).await.map(|r| ("engram_provenance".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "documents" => {
+                            let limit = params.get("limit").and_then(|v| v.as_str()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);
+                            let body = serde_json::json!({"limit": limit});
+                            api.post_text("/documents", &body).await.map(|r| ("engram_documents".into(), r)).map_err(|e| e.to_string())
                         }
                         // Write operations
                         "store" => {

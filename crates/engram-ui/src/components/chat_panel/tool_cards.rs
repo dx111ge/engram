@@ -142,6 +142,19 @@ static CARDS: &[ToolCard] = &[
             Field { id: "tc-timeline-e", label: "Entity", placeholder: "Entity name...", field_type: FieldType::Text, required: true },
         ],
     },
+    // Document provenance
+    ToolCard { tool: "provenance", title: "Entity Provenance", icon: "fa-solid fa-file-lines", is_write: false, confirm: false,
+        button_label: "Trace Sources",
+        fields: &[
+            Field { id: "tc-provenance-e", label: "Entity", placeholder: "Entity name...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "documents", title: "Ingested Documents", icon: "fa-solid fa-folder-open", is_write: false, confirm: false,
+        button_label: "List Documents",
+        fields: &[
+            Field { id: "tc-docs-limit", label: "Limit", placeholder: "", field_type: FieldType::Number { default: "20", min: "1", max: "100", step: "1" }, required: false },
+        ],
+    },
 ];
 
 /// Generate a tool parameter card. Returns None if tool has no card definition.
@@ -166,6 +179,7 @@ pub fn autocomplete_fields(tool_name: &str) -> Vec<(&'static str, &'static str)>
         "compare" => &["tc-compare-a", "tc-compare-b"],
         "shortest_path" => &["tc-sp-from", "tc-sp-to"],
         "timeline" => &["tc-timeline-e"],
+        "provenance" => &["tc-provenance-e"],
         _ => &[],
     };
     let mut result: Vec<(&str, &str)> = entity_fields.iter().map(|id| (*id, "/search")).collect();

@@ -24,6 +24,8 @@ pub fn render_tool_card(tool_name: &str, raw_json: &str) -> String {
         "engram_what_if" => whatif_card(&parsed),
         "engram_influence_path" => influence_card(&parsed),
         "engram_isolated" => isolated_card(&parsed),
+        "engram_provenance" => provenance_card(&parsed),
+        "engram_documents" => documents_card(&parsed),
         _ => fallback_card(tool_name, raw_json),
     }
 }
@@ -908,4 +910,100 @@ mod tests {
         let result = extract_graph_data("engram_ingest_text", r#"{"text":"test"}"#);
         assert!(result.is_none());
     }
+}
+
+// ── Provenance card ──
+
+fn provenance_card(v: &serde_json::Value) -> String {
+    let entity = v.get("entity").and_then(|v| v.as_str()).unwrap_or("?");
+    let docs = v.get("documents").and_then(|v| v.as_array());
+    let count = v.get("document_count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let mut html = format!(
+        r#"<div class="tool-card provenance-card">
+        <div class="tool-card-header"><i class="fa-solid fa-file-lines"></i> Provenance: {entity}</div>
+        <div class="tool-card-sub">{count} source document(s)</div>"#
+    );
+
+    if let Some(docs) = docs {
+        for doc in docs {
+            let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
+            let url = doc.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let date = doc.get("doc_date").and_then(|v| v.as_str()).unwrap_or("");
+            let publisher = doc.get("publisher").and_then(|v| v.as_str()).unwrap_or("");
+            let facts = doc.get("facts").and_then(|v| v.as_array());
+
+            html.push_str(&format!(
+                r#"<div class="provenance-doc">
+                <div class="provenance-doc-title"><i class="fa-solid fa-file"></i> {title}</div>"#
+            ));
+            if !url.is_empty() {
+                html.push_str(&format!(r#"<div class="provenance-doc-url">{url}</div>"#));
+            }
+            if !date.is_empty() || !publisher.is_empty() {
+                html.push_str(&format!(
+                    r#"<div class="provenance-doc-meta">{date} {publisher}</div>"#
+                ));
+            }
+            if let Some(facts) = facts {
+                for fact in facts {
+                    let claim = fact.get("claim").and_then(|v| v.as_str()).unwrap_or("");
+                    if !claim.is_empty() {
+                        html.push_str(&format!(
+                            r#"<div class="provenance-claim"><i class="fa-solid fa-quote-left"></i> {claim}</div>"#
+                        ));
+                    }
+                }
+            }
+            html.push_str("</div>");
+        }
+    }
+
+    if count == 0 {
+        html.push_str(r#"<div class="tool-card-empty"><i class="fa-solid fa-circle-info"></i> No source documents found. Ingest content to build provenance.</div>"#);
+    }
+
+    html.push_str("</div>");
+    html
+}
+
+// ── Documents list card ──
+
+fn documents_card(v: &serde_json::Value) -> String {
+    let docs = v.get("documents").and_then(|v| v.as_array());
+    let count = v.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let mut html = format!(
+        r#"<div class="tool-card documents-card">
+        <div class="tool-card-header"><i class="fa-solid fa-folder-open"></i> Ingested Documents ({count})</div>"#
+    );
+
+    if let Some(docs) = docs {
+        html.push_str(r#"<table class="tool-card-table"><thead><tr><th>Title</th><th>Publisher</th><th>Facts</th><th>Size</th></tr></thead><tbody>"#);
+        for doc in docs {
+            let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
+            let publisher = doc.get("publisher").and_then(|v| v.as_str()).unwrap_or("");
+            let fact_count = doc.get("fact_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let content_length = doc.get("content_length").and_then(|v| v.as_str()).unwrap_or("0");
+            let bytes: u64 = content_length.parse().unwrap_or(0);
+            let size_str = if bytes > 1_000_000 {
+                format!("{:.1}MB", bytes as f64 / 1_000_000.0)
+            } else if bytes > 1_000 {
+                format!("{:.1}KB", bytes as f64 / 1_000.0)
+            } else {
+                format!("{}B", bytes)
+            };
+            html.push_str(&format!(
+                "<tr><td>{title}</td><td>{publisher}</td><td>{fact_count}</td><td>{size_str}</td></tr>"
+            ));
+        }
+        html.push_str("</tbody></table>");
+    }
+
+    if count == 0 {
+        html.push_str(r#"<div class="tool-card-empty"><i class="fa-solid fa-circle-info"></i> No documents ingested yet.</div>"#);
+    }
+
+    html.push_str("</div>");
+    html
 }
