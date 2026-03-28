@@ -144,7 +144,9 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/relation-templates/export", get(handlers::export_relation_templates))
         .route("/config/relation-templates/import", post(handlers::import_relation_templates))
         .route("/config/relation-types", get(handlers::list_relation_types))
-        // Edge operations
+        .route("/config/node-types", get(handlers::store::node_types))
+        // Node + Edge operations
+        .route("/node", patch(handlers::store::patch_node))
         .route("/edge", patch(handlers::rename_edge))
         .route("/edge/delete", post(handlers::delete_edge))
         // Admin

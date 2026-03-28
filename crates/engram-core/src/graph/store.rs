@@ -657,6 +657,14 @@ impl Graph {
         self.node_type_names.get(node.node_type as usize).cloned()
     }
 
+    /// List all known node type names.
+    pub fn all_node_types(&self) -> Vec<String> {
+        self.node_type_names.iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect()
+    }
+
     /// Get the edge type name for an edge type ID.
     pub fn edge_type_name(&self, type_id: u32) -> String {
         self.type_registry.name_or_default(type_id)

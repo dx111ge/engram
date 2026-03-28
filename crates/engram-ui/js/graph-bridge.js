@@ -113,59 +113,9 @@ window.__engram_graph = {
       displayLinks = self._bundleEdges(this._originalLinks);
     }
 
-    // ── Autocomplete helper for edge rename inputs ──
-    var _relTypesCache = null;
-    function fetchRelTypes(cb) {
-      if (_relTypesCache) return cb(_relTypesCache);
-      var xhr = new XMLHttpRequest();
-      xhr.open('GET', '/config/relation-types');
-      var token = localStorage.getItem('engram_token');
-      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-      xhr.onload = function() {
-        try { _relTypesCache = JSON.parse(xhr.responseText).types || []; }
-        catch(e) { _relTypesCache = []; }
-        cb(_relTypesCache);
-      };
-      xhr.onerror = function() { cb([]); };
-      xhr.send();
-    }
+    // ── Autocomplete helper — uses self._attachAutocomplete ──
     function attachAutocomplete(inputEl) {
-      var dropdown = null;
-      function show(matches) {
-        hide();
-        if (!matches.length) return;
-        dropdown = document.createElement('div');
-        dropdown.style.cssText = 'position:absolute;background:#2a2a2e;border:1px solid rgba(255,255,255,0.15);border-radius:4px;max-height:150px;overflow-y:auto;z-index:10001;min-width:' + inputEl.offsetWidth + 'px;';
-        var rect = inputEl.getBoundingClientRect();
-        dropdown.style.left = rect.left + 'px';
-        dropdown.style.top = (rect.bottom + 2) + 'px';
-        matches.slice(0, 10).forEach(function(m) {
-          var opt = document.createElement('div');
-          opt.textContent = m;
-          opt.style.cssText = 'padding:4px 8px;font-size:0.75rem;cursor:pointer;color:#e0e0e0;';
-          opt.onmouseenter = function() { opt.style.background = 'rgba(255,255,255,0.08)'; };
-          opt.onmouseleave = function() { opt.style.background = 'none'; };
-          opt.addEventListener('mousedown', function(ev) { ev.preventDefault(); inputEl.value = m; hide(); });
-          dropdown.appendChild(opt);
-        });
-        document.body.appendChild(dropdown);
-      }
-      function hide() { if (dropdown) { dropdown.remove(); dropdown = null; } }
-      function normalize(s) { return s.toLowerCase().replace(/[\s-]/g, '_'); }
-      inputEl.addEventListener('focus', function() { fetchRelTypes(function(){}); });
-      inputEl.addEventListener('input', function() {
-        var val = inputEl.value.trim().toLowerCase();
-        if (!val || !_relTypesCache) { hide(); return; }
-        var matches = _relTypesCache.filter(function(t) {
-          return t.toLowerCase().indexOf(val) !== -1;
-        });
-        // Fuzzy dedup warning
-        var norm = normalize(val);
-        var similar = _relTypesCache.find(function(t) { return normalize(t) === norm && t !== val; });
-        if (similar && matches.indexOf(similar) === -1) matches.unshift(similar);
-        show(matches);
-      });
-      inputEl.addEventListener('blur', function() { setTimeout(hide, 200); });
+      self._attachAutocomplete(inputEl, '/config/relation-types');
     }
 
     var graph = ForceGraph3D()(container)
@@ -845,8 +795,11 @@ window.__engram_graph = {
           self._contextMenuEl = null;
           if (item.action === 'expand' && onDblClickCb) {
             onDblClickCb(node.id);
-          } else if (item.action === 'details' && onClickCb) {
-            onClickCb(node.id);
+          } else if (item.action === 'details') {
+            // Also trigger Leptos select
+            if (onClickCb) onClickCb(node.id);
+            // Show inline node editor popup
+            self._showNodeEditor(node, event);
           } else if (item.action === 'find_path') {
             // Set start node for sidebar Find Path
             self._findPathFrom = node.id;
@@ -1085,6 +1038,283 @@ window.__engram_graph = {
     if (!self.instance || !self._allNodes) return;
     var filtered = self._filterData(self._allNodes, self._allLinks);
     self.instance.graphData({ nodes: filtered.nodes, links: filtered.links });
+  },
+
+  // ── Autocomplete for any input — fetches suggestions from a URL returning {types:[...]} ──
+  _acCache: {},
+  _attachAutocomplete: function(inputEl, url) {
+    var self = this;
+    var dropdown = null;
+    function fetchTypes(cb) {
+      if (self._acCache[url]) return cb(self._acCache[url]);
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url);
+      var token = localStorage.getItem('engram_token');
+      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      xhr.onload = function() {
+        try { self._acCache[url] = JSON.parse(xhr.responseText).types || []; }
+        catch(e) { self._acCache[url] = []; }
+        cb(self._acCache[url]);
+      };
+      xhr.onerror = function() { cb([]); };
+      xhr.send();
+    }
+    function show(matches) {
+      hide();
+      if (!matches.length) return;
+      dropdown = document.createElement('div');
+      dropdown.style.cssText = 'position:absolute;background:#2a2a2e;border:1px solid rgba(255,255,255,0.15);border-radius:4px;max-height:150px;overflow-y:auto;z-index:10001;min-width:' + inputEl.offsetWidth + 'px;';
+      var rect = inputEl.getBoundingClientRect();
+      dropdown.style.left = rect.left + 'px';
+      dropdown.style.top = (rect.bottom + 2) + 'px';
+      matches.slice(0, 10).forEach(function(m) {
+        var opt = document.createElement('div');
+        opt.textContent = m;
+        opt.style.cssText = 'padding:4px 8px;font-size:0.75rem;cursor:pointer;color:#e0e0e0;';
+        opt.onmouseenter = function() { opt.style.background = 'rgba(255,255,255,0.08)'; };
+        opt.onmouseleave = function() { opt.style.background = 'none'; };
+        opt.addEventListener('mousedown', function(ev) { ev.preventDefault(); inputEl.value = m; hide(); });
+        dropdown.appendChild(opt);
+      });
+      document.body.appendChild(dropdown);
+    }
+    function hide() { if (dropdown) { dropdown.remove(); dropdown = null; } }
+    function normalize(s) { return s.toLowerCase().replace(/[\s-]/g, '_'); }
+    inputEl.addEventListener('focus', function() { fetchTypes(function(){}); });
+    inputEl.addEventListener('input', function() {
+      var val = inputEl.value.trim().toLowerCase();
+      if (!val) { hide(); return; }
+      fetchTypes(function(types) {
+        var matches = types.filter(function(t) {
+          return t.toLowerCase().indexOf(val) !== -1;
+        });
+        var norm = normalize(val);
+        var similar = types.find(function(t) { return normalize(t) === norm && t !== val; });
+        if (similar && matches.indexOf(similar) === -1) matches.unshift(similar);
+        show(matches);
+      });
+    });
+    inputEl.addEventListener('blur', function() { setTimeout(hide, 200); });
+  },
+
+  // ── Inline Node Editor ──
+  _showNodeEditor: function(node, event) {
+    var self = this;
+    // Remove any existing popup
+    if (self._edgePopupEl) { self._edgePopupEl.remove(); self._edgePopupEl = null; }
+
+    var nodeType = (node.node_type || '').toLowerCase();
+    var isFact = nodeType === 'fact';
+    var isDoc = nodeType === 'document';
+    var isSource = nodeType === 'source';
+
+    var popup = document.createElement('div');
+    popup.className = 'engram-context-menu';
+    popup.style.left = (event ? event.clientX : 300) + 'px';
+    popup.style.top = (event ? event.clientY : 300) + 'px';
+    popup.style.minWidth = '280px';
+    popup.style.padding = '10px';
+
+    // Header
+    var header = document.createElement('div');
+    header.style.cssText = 'font-weight:600; font-size:0.85rem; margin-bottom:8px; color:#fff;';
+    header.textContent = node.id.length > 50 ? node.id.substring(0, 50) + '...' : node.id;
+    popup.appendChild(header);
+
+    // Type field (editable for entities and facts)
+    if (!isDoc && !isSource) {
+      var typeRow = document.createElement('div');
+      typeRow.style.cssText = 'margin-bottom:6px;';
+      var typeLabel = document.createElement('div');
+      typeLabel.style.cssText = 'font-size:0.7rem; color:rgba(255,255,255,0.5); margin-bottom:2px;';
+      typeLabel.textContent = 'TYPE';
+      typeRow.appendChild(typeLabel);
+
+      var typeInput = document.createElement('input');
+      typeInput.type = 'text';
+      typeInput.value = node.node_type || '';
+      typeInput.style.cssText = 'width:100%; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:4px 8px; font-size:0.78rem; border-radius:3px; box-sizing:border-box;';
+      typeInput.placeholder = 'Entity type...';
+      typeRow.appendChild(typeInput);
+      popup.appendChild(typeRow);
+
+      // Autocomplete for node types
+      self._attachAutocomplete(typeInput, '/config/node-types');
+    }
+
+    // Fact: Label + Claim (both editable)
+    if (isFact) {
+      // Label field (what shows in graph)
+      var labelRow = document.createElement('div');
+      labelRow.style.cssText = 'margin-bottom:6px;';
+      var labelLabel = document.createElement('div');
+      labelLabel.style.cssText = 'font-size:0.7rem; color:rgba(255,255,255,0.5); margin-bottom:2px;';
+      labelLabel.textContent = 'LABEL (displayed in graph)';
+      labelRow.appendChild(labelLabel);
+
+      var labelInput = document.createElement('input');
+      labelInput.type = 'text';
+      labelInput.value = node.display_label || node.label || node.id;
+      labelInput.style.cssText = 'width:100%; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:4px 8px; font-size:0.78rem; border-radius:3px; box-sizing:border-box;';
+      labelInput.placeholder = 'Display label...';
+      labelRow.appendChild(labelInput);
+      popup.appendChild(labelRow);
+
+      // Claim field (full fact text)
+      var claimRow = document.createElement('div');
+      claimRow.style.cssText = 'margin-bottom:6px;';
+      var claimLabel = document.createElement('div');
+      claimLabel.style.cssText = 'font-size:0.7rem; color:rgba(255,255,255,0.5); margin-bottom:2px;';
+      claimLabel.textContent = 'CLAIM (full fact text)';
+      claimRow.appendChild(claimLabel);
+
+      var claimInput = document.createElement('textarea');
+      claimInput.value = 'Loading...';
+      claimInput.style.cssText = 'width:100%; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:4px 8px; font-size:0.75rem; border-radius:3px; box-sizing:border-box; min-height:80px; resize:vertical;';
+      claimRow.appendChild(claimInput);
+      popup.appendChild(claimRow);
+
+      // Fetch full claim text from node properties
+      var xhrClaim = new XMLHttpRequest();
+      xhrClaim.open('GET', '/explain/' + encodeURIComponent(node.id));
+      var tkClaim = localStorage.getItem('engram_token');
+      if (tkClaim) xhrClaim.setRequestHeader('Authorization', 'Bearer ' + tkClaim);
+      xhrClaim.onload = function() {
+        try {
+          var data = JSON.parse(xhrClaim.responseText);
+          var props = data.properties || {};
+          claimInput.value = props.claim || node.id;
+          // If no custom label yet, show derived from claim
+          if (!node.display_label && props.claim) {
+            var words = props.claim.split(' ');
+            var auto = '';
+            for (var i = 0; i < words.length && auto.length < 60; i++) {
+              if (auto) auto += ' ';
+              auto += words[i];
+            }
+            if (auto.length < props.claim.length) auto += '...';
+            labelInput.value = auto;
+          }
+        } catch(e) { claimInput.value = node.id; }
+      };
+      xhrClaim.onerror = function() { claimInput.value = node.id; };
+      xhrClaim.send();
+    }
+
+    // Title field (editable for documents)
+    if (isDoc) {
+      var titleRow = document.createElement('div');
+      titleRow.style.cssText = 'margin-bottom:6px;';
+      var titleLabel = document.createElement('div');
+      titleLabel.style.cssText = 'font-size:0.7rem; color:rgba(255,255,255,0.5); margin-bottom:2px;';
+      titleLabel.textContent = 'TITLE';
+      titleRow.appendChild(titleLabel);
+
+      var titleInput = document.createElement('input');
+      titleInput.type = 'text';
+      titleInput.value = ''; // will be filled async
+      titleInput.style.cssText = 'width:100%; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:4px 8px; font-size:0.78rem; border-radius:3px; box-sizing:border-box;';
+      titleInput.placeholder = 'Document title...';
+      titleRow.appendChild(titleInput);
+      popup.appendChild(titleRow);
+
+      // Load current title
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', '/explain/' + encodeURIComponent(node.id));
+      var token = localStorage.getItem('engram_token');
+      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      xhr.onload = function() {
+        try {
+          var data = JSON.parse(xhr.responseText);
+          var props = data.properties || {};
+          titleInput.value = props.title || '';
+        } catch(e) {}
+      };
+      xhr.send();
+    }
+
+    // Buttons row
+    var btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex; gap:6px; margin-top:8px;';
+
+    var saveBtn = document.createElement('button');
+    saveBtn.innerHTML = '<i class="fa-solid fa-check"></i> Save';
+    saveBtn.style.cssText = 'background:var(--accent-bright, #4fc3f7); border:none; color:#000; padding:4px 12px; border-radius:3px; cursor:pointer; font-size:0.75rem; font-weight:600;';
+    saveBtn.addEventListener('click', function() {
+      var body = { label: node.id, properties: {} };
+
+      // Type
+      var typeEl = popup.querySelector('input[placeholder="Entity type..."]');
+      if (typeEl && typeEl.value.trim()) {
+        body.node_type = typeEl.value.trim();
+      }
+
+      // Fact: label + claim
+      var labelEl = popup.querySelector('input[placeholder="Display label..."]');
+      if (labelEl && labelEl.value.trim()) {
+        body.properties.display_label = labelEl.value.trim();
+      }
+      var claimEl = popup.querySelector('textarea');
+      if (claimEl && claimEl.value.trim()) {
+        body.properties.claim = claimEl.value.trim();
+      }
+
+      // Title (document)
+      var titleEl = popup.querySelector('input[placeholder="Document title..."]');
+      if (titleEl && titleEl.value.trim()) {
+        body.properties.title = titleEl.value.trim();
+      }
+
+      var xhr = new XMLHttpRequest();
+      xhr.open('PATCH', '/node');
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      var token = localStorage.getItem('engram_token');
+      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      xhr.onload = function() {
+        if (xhr.status === 200) {
+          // Update local node data
+          if (body.node_type) {
+            node.node_type = body.node_type;
+          }
+          if (body.properties.display_label) {
+            node.display_label = body.properties.display_label;
+            node.label = body.properties.display_label;
+          }
+          popup.remove();
+          self._edgePopupEl = null;
+          // Refresh graph visuals (force re-render of 3D objects)
+          if (self.instance) {
+            self.instance.nodeThreeObject(self.instance.nodeThreeObject());
+          }
+        }
+      };
+      xhr.send(JSON.stringify(body));
+    });
+    btnRow.appendChild(saveBtn);
+
+    var cancelBtn = document.createElement('button');
+    cancelBtn.innerHTML = 'Cancel';
+    cancelBtn.style.cssText = 'background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:4px 12px; border-radius:3px; cursor:pointer; font-size:0.75rem;';
+    cancelBtn.addEventListener('click', function() {
+      popup.remove();
+      self._edgePopupEl = null;
+    });
+    btnRow.appendChild(cancelBtn);
+
+    popup.appendChild(btnRow);
+    document.body.appendChild(popup);
+    self._edgePopupEl = popup;
+
+    // Dismiss on click outside
+    setTimeout(function() {
+      document.addEventListener('click', function dismiss(e) {
+        if (popup && !popup.contains(e.target)) {
+          popup.remove();
+          self._edgePopupEl = null;
+          document.removeEventListener('click', dismiss);
+        }
+      });
+    }, 100);
   },
 
   update: function(nodesJson, linksJson) {

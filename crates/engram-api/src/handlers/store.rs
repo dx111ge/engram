@@ -434,3 +434,78 @@ pub async fn rename_edge(
         valid_to: req.valid_to,
     }))
 }
+
+// ── PATCH /node ── Update node type, properties, confidence
+
+#[derive(serde::Deserialize)]
+pub struct PatchNodeRequest {
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    /// Properties to set (key-value). Existing properties not in this map are kept.
+    #[serde(default)]
+    pub properties: std::collections::HashMap<String, String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct PatchNodeResponse {
+    pub label: String,
+    pub updated: bool,
+}
+
+pub async fn patch_node(
+    State(state): State<AppState>,
+    Json(req): Json<PatchNodeRequest>,
+) -> ApiResult<PatchNodeResponse> {
+    let mut g = state.graph.write().map_err(|_| write_lock_err())?;
+
+    // Verify node exists
+    if g.find_node_id(&req.label).map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.is_none() {
+        return Err(api_err(StatusCode::NOT_FOUND, format!("node not found: {}", req.label)));
+    }
+
+    let mut changed = false;
+
+    if let Some(ref nt) = req.node_type {
+        if let Ok(_) = g.set_node_type(&req.label, nt) {
+            changed = true;
+        }
+    }
+
+    if let Some(conf) = req.confidence {
+        let prov = engram_core::graph::Provenance {
+            source_type: engram_core::graph::SourceType::User,
+            source_id: "manual_edit".to_string(),
+        };
+        if g.store_with_confidence(&req.label, conf, &prov).is_ok() {
+            changed = true;
+        }
+    }
+
+    for (key, value) in &req.properties {
+        let _ = g.set_property(&req.label, key, value);
+        changed = true;
+    }
+
+    if changed {
+        drop(g);
+        state.mark_dirty();
+    }
+
+    Ok(Json(PatchNodeResponse {
+        label: req.label,
+        updated: changed,
+    }))
+}
+
+// ── GET /config/node-types ── List known node types in the graph
+
+pub async fn node_types(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let g = state.graph.read().unwrap();
+    let types = g.all_node_types();
+    Json(serde_json::json!({ "types": types }))
+}
