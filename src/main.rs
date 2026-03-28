@@ -312,35 +312,66 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref endpoint) = embed_endpoint {
         let model_name = embed_model.clone()
             .unwrap_or_else(|| "multilingual-e5-small".into());
-        // Create embedder with dimension probing
-        let probe = engram_core::ApiEmbedder::new(
-            endpoint.clone(), model_name.clone(), 0, None,
-        );
-        match probe.probe_dimension() {
-            Ok(dim) => {
-                let embedder = engram_core::ApiEmbedder::new(
-                    endpoint.clone(), model_name.clone(), dim, None,
-                );
-                println!("Embedder: {} ({}D) via {}", model_name, dim, endpoint);
-                state.set_embedder_info(model_name, dim, endpoint.clone());
-                state.graph.write().unwrap().set_embedder(Box::new(embedder));
-            }
-            Err(e) => {
-                // Fall back to from_env() which has its own error handling
-                println!("Embedder probe failed ({}), trying env fallback...", e);
-                if let Some(embedder) = engram_core::ApiEmbedder::from_env() {
-                    let model = embedder.model_id().to_string();
-                    let dim = embedder.dim();
-                    let ep = std::env::var("ENGRAM_EMBED_ENDPOINT").unwrap_or_default();
-                    println!("Embedder: {} ({}D, env fallback) via {}", model, dim, ep);
-                    state.set_embedder_info(model, dim, ep);
-                    state.graph.write().unwrap().set_embedder(Box::new(embedder));
+
+        if endpoint.starts_with("onnx://") {
+            // ── Case 1: Local ONNX embedding ──
+            #[cfg(feature = "onnx")]
+            {
+                let home = engram_home();
+                let model_dir = home.join("models").join("embed").join(&model_name);
+                let model_path = model_dir.join("model.onnx");
+                let tokenizer_path = model_dir.join("tokenizer.json");
+
+                if !model_path.exists() {
+                    eprintln!("ERROR: ONNX model not found: {}", model_path.display());
+                    eprintln!("  Download a model to: {}", model_dir.display());
+                    eprintln!("  Required files: model.onnx, tokenizer.json");
+                } else if !tokenizer_path.exists() {
+                    eprintln!("ERROR: ONNX tokenizer not found: {}", tokenizer_path.display());
+                    eprintln!("  Required: tokenizer.json alongside model.onnx in {}", model_dir.display());
                 } else {
-                    println!("Embedder: none (probe failed, no env fallback)");
+                    match engram_core::OnnxEmbedder::load(&model_path, &tokenizer_path) {
+                        Ok(embedder) => {
+                            let dim = embedder.dim();
+                            println!("Embedder: {} ({}D) via ONNX local", model_name, dim);
+                            state.set_embedder_info(model_name, dim, "onnx://local".into());
+                            state.graph.write().unwrap().set_embedder(Box::new(embedder));
+                        }
+                        Err(e) => {
+                            eprintln!("ERROR: ONNX model failed to load: {}", e);
+                            eprintln!("  Model: {}", model_path.display());
+                        }
+                    }
+                }
+            }
+            #[cfg(not(feature = "onnx"))]
+            {
+                eprintln!("ERROR: embed_endpoint is onnx:// but binary was compiled without `onnx` feature");
+                eprintln!("  Rebuild with: cargo build --features onnx");
+            }
+        } else {
+            // ── Case 2: Remote API embedding (Ollama, OpenAI, vLLM, etc.) ──
+            let probe = engram_core::ApiEmbedder::new(
+                endpoint.clone(), model_name.clone(), 0, None,
+            );
+            match probe.probe_dimension() {
+                Ok(dim) => {
+                    let embedder = engram_core::ApiEmbedder::new(
+                        endpoint.clone(), model_name.clone(), dim, None,
+                    );
+                    println!("Embedder: {} ({}D) via {}", model_name, dim, endpoint);
+                    state.set_embedder_info(model_name, dim, endpoint.clone());
+                    state.graph.write().unwrap().set_embedder(Box::new(embedder));
+                }
+                Err(e) => {
+                    eprintln!("ERROR: API embedder probe failed for {}: {}", endpoint, e);
+                    eprintln!("  Model: {}", model_name);
+                    eprintln!("  Is the embedding service running at {}?", endpoint);
                 }
             }
         }
     } else if let Some(embedder) = engram_core::ApiEmbedder::from_env() {
+        // ── Case 3a: Auto-detect from environment variables ──
         let model = embedder.model_id().to_string();
         let dim = embedder.dim();
         let endpoint = std::env::var("ENGRAM_EMBED_ENDPOINT").unwrap_or_default();
@@ -348,7 +379,7 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         state.set_embedder_info(model, dim, endpoint);
         state.graph.write().unwrap().set_embedder(Box::new(embedder));
     } else {
-        // Try to auto-load ONNX model from ~/.engram/models/embed/
+        // ── Case 3b: Nothing configured — try ONNX auto-discovery ──
         let mut onnx_loaded = false;
         #[cfg(feature = "onnx")]
         {
@@ -371,20 +402,23 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         let dim = embedder.dim();
                         let label = dir.file_name()
                             .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "ONNX Local".into());
-                        println!("Embedder: {} ({}D)", label, dim);
-                        state.set_embedder_info(label, dim, "local".into());
+                            .unwrap_or_else(|| "onnx-local".into());
+                        println!("Embedder: {} ({}D) via ONNX auto-discovered", label, dim);
+                        state.set_embedder_info(label, dim, "onnx://local".into());
                         state.graph.write().unwrap().set_embedder(Box::new(embedder));
                         onnx_loaded = true;
                     }
                     Err(e) => {
-                        println!("Embedder: ONNX model found but failed to load: {e}");
+                        eprintln!("ERROR: ONNX model found but failed to load: {e}");
+                        eprintln!("  Path: {}", model_path.display());
                     }
                 }
             }
         }
         if !onnx_loaded {
-            println!("Embedder: none (set ENGRAM_EMBED_ENDPOINT or use POST /config)");
+            eprintln!("WARNING: No embedder configured — semantic search disabled");
+            eprintln!("  Configure via: POST /config or set ENGRAM_EMBED_ENDPOINT env var");
+            eprintln!("  For local ONNX: place model.onnx + tokenizer.json in ~/.engram/models/embed/<name>/");
         }
     }
 
