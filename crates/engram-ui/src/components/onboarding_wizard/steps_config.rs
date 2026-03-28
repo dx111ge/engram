@@ -504,70 +504,94 @@ pub(crate) fn render_step_seed(
                 </div>
             })}
 
-            // Phase 1 -> Phase 2 transition: "Review" button
+            // Phase 1 -> Phase 2 transition: "Review" button with auto-poll
             {move || (seed_phase.get() == 1 && !analyzing.get()).then(|| {
                 let api = use_context::<crate::api::ApiClient>().expect("ApiClient");
+                let (loading_review, set_loading_review) = signal(false);
                 view! {
                 <div class="flex gap-sm mt-1">
                     <button class="btn btn-primary" on:click=move |_| {
+                        if loading_review.get_untracked() { return; }
                         let api = api.clone();
                         let sid = seed_session_id.get_untracked();
+                        set_loading_review.set(true);
+                        set_seed_result.set(Some("Loading relations...".to_string()));
                         wasm_bindgen_futures::spawn_local(async move {
-                            // Fetch paginated review items
-                            let url = format!("/ingest/seed/connections?session_id={}&page=0&page_size=200", sid);
-                            if let Ok(text) = api.get_text(&url).await {
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                                    let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                                    if status == "enriching" || status == "pending" {
-                                        set_seed_result.set(Some("Enrichment still in progress... try again in a few seconds.".to_string()));
-                                        return;
-                                    }
-                                    if status == "error" {
-                                        let err = json.get("status_error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-                                        set_seed_result.set(Some(format!("Enrichment failed: {}", err)));
-                                        return;
-                                    }
-                                    set_seed_result.set(None);
-
-                                    // Parse review items
-                                    let mut conns = Vec::new();
-                                    if let Some(items) = json.get("items").and_then(|v| v.as_array()) {
-                                        for item in items {
-                                            let from = item.get("from").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            let to = item.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            let rel = item.get("rel_type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            let conf = item.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                                            let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            let tier = item.get("tier").and_then(|v| v.as_str()).unwrap_or("uncertain").to_string();
-                                            let idx = item.get("idx").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                            conns.push(crate::components::relation_review::ReviewConnection {
-                                                idx,
-                                                from,
-                                                to,
-                                                rel_type: rel,
-                                                confidence: conf,
-                                                source,
-                                                tier,
-                                            });
+                            // Poll until enrichment is done (max 30 attempts, 2s interval)
+                            let mut attempts = 0u32;
+                            loop {
+                                let url = format!("/ingest/seed/connections?session_id={}&page=0&page_size=200", sid);
+                                match api.get_text(&url).await {
+                                    Ok(text) => {
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                            let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+                                            if status == "error" {
+                                                let err = json.get("status_error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                                                set_seed_result.set(Some(format!("Enrichment failed: {}", err)));
+                                                set_loading_review.set(false);
+                                                return;
+                                            }
+                                            if status != "enriching" && status != "pending" {
+                                                // Ready — parse review items
+                                                set_seed_result.set(None);
+                                                let mut conns = Vec::new();
+                                                if let Some(items) = json.get("items").and_then(|v| v.as_array()) {
+                                                    for item in items {
+                                                        let from = item.get("from").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                                        let to = item.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                                        let rel = item.get("rel_type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                                        let conf = item.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                                                        let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                                        let tier = item.get("tier").and_then(|v| v.as_str()).unwrap_or("uncertain").to_string();
+                                                        let idx = item.get("idx").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                                        conns.push(crate::components::relation_review::ReviewConnection {
+                                                            idx, from, to, rel_type: rel,
+                                                            confidence: conf, source, tier,
+                                                        });
+                                                    }
+                                                }
+                                                set_seed_review_connections.set(conns);
+                                                // Fetch known relation types
+                                                if let Ok(text) = api.get_text("/config/relation-types").await {
+                                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                                        let types: Vec<String> = json.get("types").and_then(|t| t.as_array())
+                                                            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                                            .unwrap_or_default();
+                                                        set_seed_known_rel_types.set(types);
+                                                    }
+                                                }
+                                                set_loading_review.set(false);
+                                                set_seed_phase.set(2);
+                                                return;
+                                            }
+                                            // Still enriching — update message and poll again
+                                            attempts += 1;
+                                            set_seed_result.set(Some(format!(
+                                                "Enrichment in progress... waiting ({}s)", attempts * 2
+                                            )));
                                         }
                                     }
-                                    set_seed_review_connections.set(conns);
-                                    set_seed_phase.set(2);
+                                    Err(e) => {
+                                        set_seed_result.set(Some(format!("Error fetching connections: {e}")));
+                                        set_loading_review.set(false);
+                                        return;
+                                    }
                                 }
-                            }
-                            // Fetch known relation types
-                            if let Ok(text) = api.get_text("/config/relation-types").await {
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                                    let types: Vec<String> = json.get("types").and_then(|t| t.as_array())
-                                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-                                        .unwrap_or_default();
-                                    set_seed_known_rel_types.set(types);
+                                if attempts >= 30 {
+                                    set_seed_result.set(Some("Enrichment timed out after 60s. Try again.".to_string()));
+                                    set_loading_review.set(false);
+                                    return;
                                 }
+                                gloo_timers::future::TimeoutFuture::new(2_000).await;
                             }
                         });
                     }
-                        disabled=move || analyzing.get()>
-                        <i class="fa-solid fa-check-double"></i>" Review All"
+                        disabled=move || analyzing.get() || loading_review.get()>
+                        {move || if loading_review.get() {
+                            view! { <span class="spinner"></span>" Waiting for enrichment..." }.into_any()
+                        } else {
+                            view! { <i class="fa-solid fa-check-double"></i>" Review All" }.into_any()
+                        }}
                     </button>
                     <button class="btn btn-secondary" on:click=move |_| {
                         set_seed_phase.set(0);
