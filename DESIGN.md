@@ -773,17 +773,31 @@ enum SourceType {
 
 ### Document Provenance (v1.1.0)
 
-Every ingested entity links back to its source document through a 4-node chain:
+Two-layer provenance system:
 
 ```
-Entity --[mentioned_in]--> Fact --[extracted_from]--> Document --[published_by]--> Publisher
+Layer 1 (always, NER-based):
+  Entity ──[mentioned_in]──> Document ──[published_by]──> Publisher
+
+Layer 2 (optional, LLM-based):
+  Entity ──[subject_of]──> Fact ──[extracted_from]──> Document
 ```
+
+**Layer 1** runs always — NER tells us which entities appear in which documents. Fast, local, no LLM needed. Answers: "Which documents mention Putin?"
+
+**Layer 2** runs when LLM is configured — extracts semantic claims from documents. Each claim is a Fact node: a specific assertion that can be verified, corroborated, or contradicted. Answers: "What do documents SAY about Putin?"
 
 **Node types:**
 - **Entity** — the knowledge node (Putin, NATO, etc.)
-- **Fact** — a specific claim extracted from a document (`claim`, `extraction_method`, `event_date`)
+- **Fact** — a semantic claim extracted by LLM. Properties: `claim` (full sentence), `event_date`, `confidence`, `status` (active/retracted/disputed), `extraction_method`
 - **Document** (`Doc:{hash8}`) — a specific article/PDF/page. Properties: `content_hash`, `url`, `title`, `doc_date`, `content_length`, `mime_type`
 - **Publisher** (`Source:{type}:{id}`) — the origin/source (Reuters, Wikipedia, etc.)
+
+**Fact extraction uses the KGGen two-stage pattern:**
+1. Entity extraction (existing NER pipeline)
+2. Claim extraction (LLM with delimiter-based output for reliability)
+3. Gleaning pass (re-prompt to catch missed claims, +10-20%)
+4. Validation (cross-reference with NER entities, never auto-resolve contradictions)
 
 **Content caching:**
 Document content is stored in a segmented append-only blob store (`.brain.docs.N` files + `.brain.docs.idx` index). zstd compression, CRC32 per-entry, crash-safe via append-only writes. Content-addressable by SHA-256 hash — identical content is automatically deduplicated.
@@ -791,7 +805,7 @@ Document content is stored in a segmented append-only blob store (`.brain.docs.N
 Same URL with different content over time = different Document nodes (enabling temporal tracking).
 
 **API endpoints:**
-- `POST /provenance` — trace entity back to source documents
+- `POST /provenance` — trace entity back to source documents and facts
 - `POST /documents` — list ingested documents
 - `POST /documents/content` — read cached document content
 

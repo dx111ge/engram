@@ -11,6 +11,7 @@ var TYPE_COLORS = {
   'product': '#ab47bc',
   'position': '#78909c',
   'fact': '#ffa726',
+  'document': '#5c6bc0',
   'source': '#78909c'
 };
 
@@ -24,14 +25,19 @@ var TYPE_LABELS = {
   'product': 'Product',
   'position': 'Position',
   'fact': 'Fact',
+  'document': 'Document',
   'source': 'Source'
 };
 
 // Shape overrides for special node types
 var TYPE_SHAPES = {
   'fact': 'diamond',
+  'document': 'diamond',
   'source': 'triangle'
 };
+
+// Types hidden by default in legend (provenance metadata, not core knowledge)
+var DEFAULT_HIDDEN_TYPES = new Set(['fact', 'document', 'source']);
 
 function typeColor(nodeType) {
   if (!nodeType) return '#78909c';
@@ -73,6 +79,19 @@ window.__engram_graph = {
     var links = JSON.parse(linksJson);
     var self = this;
     self._startNodeId = startNodeId || null;
+
+    // Initialize legend hidden types
+    if (!self._legendHidden) {
+      self._legendHidden = new Set();
+      DEFAULT_HIDDEN_TYPES.forEach(function(t) { self._legendHidden.add(t); });
+    }
+
+    // Store full data, then filter out hidden types before rendering
+    self._allNodes = nodes;
+    self._allLinks = links;
+    var filtered = self._filterData(nodes, links);
+    nodes = filtered.nodes;
+    links = filtered.links;
 
     // Remove any existing context menu
     if (self._contextMenuEl) {
@@ -895,8 +914,31 @@ window.__engram_graph = {
       }
     };
 
-    // ── Color Legend (Step O) ──
-    self._buildLegend(container, nodes);
+    // ── Color Legend (Step O) — uses _allNodes for full type list ──
+    self._buildLegend(container, self._allNodes);
+  },
+
+  // Filter nodes and links, removing hidden types and their edges
+  _filterData: function(nodes, links) {
+    var self = this;
+    if (self._legendHidden.size === 0) {
+      return { nodes: nodes, links: links };
+    }
+    var hiddenIds = new Set();
+    var filteredNodes = nodes.filter(function(n) {
+      var nt = (n.node_type || 'Entity').toLowerCase();
+      if (self._legendHidden.has(nt)) {
+        hiddenIds.add(n.id);
+        return false;
+      }
+      return true;
+    });
+    var filteredLinks = links.filter(function(l) {
+      var srcId = typeof l.source === 'object' ? l.source.id : l.source;
+      var tgtId = typeof l.target === 'object' ? l.target.id : l.target;
+      return !hiddenIds.has(srcId) && !hiddenIds.has(tgtId);
+    });
+    return { nodes: filteredNodes, links: filteredLinks };
   },
 
   // ── Edge Bundling Helper ──
@@ -941,8 +983,10 @@ window.__engram_graph = {
     }
   },
 
-  // ── Color Legend (Step O) ──
+  // ── Color Legend with filter checkboxes (Step O) ──
   _buildLegend: function(container, nodes) {
+    var self = this;
+
     // Remove old legend
     if (this._legendEl) {
       this._legendEl.remove();
@@ -961,34 +1005,71 @@ window.__engram_graph = {
     var typeKeys = Object.keys(typesInGraph);
     if (typeKeys.length === 0) return;
 
+    // Initialize hidden types from defaults (only on first build)
+    if (!self._legendInitialized) {
+      // Don't reset _hiddenTypes — it was pre-populated in create()
+      typeKeys.forEach(function(key) {
+        if (DEFAULT_HIDDEN_TYPES.has(key)) {
+          self._hiddenTypes.add(key);
+        }
+      });
+      self._legendInitialized = true;
+    }
+
     var legend = document.createElement('div');
     legend.className = 'engram-legend';
 
     typeKeys.forEach(function(key) {
       var color = typeColor(key);
       var displayName = TYPE_LABELS[key] || typesInGraph[key];
-      var row = document.createElement('div');
-      row.className = 'engram-legend-item';
+      var isHidden = self._legendHidden.has(key);
+
+      var row = document.createElement('label');
+      row.className = 'engram-legend-item' + (isHidden ? ' engram-legend-hidden' : '');
+      row.style.cursor = 'pointer';
+
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !isHidden;
+      cb.className = 'engram-legend-cb';
+      cb.addEventListener('change', function() {
+        if (cb.checked) {
+          self._legendHidden.delete(key);
+          self._hiddenTypes.delete(key);
+          row.classList.remove('engram-legend-hidden');
+        } else {
+          self._legendHidden.add(key);
+          self._hiddenTypes.add(key);
+          row.classList.add('engram-legend-hidden');
+        }
+        self._applyLegendFilter();
+      });
+
       var shape = TYPE_SHAPES[key] || null;
       var shapeClass = shape === 'diamond' ? ' engram-legend-diamond' : (shape === 'triangle' ? ' engram-legend-triangle' : '');
-      row.innerHTML = '<span class="engram-legend-dot' + shapeClass + '" style="background:' + color + '"></span>' + displayName;
+      var dot = document.createElement('span');
+      dot.className = 'engram-legend-dot' + shapeClass;
+      dot.style.background = color;
+
+      var label = document.createTextNode(displayName);
+
+      row.appendChild(cb);
+      row.appendChild(dot);
+      row.appendChild(label);
       legend.appendChild(row);
     });
 
     container.style.position = 'relative';
     container.appendChild(legend);
     this._legendEl = legend;
+  },
 
-    // Auto-hide after 10s, show on hover
-    setTimeout(function() {
-      legend.classList.add('engram-legend-faded');
-    }, 10000);
-    legend.addEventListener('mouseenter', function() {
-      legend.classList.remove('engram-legend-faded');
-    });
-    legend.addEventListener('mouseleave', function() {
-      legend.classList.add('engram-legend-faded');
-    });
+  // Apply legend type filters by updating graph data
+  _applyLegendFilter: function() {
+    var self = this;
+    if (!self.instance || !self._allNodes) return;
+    var filtered = self._filterData(self._allNodes, self._allLinks);
+    self.instance.graphData({ nodes: filtered.nodes, links: filtered.links });
   },
 
   update: function(nodesJson, linksJson) {
@@ -1007,7 +1088,14 @@ window.__engram_graph = {
 
   filter: function(hiddenTypesJson, hiddenRelsJson) {
     var self = this;
-    self._hiddenTypes = new Set(JSON.parse(hiddenTypesJson || '[]').map(function(t) { return t.toLowerCase(); }));
+    // Merge external filter with legend checkbox state (legend takes precedence)
+    var externalTypes = JSON.parse(hiddenTypesJson || '[]').map(function(t) { return t.toLowerCase(); });
+    var merged = new Set(externalTypes);
+    // Preserve legend-hidden types
+    if (self._legendHidden) {
+      self._legendHidden.forEach(function(t) { merged.add(t); });
+    }
+    self._hiddenTypes = merged;
     self._hiddenRels = new Set(JSON.parse(hiddenRelsJson || '[]').map(function(r) { return r.toLowerCase(); }));
     self._orphanedNodes = new Set();
     // Clear path isolation when filters change

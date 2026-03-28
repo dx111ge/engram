@@ -2238,6 +2238,20 @@ input[type="range"] {
   border-bottom: 10px solid;
 }
 
+.engram-legend-cb {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent-bright);
+  flex-shrink: 0;
+}
+
+.engram-legend-item.engram-legend-hidden {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
 /* --- Edit Tab: Danger Zone --- */
 .danger-zone {
   margin-top: 1.5rem;
