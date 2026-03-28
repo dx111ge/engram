@@ -228,10 +228,11 @@ pub async fn ingest(
         ..Default::default()
     };
 
-    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled) = {
+    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled, llm_endpoint, llm_model) = {
         let c = state.config.read().unwrap();
         (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
-         c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled)
+         c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled,
+         c.llm_endpoint.clone(), c.llm_model.clone())
     };
     let graph = state.graph.clone();
     let ner_cache = state.cached_ner.clone();
@@ -282,6 +283,9 @@ pub async fn ingest(
             let mut pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
                 relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
             pipeline.set_doc_store(doc_store.clone());
+            if let (Some(ep), Some(m)) = (llm_endpoint.as_ref(), llm_model.as_ref()) {
+                pipeline.set_llm(ep.clone(), m.clone());
+            }
             pipeline.analyze(items)
         })
         .await
@@ -391,10 +395,11 @@ pub async fn ingest_analyze(
     use engram_ingest::PipelineConfig;
 
     let config = PipelineConfig::default();
-    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled) = {
+    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled, llm_endpoint, llm_model) = {
         let c = state.config.read().unwrap();
         (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
-         c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled)
+         c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled,
+         c.llm_endpoint.clone(), c.llm_model.clone())
     };
     let graph = state.graph.clone();
     let ner_cache = state.cached_ner.clone();
@@ -494,10 +499,11 @@ pub async fn ingest_file(
         ..Default::default()
     };
 
-    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled) = {
+    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled, llm_endpoint, llm_model) = {
         let c = state.config.read().unwrap();
         (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
-         c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled)
+         c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled,
+         c.llm_endpoint.clone(), c.llm_model.clone())
     };
     let graph = state.graph.clone();
     let ner_cache = state.cached_ner.clone();

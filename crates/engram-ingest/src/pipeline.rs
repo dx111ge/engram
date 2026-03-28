@@ -123,6 +123,9 @@ pub struct Pipeline {
     resolvers: Vec<Box<dyn Resolver>>,
     transformers: Vec<Box<dyn Transformer>>,
     relation_extractors: Vec<Box<dyn RelationExtractor>>,
+    /// LLM config for fact extraction (Layer 2). None = skip fact extraction.
+    llm_endpoint: Option<String>,
+    llm_model: Option<String>,
 }
 
 impl Pipeline {
@@ -141,12 +144,20 @@ impl Pipeline {
             resolvers: Vec::new(),
             transformers: Vec::new(),
             relation_extractors: Vec::new(),
+            llm_endpoint: None,
+            llm_model: None,
         }
     }
 
     /// Set the document store for content caching and provenance tracking.
     pub fn set_doc_store(&mut self, store: Arc<RwLock<engram_core::storage::doc_store::DocStore>>) {
         self.doc_store = Some(store);
+    }
+
+    /// Set LLM config for fact extraction (Layer 2).
+    pub fn set_llm(&mut self, endpoint: String, model: String) {
+        self.llm_endpoint = Some(endpoint);
+        self.llm_model = Some(model);
     }
 
     /// Add a parser to the pipeline.
@@ -378,7 +389,12 @@ impl Pipeline {
         // Stage 6: Apply transformers
         let facts = self.apply_transformers(facts, &mut result);
 
-        // Stage 7: Load — batch write to graph (chunked write locking)
+        // Stage 7: LLM fact extraction (Layer 2, optional)
+        if self.config.stages.fact_extract {
+            self.extract_llm_facts(&facts, &mut result);
+        }
+
+        // Stage 8: Load — batch write to graph (chunked write locking)
         self.load_facts(facts, &mut result, &absorbed_dates)?;
 
         result.duration_ms = start.elapsed().as_millis() as u64;
@@ -1061,9 +1077,10 @@ impl Pipeline {
         Ok(())
     }
 
-    /// Pass 1.5: Create Fact nodes, Document nodes, and Publisher (Source) nodes.
+    /// Pass 1.5: Create Document nodes and Entity→Document edges (Layer 1).
     ///
-    /// Graph chain: Entity --[mentioned_in]--> Fact --[extracted_from]--> Document --[published_by]--> Publisher
+    /// Layer 1: Entity --[mentioned_in]--> Document --[published_by]--> Publisher
+    /// Layer 2 (LLM facts): Entity --[subject_of]--> Fact --[extracted_from]--> Document
     fn create_fact_and_document_nodes(
         &self,
         facts: &[ProcessedFact],
@@ -1096,12 +1113,11 @@ impl Pipeline {
             }
         }
 
-        // Create Fact nodes and link to entities + documents
+        // Layer 1: Entity -> Document (mentioned_in) direct edges
         for fact in facts {
-            if let Some(ref source_text) = fact.source_text {
-                self.create_fact_node(
-                    &mut graph, fact, source_text, &prov, now_ts, absorbed_dates, result,
-                );
+            if let Some(ref doc_ctx) = fact.doc_context {
+                let doc_label = crate::document::doc_label(&doc_ctx.content_hash_hex);
+                let _ = graph.relate_upsert(&fact.entity, &doc_label, "mentioned_in", &prov);
             }
         }
         Ok(())
@@ -1171,72 +1187,84 @@ impl Pipeline {
         }
     }
 
-    /// Create a Fact node and link it to entity (mentioned_in) and document (extracted_from).
-    fn create_fact_node(
+    /// Stage 7: LLM-based fact extraction (Layer 2).
+    /// Extracts semantic claims from document text and creates Fact nodes.
+    fn extract_llm_facts(
         &self,
-        graph: &mut engram_core::graph::Graph,
-        fact: &ProcessedFact,
-        source_text: &str,
-        prov: &engram_core::graph::Provenance,
-        now_ts: i64,
-        absorbed_dates: &HashMap<String, String>,
+        facts: &[ProcessedFact],
         result: &mut PipelineResult,
     ) {
-        let fact_label = make_fact_label(&fact.entity, source_text);
+        let (endpoint, model) = match (&self.llm_endpoint, &self.llm_model) {
+            (Some(ep), Some(m)) if !ep.is_empty() && !m.is_empty() => (ep.clone(), m.clone()),
+            _ => return, // No LLM configured, skip
+        };
 
-        // Dedup: skip if fact node already exists
-        if let Ok(Some(_)) = graph.find_node_id(&fact_label) {
+        let config = crate::fact_extract::FactExtractConfig {
+            llm_endpoint: endpoint,
+            llm_model: model,
+            gleaning: true,
+            max_tokens: 2000,
+            temperature: 0.1,
+        };
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+        // Collect unique document texts and their entity lists
+        let mut doc_texts: HashMap<String, (String, Vec<String>)> = HashMap::new();
+        for fact in facts {
+            if let Some(ref doc_ctx) = fact.doc_context {
+                let doc_label = crate::document::doc_label(&doc_ctx.content_hash_hex);
+                let entry = doc_texts.entry(doc_label).or_insert_with(|| {
+                    (doc_ctx.full_text.clone(), Vec::new())
+                });
+                if !entry.1.contains(&fact.entity) {
+                    entry.1.push(fact.entity.clone());
+                }
+            }
+        }
+
+        if doc_texts.is_empty() {
             return;
         }
 
-        if graph.store_with_confidence(&fact_label, fact.confidence, prov).is_err() {
-            return;
-        }
-        let _ = graph.set_node_type(&fact_label, "Fact");
-        let _ = graph.set_property(&fact_label, "claim", source_text);
-        let _ = graph.set_property(&fact_label, "status", "active");
-        let _ = graph.set_property(&fact_label, "extracted_at", &now_ts.to_string());
-        let _ = graph.set_property(
-            &fact_label, "extraction_method", &format!("{:?}", fact.extraction_method),
+        tracing::info!(
+            documents = doc_texts.len(),
+            "Stage 7: LLM fact extraction starting"
         );
 
-        // Absorbed date from text
-        if let Some(date) = absorbed_dates.get(source_text) {
-            let _ = graph.set_property(&fact_label, "event_date", date);
+        let mut total_facts = 0u32;
+        for (doc_label, (text, entity_names)) in &doc_texts {
+            // Chunk the document text
+            let chunks = crate::fact_extract::chunk_text(text, 3000);
+
+            let mut all_claims = Vec::new();
+            for chunk in &chunks {
+                let claims = crate::fact_extract::extract_claims(
+                    &client, &config, chunk, entity_names,
+                );
+                all_claims.extend(claims);
+            }
+
+            if all_claims.is_empty() {
+                continue;
+            }
+
+            // Store facts in graph
+            if let Ok(mut graph) = self.graph.write() {
+                let count = crate::fact_extract::store_facts_in_graph(
+                    &mut graph, &all_claims, doc_label, entity_names,
+                );
+                total_facts += count;
+            }
         }
 
-        // Edge: Entity -> Fact (mentioned_in)
-        link_entity_to_fact(graph, &fact.entity, &fact_label, source_text, prov);
-
-        // Edge: Fact -> Document (extracted_from)
-        if let Some(ref doc_ctx) = fact.doc_context {
-            let doc_label = crate::document::doc_label(&doc_ctx.content_hash_hex);
-            let _ = graph.relate_upsert(&fact_label, &doc_label, "extracted_from", prov);
-        }
-
-        result.facts_stored += 1;
-    }
-}
-
-/// Link an entity to its fact node via `mentioned_in` edge.
-/// Short entity names (< 3 chars) require exact word boundary match.
-fn link_entity_to_fact(
-    graph: &mut engram_core::graph::Graph,
-    entity: &str,
-    fact_label: &str,
-    source_text: &str,
-    prov: &engram_core::graph::Provenance,
-) {
-    let entity_lower = entity.to_lowercase();
-    let claim_lower = source_text.to_lowercase();
-    let matched = if entity.len() >= 3 {
-        claim_lower.contains(&entity_lower)
-    } else {
-        claim_lower.split(|c: char| !c.is_alphanumeric())
-            .any(|word| word == entity_lower)
-    };
-    if matched {
-        let _ = graph.relate_upsert(entity, fact_label, "mentioned_in", prov);
+        tracing::info!(
+            facts_extracted = total_facts,
+            "Stage 7: LLM fact extraction complete"
+        );
     }
 }
 

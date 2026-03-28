@@ -44,6 +44,7 @@ pub fn mesh_pipeline_config(mesh_config: &MeshFastPathConfig) -> PipelineConfig 
             conflict_check: mesh_config.check_conflicts,
             confidence_calc: false, // we apply peer trust multiplier instead
             relation_extract: false, // mesh sync uses fast path, skip RE
+            fact_extract: false, // mesh sync doesn't need LLM facts
         },
         ..Default::default()
     }

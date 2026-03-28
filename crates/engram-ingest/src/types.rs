@@ -213,6 +213,8 @@ pub struct StageConfig {
     pub conflict_check: bool,
     pub confidence_calc: bool,
     pub relation_extract: bool,
+    /// LLM-based semantic fact extraction (Layer 2). Requires LLM config.
+    pub fact_extract: bool,
 }
 
 impl Default for StageConfig {
@@ -226,6 +228,7 @@ impl Default for StageConfig {
             conflict_check: true,
             confidence_calc: true,
             relation_extract: true,
+            fact_extract: true,
         }
     }
 }

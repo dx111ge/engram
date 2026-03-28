@@ -25,6 +25,7 @@ pub mod conflict;
 pub mod dedup;
 pub mod document;
 pub mod error;
+pub mod fact_extract;
 pub mod file_source;
 pub mod gazetteer;
 pub mod ledger;

@@ -174,26 +174,11 @@ impl KbRelationExtractor {
             }
             let _ = graph.relate_upsert(&doc_label, &publisher_label, "published_by", &prov);
 
-            // Create Fact node from snippet and link entities mentioned in it
-            let fact_label = crate::pipeline::make_fact_label("web_search", &result.snippet);
-            if graph.find_node_id(&fact_label).ok().flatten().is_none() {
-                if graph.store_with_confidence(&fact_label, 0.50, &prov).is_ok() {
-                    let _ = graph.set_node_type(&fact_label, "Fact");
-                    let _ = graph.set_property(&fact_label, "claim", &result.snippet);
-                    let _ = graph.set_property(&fact_label, "status", "active");
-                    let _ = graph.set_property(&fact_label, "extracted_at", &now_ts.to_string());
-                    let _ = graph.set_property(&fact_label, "extraction_method", "WebSearch");
-
-                    // Edge: Fact -> Document (extracted_from)
-                    let _ = graph.relate_upsert(&fact_label, &doc_label, "extracted_from", &prov);
-
-                    // Edge: Entity -> Fact (mentioned_in) for each entity in the snippet
-                    let snippet_lower = result.snippet.to_lowercase();
-                    for label in entity_labels {
-                        if snippet_lower.contains(&label.to_lowercase()) {
-                            let _ = graph.relate_upsert(label, &fact_label, "mentioned_in", &prov);
-                        }
-                    }
+            // Layer 1: Entity -> Document (mentioned_in) for each entity in the snippet
+            let snippet_lower = result.snippet.to_lowercase();
+            for label in entity_labels {
+                if snippet_lower.contains(&label.to_lowercase()) {
+                    let _ = graph.relate_upsert(label, &doc_label, "mentioned_in", &prov);
                 }
             }
 
@@ -202,6 +187,63 @@ impl KbRelationExtractor {
                 if let Ok(mut store) = store_arc.write() {
                     let mime = engram_core::storage::doc_store::MimeType::Html;
                     let _ = store.store(result.snippet.as_bytes(), mime);
+                }
+            }
+        }
+
+        // Drop graph lock before LLM calls
+        drop(graph);
+
+        // Layer 2: LLM fact extraction from web search documents
+        self.extract_facts_from_results(results, entity_labels);
+    }
+
+    /// Run LLM fact extraction on web search results and store Fact nodes.
+    fn extract_facts_from_results(
+        &self,
+        results: &[WebSearchResult],
+        entity_labels: &[String],
+    ) {
+        let (endpoint, model) = match (&self.llm_endpoint, &self.llm_model) {
+            (Some(ep), Some(m)) if !ep.is_empty() && !m.is_empty() => (ep.clone(), m.clone()),
+            _ => return,
+        };
+
+        let config = crate::fact_extract::FactExtractConfig {
+            llm_endpoint: endpoint,
+            llm_model: model,
+            gleaning: false, // skip gleaning for short snippets
+            max_tokens: 1000,
+            temperature: 0.1,
+        };
+
+        for result in results {
+            if result.snippet.is_empty() {
+                continue;
+            }
+            let content_hash = engram_core::storage::doc_store::DocStore::hash_content(
+                result.snippet.as_bytes(),
+            );
+            let hash_hex = engram_core::storage::doc_store::DocStore::hash_hex(&content_hash);
+            let doc_label = crate::document::doc_label(&hash_hex);
+
+            let claims = crate::fact_extract::extract_claims(
+                &self.client, &config, &result.snippet, entity_labels,
+            );
+            if claims.is_empty() {
+                continue;
+            }
+
+            if let Ok(mut graph) = self.graph.write() {
+                let count = crate::fact_extract::store_facts_in_graph(
+                    &mut graph, &claims, &doc_label, entity_labels,
+                );
+                if count > 0 {
+                    tracing::info!(
+                        doc = %doc_label,
+                        facts = count,
+                        "LLM extracted facts from web search result"
+                    );
                 }
             }
         }

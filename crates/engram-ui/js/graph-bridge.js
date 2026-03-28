@@ -918,14 +918,15 @@ window.__engram_graph = {
     self._buildLegend(container, self._allNodes);
   },
 
-  // Filter nodes and links, removing hidden types and their edges
+  // Filter nodes and links, removing hidden types, their edges, and orphaned nodes
   _filterData: function(nodes, links) {
     var self = this;
     if (self._legendHidden.size === 0) {
       return { nodes: nodes, links: links };
     }
+    // Step 1: Remove hidden node types
     var hiddenIds = new Set();
-    var filteredNodes = nodes.filter(function(n) {
+    var visibleNodes = nodes.filter(function(n) {
       var nt = (n.node_type || 'Entity').toLowerCase();
       if (self._legendHidden.has(nt)) {
         hiddenIds.add(n.id);
@@ -933,10 +934,24 @@ window.__engram_graph = {
       }
       return true;
     });
+    // Step 2: Remove edges touching hidden nodes
     var filteredLinks = links.filter(function(l) {
       var srcId = typeof l.source === 'object' ? l.source.id : l.source;
       var tgtId = typeof l.target === 'object' ? l.target.id : l.target;
       return !hiddenIds.has(srcId) && !hiddenIds.has(tgtId);
+    });
+    // Step 3: Remove orphaned nodes (no remaining edges)
+    var connectedIds = new Set();
+    filteredLinks.forEach(function(l) {
+      var srcId = typeof l.source === 'object' ? l.source.id : l.source;
+      var tgtId = typeof l.target === 'object' ? l.target.id : l.target;
+      connectedIds.add(srcId);
+      connectedIds.add(tgtId);
+    });
+    // Keep the start node even if orphaned (it's the search target)
+    if (self._startNodeId) connectedIds.add(self._startNodeId);
+    var filteredNodes = visibleNodes.filter(function(n) {
+      return connectedIds.has(n.id);
     });
     return { nodes: filteredNodes, links: filteredLinks };
   },
