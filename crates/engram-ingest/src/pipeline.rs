@@ -116,6 +116,7 @@ fn make_fact_label(entity: &str, source_text: &str) -> String {
 pub struct Pipeline {
     config: PipelineConfig,
     graph: Arc<RwLock<engram_core::graph::Graph>>,
+    doc_store: Option<Arc<RwLock<engram_core::storage::doc_store::DocStore>>>,
     parsers: Vec<Box<dyn Parser>>,
     language_detector: Option<Box<dyn LanguageDetector>>,
     extractors: Vec<Box<dyn Extractor>>,
@@ -133,6 +134,7 @@ impl Pipeline {
         Self {
             config,
             graph,
+            doc_store: None,
             parsers: Vec::new(),
             language_detector: None,
             extractors: Vec::new(),
@@ -140,6 +142,11 @@ impl Pipeline {
             transformers: Vec::new(),
             relation_extractors: Vec::new(),
         }
+    }
+
+    /// Set the document store for content caching and provenance tracking.
+    pub fn set_doc_store(&mut self, store: Arc<RwLock<engram_core::storage::doc_store::DocStore>>) {
+        self.doc_store = Some(store);
     }
 
     /// Add a parser to the pipeline.
@@ -1003,89 +1010,8 @@ impl Pipeline {
             // Write lock drops here — readers can interleave between chunks
         }
 
-        // Pass 1.5: Create Fact nodes for entities that have source_text.
-        {
-            let mut graph = self.graph.write().map_err(|_| IngestError::Graph("graph write lock poisoned".into()))?;
-            let now_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-
-            for fact in &facts {
-                if let Some(ref source_text) = fact.source_text {
-                    let fact_label = make_fact_label(&fact.entity, source_text);
-
-                    // Dedup: skip if fact node already exists
-                    if let Ok(Some(_)) = graph.find_node_id(&fact_label) {
-                        continue;
-                    }
-
-                    let prov = engram_core::graph::Provenance {
-                        source_type: engram_core::graph::SourceType::Derived,
-                        source_id: format!("ingest:{}", self.config.name),
-                    };
-
-                    // Create the fact node
-                    if let Ok(_nid) = graph.store_with_confidence(&fact_label, fact.confidence, &prov) {
-                        let _ = graph.set_node_type(&fact_label, "Fact");
-                        let _ = graph.set_property(&fact_label, "claim", source_text);
-                        let _ = graph.set_property(&fact_label, "status", "active");
-                        let _ = graph.set_property(&fact_label, "extracted_at", &now_ts.to_string());
-                        let _ = graph.set_property(
-                            &fact_label,
-                            "extraction_method",
-                            &format!("{:?}", fact.extraction_method),
-                        );
-                        if let Some(ref url) = fact.provenance.source_url {
-                            let _ = graph.set_property(&fact_label, "source_url", url);
-                        }
-
-                        // Check for absorbed date
-                        if let Some(ref source_text) = fact.source_text {
-                            if let Some(date) = absorbed_dates.get(source_text) {
-                                let _ = graph.set_property(&fact_label, "event_date", date);
-                            }
-                        }
-
-                        // Edge: entity -> fact node (mentioned_in)
-                        // Only link if the entity name (3+ chars) actually appears in the claim text
-                        if fact.entity.len() >= 3 {
-                            let entity_lower = fact.entity.to_lowercase();
-                            let claim_lower = source_text.to_lowercase();
-                            if claim_lower.contains(&entity_lower) {
-                                let _ = graph.relate_upsert(&fact.entity, &fact_label, "mentioned_in", &prov);
-                            }
-                        } else {
-                            // Short entity names (e.g., "EU", "UN") -- require exact word match
-                            let entity_lower = fact.entity.to_lowercase();
-                            let claim_lower = source_text.to_lowercase();
-                            // Check for word boundary match (space/punctuation before and after)
-                            let has_word_match = claim_lower.split(|c: char| !c.is_alphanumeric())
-                                .any(|word| word == entity_lower);
-                            if has_word_match {
-                                let _ = graph.relate_upsert(&fact.entity, &fact_label, "mentioned_in", &prov);
-                            }
-                        }
-
-                        // Edge: fact -> Source node (sourced_from)
-                        let source_label = if let Some(ref url) = fact.provenance.source_url {
-                            let (stype, sid) = crate::learned_trust::extract_source_from_url(url);
-                            format!("Source:{}:{}", stype, sid)
-                        } else {
-                            format!("Source:web:{}", fact.provenance.source)
-                        };
-                        // Ensure source node exists
-                        if graph.find_node_id(&source_label).ok().flatten().is_none() {
-                            let _ = graph.store_with_confidence(&source_label, 0.50, &prov);
-                            let _ = graph.set_node_type(&source_label, "Source");
-                        }
-                        let _ = graph.relate_upsert(&fact_label, &source_label, "sourced_from", &prov);
-
-                        result.facts_stored += 1;
-                    }
-                }
-            }
-        }
+        // Pass 1.5: Create Fact nodes, Document nodes, and Publisher nodes.
+        self.create_fact_and_document_nodes(&facts, result, absorbed_dates)?;
 
         // Pass 2: Create all deferred relations.
         // Auto-creates missing nodes (e.g., KB enrichment discovers "Lockheed Martin"
@@ -1133,6 +1059,184 @@ impl Pipeline {
         }
 
         Ok(())
+    }
+
+    /// Pass 1.5: Create Fact nodes, Document nodes, and Publisher (Source) nodes.
+    ///
+    /// Graph chain: Entity --[mentioned_in]--> Fact --[extracted_from]--> Document --[published_by]--> Publisher
+    fn create_fact_and_document_nodes(
+        &self,
+        facts: &[ProcessedFact],
+        result: &mut PipelineResult,
+        absorbed_dates: &HashMap<String, String>,
+    ) -> Result<(), IngestError> {
+        let mut graph = self.graph.write()
+            .map_err(|_| IngestError::Graph("graph write lock poisoned".into()))?;
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let prov = engram_core::graph::Provenance {
+            source_type: engram_core::graph::SourceType::Derived,
+            source_id: format!("ingest:{}", self.config.name),
+        };
+
+        // Collect unique documents and cache content
+        let mut created_docs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for fact in facts {
+            if let Some(ref doc_ctx) = fact.doc_context {
+                let doc_label = crate::document::doc_label(&doc_ctx.content_hash_hex);
+                if created_docs.contains(&doc_label) {
+                    continue;
+                }
+                created_docs.insert(doc_label.clone());
+                self.create_document_node(&mut graph, doc_ctx, &doc_label, &prov, now_ts);
+                self.cache_document_content(doc_ctx);
+            }
+        }
+
+        // Create Fact nodes and link to entities + documents
+        for fact in facts {
+            if let Some(ref source_text) = fact.source_text {
+                self.create_fact_node(
+                    &mut graph, fact, source_text, &prov, now_ts, absorbed_dates, result,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Create a Document node in the graph with all metadata properties.
+    fn create_document_node(
+        &self,
+        graph: &mut engram_core::graph::Graph,
+        doc_ctx: &crate::types::DocumentContext,
+        doc_label: &str,
+        prov: &engram_core::graph::Provenance,
+        now_ts: i64,
+    ) {
+        // Skip if already exists
+        if graph.find_node_id(doc_label).ok().flatten().is_some() {
+            return;
+        }
+        if graph.store_with_confidence(doc_label, 0.80, prov).is_err() {
+            return;
+        }
+        let _ = graph.set_node_type(doc_label, "Document");
+        let _ = graph.set_property(doc_label, "content_hash", &doc_ctx.content_hash_hex);
+        let _ = graph.set_property(doc_label, "mime_type", &doc_ctx.mime_type);
+        let _ = graph.set_property(doc_label, "ingested_at", &now_ts.to_string());
+        let _ = graph.set_property(doc_label, "fetched_at", &doc_ctx.fetched_at.to_string());
+        let _ = graph.set_property(
+            doc_label, "content_length", &doc_ctx.full_text.len().to_string(),
+        );
+        if let Some(ref url) = doc_ctx.url {
+            let _ = graph.set_property(doc_label, "url", url);
+        }
+        if let Some(ref fp) = doc_ctx.file_path {
+            let _ = graph.set_property(doc_label, "file_path", fp);
+        }
+        if let Some(ref title) = doc_ctx.title {
+            let _ = graph.set_property(doc_label, "title", title);
+        }
+        if let Some(ref date) = doc_ctx.doc_date {
+            let _ = graph.set_property(doc_label, "doc_date", date);
+        }
+        // Edge: Document -> Publisher (published_by)
+        let publisher_label = if let Some(ref url) = doc_ctx.url {
+            let (stype, sid) = crate::learned_trust::extract_source_from_url(url);
+            format!("Source:{}:{}", stype, sid)
+        } else {
+            format!("Source:local:{}", doc_ctx.mime_type.replace('/', "_"))
+        };
+        if graph.find_node_id(&publisher_label).ok().flatten().is_none() {
+            let _ = graph.store_with_confidence(&publisher_label, 0.50, prov);
+            let _ = graph.set_node_type(&publisher_label, "Source");
+        }
+        let _ = graph.relate_upsert(doc_label, &publisher_label, "published_by", prov);
+    }
+
+    /// Cache document content in the DocStore (if available).
+    fn cache_document_content(&self, doc_ctx: &crate::types::DocumentContext) {
+        if let Some(ref store_arc) = self.doc_store {
+            if let Ok(mut store) = store_arc.write() {
+                let mime = engram_core::storage::doc_store::MimeType::from_mime_str(
+                    &doc_ctx.mime_type,
+                );
+                if let Err(e) = store.store(doc_ctx.full_text.as_bytes(), mime) {
+                    tracing::warn!("DocStore cache failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// Create a Fact node and link it to entity (mentioned_in) and document (extracted_from).
+    fn create_fact_node(
+        &self,
+        graph: &mut engram_core::graph::Graph,
+        fact: &ProcessedFact,
+        source_text: &str,
+        prov: &engram_core::graph::Provenance,
+        now_ts: i64,
+        absorbed_dates: &HashMap<String, String>,
+        result: &mut PipelineResult,
+    ) {
+        let fact_label = make_fact_label(&fact.entity, source_text);
+
+        // Dedup: skip if fact node already exists
+        if let Ok(Some(_)) = graph.find_node_id(&fact_label) {
+            return;
+        }
+
+        if graph.store_with_confidence(&fact_label, fact.confidence, prov).is_err() {
+            return;
+        }
+        let _ = graph.set_node_type(&fact_label, "Fact");
+        let _ = graph.set_property(&fact_label, "claim", source_text);
+        let _ = graph.set_property(&fact_label, "status", "active");
+        let _ = graph.set_property(&fact_label, "extracted_at", &now_ts.to_string());
+        let _ = graph.set_property(
+            &fact_label, "extraction_method", &format!("{:?}", fact.extraction_method),
+        );
+
+        // Absorbed date from text
+        if let Some(date) = absorbed_dates.get(source_text) {
+            let _ = graph.set_property(&fact_label, "event_date", date);
+        }
+
+        // Edge: Entity -> Fact (mentioned_in)
+        link_entity_to_fact(graph, &fact.entity, &fact_label, source_text, prov);
+
+        // Edge: Fact -> Document (extracted_from)
+        if let Some(ref doc_ctx) = fact.doc_context {
+            let doc_label = crate::document::doc_label(&doc_ctx.content_hash_hex);
+            let _ = graph.relate_upsert(&fact_label, &doc_label, "extracted_from", prov);
+        }
+
+        result.facts_stored += 1;
+    }
+}
+
+/// Link an entity to its fact node via `mentioned_in` edge.
+/// Short entity names (< 3 chars) require exact word boundary match.
+fn link_entity_to_fact(
+    graph: &mut engram_core::graph::Graph,
+    entity: &str,
+    fact_label: &str,
+    source_text: &str,
+    prov: &engram_core::graph::Provenance,
+) {
+    let entity_lower = entity.to_lowercase();
+    let claim_lower = source_text.to_lowercase();
+    let matched = if entity.len() >= 3 {
+        claim_lower.contains(&entity_lower)
+    } else {
+        claim_lower.split(|c: char| !c.is_alphanumeric())
+            .any(|word| word == entity_lower)
+    };
+    if matched {
+        let _ = graph.relate_upsert(entity, fact_label, "mentioned_in", prov);
     }
 }
 
