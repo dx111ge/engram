@@ -291,6 +291,9 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Auto-configure embedder: config file takes precedence over env vars
     let mut state = engram_api::state::AppState::new(g);
 
+    // Open document content store
+    state.open_doc_store(&path);
+
     // Load config sidecar if it exists
     let config_path = {
         let mut p = path.as_os_str().to_owned();

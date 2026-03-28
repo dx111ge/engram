@@ -127,6 +127,17 @@ pub struct DocStore {
 }
 
 impl DocStore {
+    /// Create an empty placeholder DocStore (no backing files).
+    /// Use `open()` to create a real store with persistence.
+    pub fn empty() -> Self {
+        DocStore {
+            brain_path: PathBuf::new(),
+            index: HashMap::new(),
+            active_segment: 0,
+            max_segment_bytes: DEFAULT_MAX_SEGMENT_BYTES,
+        }
+    }
+
     /// Open or create a DocStore for the given brain file path.
     pub fn open(brain_path: &Path) -> io::Result<Self> {
         let mut store = DocStore {

@@ -391,6 +391,8 @@ pub struct AppState {
     /// Cached REL backend (loaded once, invalidated on config change).
     #[cfg(feature = "ingest")]
     pub cached_rel: Arc<RwLock<Option<Arc<dyn engram_ingest::RelationExtractor>>>>,
+    /// Document content store for provenance tracking.
+    pub doc_store: Arc<RwLock<engram_core::storage::doc_store::DocStore>>,
     /// Active seed enrichment sessions (interactive multi-phase flow).
     pub seed_sessions: Arc<RwLock<HashMap<String, SeedSession>>>,
     /// Active ingest review sessions (review=true mode).
@@ -444,8 +446,27 @@ impl AppState {
             cached_ner: Arc::new(RwLock::new(None)),
             #[cfg(feature = "ingest")]
             cached_rel: Arc::new(RwLock::new(None)),
+            doc_store: Arc::new(RwLock::new(
+                engram_core::storage::doc_store::DocStore::empty()
+            )),
             seed_sessions: Arc::new(RwLock::new(HashMap::new())),
             ingest_sessions: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Open the document content store for the given brain file path.
+    pub fn open_doc_store(&mut self, brain_path: &std::path::Path) {
+        match engram_core::storage::doc_store::DocStore::open(brain_path) {
+            Ok(store) => {
+                let count = store.entry_count();
+                self.doc_store = Arc::new(RwLock::new(store));
+                if count > 0 {
+                    println!("DocStore: {} cached documents", count);
+                }
+            }
+            Err(e) => {
+                eprintln!("WARNING: DocStore failed to open: {e}");
+            }
         }
     }
 

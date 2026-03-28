@@ -236,6 +236,7 @@ pub async fn ingest(
     let graph = state.graph.clone();
     let ner_cache = state.cached_ner.clone();
     let rel_cache = state.cached_rel.clone();
+    let doc_store = state.doc_store.clone();
 
     // Convert IngestItems to RawItems
     let items: Vec<engram_ingest::types::RawItem> = req.items
@@ -278,8 +279,9 @@ pub async fn ingest(
         // Review mode: run analyze (NER + RE) but don't commit to graph.
         // Store results in IngestSession for later review + selective commit.
         let result = tokio::task::spawn_blocking(move || {
-            let pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
+            let mut pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
                 relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+            pipeline.set_doc_store(doc_store.clone());
             pipeline.analyze(items)
         })
         .await
@@ -337,8 +339,9 @@ pub async fn ingest(
     // Normal mode: run pipeline and commit to graph.
     let parallel = req.parallel.unwrap_or(false);
     let result = tokio::task::spawn_blocking(move || {
-        let pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
+        let mut pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
             relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+        pipeline.set_doc_store(doc_store.clone());
         if parallel {
             pipeline.execute_parallel(items)
         } else {
@@ -396,13 +399,15 @@ pub async fn ingest_analyze(
     let graph = state.graph.clone();
     let ner_cache = state.cached_ner.clone();
     let rel_cache = state.cached_rel.clone();
+    let doc_store = state.doc_store.clone();
     let text = req.text;
 
     // Run build_pipeline + analyze in spawn_blocking to avoid tokio runtime panic
     // from reqwest::blocking (KbRelationExtractor)
     let result = tokio::task::spawn_blocking(move || {
-        let pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
+        let mut pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
             relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+        pipeline.set_doc_store(doc_store.clone());
         let items = vec![engram_ingest::types::RawItem {
             content: engram_ingest::types::Content::Text(text),
             source_url: None,
@@ -497,6 +502,7 @@ pub async fn ingest_file(
     let graph = state.graph.clone();
     let ner_cache = state.cached_ner.clone();
     let rel_cache = state.cached_rel.clone();
+    let doc_store = state.doc_store.clone();
 
     // Try to parse body as UTF-8 text
     let text = String::from_utf8(body.to_vec())
@@ -518,8 +524,9 @@ pub async fn ingest_file(
     // Run build_pipeline + execute in spawn_blocking to avoid tokio runtime panic
     let parallel = params.get("parallel").is_some_and(|v| v == "true" || v == "1");
     let result = tokio::task::spawn_blocking(move || {
-        let pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
+        let mut pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
             relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+        pipeline.set_doc_store(doc_store.clone());
         if parallel {
             pipeline.execute_parallel(items)
         } else {

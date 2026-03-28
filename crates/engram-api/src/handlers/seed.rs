@@ -17,6 +17,7 @@ pub async fn seed_start(
     let config_snap = state.config.read().unwrap().clone();
     let ner_cache = state.cached_ner.clone();
     let rel_cache = state.cached_rel.clone();
+    let doc_store = state.doc_store.clone();
 
     // Run NER + AoI detection in spawn_blocking (blocking reqwest)
     let result = tokio::task::spawn_blocking(move || {
@@ -28,11 +29,12 @@ pub async fn seed_start(
         let rel_threshold = config_snap.rel_threshold;
         let coreference_enabled = config_snap.coreference_enabled;
 
-        let pipeline = build_pipeline(
+        let mut pipeline = build_pipeline(
             graph.clone(), config, kb_endpoints, ner_model, rel_model,
             relation_templates, rel_threshold, coreference_enabled,
             ner_cache, rel_cache,
         );
+        pipeline.set_doc_store(doc_store.clone());
 
         // Run NER only (analyze)
         let items = vec![engram_ingest::types::RawItem {

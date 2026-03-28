@@ -14,7 +14,9 @@ pub async fn webhook_receive(
 
     let config = PipelineConfig::default();
     let graph = state.graph.clone();
-    let pipeline = Pipeline::new(graph, config);
+    let doc_store = state.doc_store.clone();
+    let mut pipeline = Pipeline::new(graph, config);
+    pipeline.set_doc_store(doc_store);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
