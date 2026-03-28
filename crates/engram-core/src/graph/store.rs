@@ -707,6 +707,39 @@ impl Graph {
         Ok(edges)
     }
 
+    /// Find all Document nodes connected to an entity via the provenance chain.
+    ///
+    /// Traverses: Entity --[mentioned_in]--> Fact --[extracted_from]--> Document
+    /// Returns: `[(doc_label, [(fact_label, claim_text)])]`
+    pub fn documents_for_entity(&self, entity: &str) -> Result<Vec<(String, Vec<(String, String)>)>> {
+        let edges_out = self.edges_from(entity)?;
+        let fact_labels: Vec<String> = edges_out.iter()
+            .filter(|e| e.relationship == "mentioned_in")
+            .map(|e| e.to.clone())
+            .collect();
+
+        let mut doc_map: std::collections::HashMap<String, Vec<(String, String)>> =
+            std::collections::HashMap::new();
+
+        for fact_label in &fact_labels {
+            let claim = self.get_property(fact_label, "claim")
+                .unwrap_or_default()
+                .unwrap_or_default();
+            let fact_edges = self.edges_from(fact_label)?;
+            for edge in &fact_edges {
+                if edge.relationship == "extracted_from" {
+                    doc_map.entry(edge.to.clone())
+                        .or_default()
+                        .push((fact_label.clone(), claim.clone()));
+                }
+            }
+        }
+
+        let mut result: Vec<(String, Vec<(String, String)>)> = doc_map.into_iter().collect();
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(result)
+    }
+
     /// Get all incoming edges to a node.
     pub fn edges_to(&self, label: &str) -> Result<Vec<EdgeView>> {
         let node_id = match self.find_node_id(label)? {

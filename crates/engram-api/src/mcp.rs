@@ -164,6 +164,27 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "engram_provenance",
+                "description": "Trace provenance of an entity back to source documents. Shows Entity -> Facts -> Documents -> Publishers.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "entity": { "type": "string", "description": "Entity to trace provenance for" }
+                    },
+                    "required": ["entity"]
+                }
+            },
+            {
+                "name": "engram_documents",
+                "description": "List ingested documents with metadata.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Max results (default: 20)" }
+                    }
+                }
+            },
+            {
                 "name": "engram_mesh_discover",
                 "description": "Discover mesh peers that cover a given topic. Returns peer names, coverage depth, and confidence.",
                 "inputSchema": {
@@ -541,6 +562,87 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
             engram_reason::scoring::rank_gaps(&mut gaps);
 
             Ok(serde_json::json!({ "frontier": gaps }))
+        }
+
+        "engram_provenance" => {
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
+            let entity = args["entity"].as_str().ok_or("missing entity")?;
+
+            let doc_facts = g.documents_for_entity(entity).map_err(|e| e.to_string())?;
+
+            let mut documents = Vec::new();
+            for (doc_label, facts) in &doc_facts {
+                let doc_props = g.get_properties(doc_label)
+                    .unwrap_or_default().unwrap_or_default();
+                let publisher = g.edges_from(doc_label).unwrap_or_default()
+                    .into_iter()
+                    .find(|e| e.relationship == "published_by")
+                    .map(|e| e.to);
+
+                documents.push(serde_json::json!({
+                    "document": doc_label,
+                    "title": doc_props.get("title").cloned().unwrap_or_default(),
+                    "url": doc_props.get("url").cloned().unwrap_or_default(),
+                    "doc_date": doc_props.get("doc_date").cloned().unwrap_or_default(),
+                    "ingested_at": doc_props.get("ingested_at").cloned().unwrap_or_default(),
+                    "publisher": publisher.unwrap_or_default(),
+                    "facts": facts.iter().map(|(fl, claim)| serde_json::json!({
+                        "fact": fl,
+                        "claim": claim,
+                    })).collect::<Vec<_>>()
+                }));
+            }
+
+            Ok(serde_json::json!({
+                "entity": entity,
+                "document_count": documents.len(),
+                "documents": documents
+            }))
+        }
+
+        "engram_documents" => {
+            let g = state.graph.read().map_err(|_| "graph read lock poisoned".to_string())?;
+            let limit = args.get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20) as usize;
+
+            let all_nodes = g.all_nodes().map_err(|e| e.to_string())?;
+            let mut docs = Vec::new();
+            for node in &all_nodes {
+                let node_type = g.get_node_type(&node.label).unwrap_or_default();
+                if node_type != "Document" {
+                    continue;
+                }
+                let props = g.get_properties(&node.label)
+                    .unwrap_or_default().unwrap_or_default();
+                let entity_count = g.edges_to(&node.label).unwrap_or_default()
+                    .iter()
+                    .filter(|e| e.relationship == "extracted_from")
+                    .count();
+                let publisher = g.edges_from(&node.label).unwrap_or_default()
+                    .into_iter()
+                    .find(|e| e.relationship == "published_by")
+                    .map(|e| e.to);
+
+                docs.push(serde_json::json!({
+                    "label": node.label,
+                    "title": props.get("title").cloned().unwrap_or_default(),
+                    "url": props.get("url").cloned().unwrap_or_default(),
+                    "doc_date": props.get("doc_date").cloned().unwrap_or_default(),
+                    "ingested_at": props.get("ingested_at").cloned().unwrap_or_default(),
+                    "content_length": props.get("content_length").cloned().unwrap_or_default(),
+                    "publisher": publisher.unwrap_or_default(),
+                    "fact_count": entity_count,
+                }));
+                if docs.len() >= limit {
+                    break;
+                }
+            }
+
+            Ok(serde_json::json!({
+                "count": docs.len(),
+                "documents": docs
+            }))
         }
 
         #[cfg(feature = "reason")]

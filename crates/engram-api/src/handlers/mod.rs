@@ -70,6 +70,7 @@ pub mod kb;
 pub mod seed;
 pub mod chat;
 pub mod chat_analysis;
+pub mod document;
 pub mod fact;
 
 // Re-export all public functions so `use crate::handlers::*` continues to work.

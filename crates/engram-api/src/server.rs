@@ -180,6 +180,10 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/auth/api-keys", get(auth::list_api_keys))
         .route("/auth/api-keys", post(auth::create_api_key))
         .route("/auth/api-keys/{id}", delete(auth::revoke_api_key))
+        // Document provenance endpoints
+        .route("/provenance", post(handlers::document::provenance))
+        .route("/documents", post(handlers::document::documents))
+        .route("/documents/content", post(handlers::document::document_content))
         // Chat tool endpoints (intelligence analyst workbench)
         .route("/chat/temporal_query", post(handlers::chat::temporal_query))
         .route("/chat/timeline", post(handlers::chat::timeline))

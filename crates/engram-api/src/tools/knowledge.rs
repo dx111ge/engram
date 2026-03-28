@@ -184,6 +184,33 @@ pub fn knowledge_tools() -> Vec<Value> {
         serde_json::json!({
             "type": "function",
             "function": {
+                "name": "engram_provenance",
+                "description": "Trace provenance of an entity back to source documents. Shows the chain: Entity -> Facts -> Documents -> Publishers with dates and claims.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entity": { "type": "string", "description": "Entity to trace provenance for -- use EXACT name as it appears in the graph" }
+                    },
+                    "required": ["entity"]
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "engram_documents",
+                "description": "List ingested documents with metadata (title, URL, date, entity count).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Max results (default: 20)" }
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
                 "name": "engram_sources",
                 "description": "List configured data sources with health status and usage statistics",
                 "parameters": { "type": "object", "properties": {} }
