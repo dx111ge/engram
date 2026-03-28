@@ -122,6 +122,32 @@ pub struct ConflictRecord {
     pub severity: f32,
 }
 
+// ── Document context ──
+
+/// Document-level context carried through the pipeline for provenance tracking.
+/// Shared via `Arc` across all facts extracted from the same document.
+#[derive(Debug, Clone)]
+pub struct DocumentContext {
+    /// SHA-256 hash of the full extracted text (identity key).
+    pub content_hash: [u8; 32],
+    /// Hex-encoded content hash (for labels and display).
+    pub content_hash_hex: String,
+    /// Original URL if web-sourced.
+    pub url: Option<String>,
+    /// Original file path if locally sourced.
+    pub file_path: Option<String>,
+    /// MIME type of the original content.
+    pub mime_type: String,
+    /// Full extracted text (cached in DocStore).
+    pub full_text: String,
+    /// Document title (extracted or filename-derived).
+    pub title: Option<String>,
+    /// Publication date if extractable from content/metadata.
+    pub doc_date: Option<String>,
+    /// When the content was fetched (unix seconds).
+    pub fetched_at: i64,
+}
+
 // ── Provenance ──
 
 /// Provenance tracking for ingested facts.
@@ -170,6 +196,8 @@ pub struct ProcessedFact {
     pub source_text: Option<String>,
     /// Original character span of the entity in source text.
     pub entity_span: Option<(usize, usize)>,
+    /// Document context for provenance tracking (shared across facts from same doc).
+    pub doc_context: Option<std::sync::Arc<DocumentContext>>,
 }
 
 // ── Pipeline configuration ──

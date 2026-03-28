@@ -23,6 +23,7 @@ pub mod gliner2_backend;
 pub mod confidence;
 pub mod conflict;
 pub mod dedup;
+pub mod document;
 pub mod error;
 pub mod file_source;
 pub mod gazetteer;

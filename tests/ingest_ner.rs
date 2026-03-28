@@ -329,6 +329,7 @@ fn confidence_calculation() {
         resolution: None,
         source_text: None,
         entity_span: None,
+        doc_context: None,
     };
 
     let high = calc.calculate(&high_fact, &g);
@@ -354,6 +355,7 @@ fn confidence_calculation() {
         resolution: None,
         source_text: None,
         entity_span: None,
+        doc_context: None,
     };
 
     let low = calc.calculate(&low_fact, &g);
@@ -488,6 +490,7 @@ fn content_dedup_by_hash() {
         resolution: None,
         source_text: None,
         entity_span: None,
+        doc_context: None,
     };
 
     // Same entity = duplicate
@@ -542,6 +545,7 @@ fn conflict_detection_flags_contradictions() {
         resolution: None,
         source_text: None,
         entity_span: None,
+        doc_context: None,
     };
 
     let incoming = ProcessedFact {
@@ -564,6 +568,7 @@ fn conflict_detection_flags_contradictions() {
         resolution: None,
         source_text: None,
         entity_span: None,
+        doc_context: None,
     };
 
     // ConflictDetector.check takes (&ProcessedFact, &Graph)

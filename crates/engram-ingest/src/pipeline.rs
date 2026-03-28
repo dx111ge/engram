@@ -19,6 +19,8 @@ struct ParsedSegment {
     source_url: Option<String>,
     fetched_at: i64,
     metadata: HashMap<String, String>,
+    /// Document context for provenance (shared via Arc across facts from same doc).
+    doc_context: Option<std::sync::Arc<crate::types::DocumentContext>>,
 }
 
 /// Snap a byte index to the nearest valid UTF-8 char boundary (rounding down).
@@ -327,6 +329,7 @@ impl Pipeline {
                         resolution: entity.resolved_to.map(crate::types::ResolutionResult::Matched),
                         source_text: Some(snippet),
                         entity_span: Some(entity.span),
+                        doc_context: seg.doc_context.clone(),
                     });
 
                     let _ = eidx; // suppress unused warning
@@ -360,6 +363,7 @@ impl Pipeline {
                     resolution: None,
                     source_text: None,
                     entity_span: None,
+                    doc_context: seg.doc_context.clone(),
                 });
             }
         }
@@ -510,6 +514,7 @@ impl Pipeline {
                                     .map(crate::types::ResolutionResult::Matched),
                                 source_text: Some(snippet),
                                 entity_span: Some(entity.span),
+                                doc_context: None,
                             }
                         })
                         .collect::<Vec<_>>()
@@ -553,6 +558,7 @@ impl Pipeline {
                         resolution: None,
                         source_text: None,
                         entity_span: None,
+                        doc_context: None,
                     }
                 })
                 .collect()
@@ -722,6 +728,14 @@ impl Pipeline {
                 }
             };
 
+            // Build document context from the full concatenated text
+            let full_text = texts.join("\n");
+            let doc_ctx = if !full_text.trim().is_empty() {
+                Some(crate::document::build_doc_context(item, &full_text))
+            } else {
+                None
+            };
+
             for text in texts {
                 if !text.trim().is_empty() {
                     segments.push(ParsedSegment {
@@ -730,6 +744,7 @@ impl Pipeline {
                         source_url: item.source_url.clone(),
                         fetched_at: item.fetched_at,
                         metadata: item.metadata.clone(),
+                        doc_context: doc_ctx.clone(),
                     });
                 }
             }
@@ -1278,6 +1293,7 @@ mod tests {
                 resolution: None,
                 source_text: None,
                 entity_span: None,
+                doc_context: None,
             },
             ProcessedFact {
                 entity: "Acme Corp".into(),
@@ -1306,6 +1322,7 @@ mod tests {
                 resolution: None,
                 source_text: None,
                 entity_span: None,
+                doc_context: None,
             },
         ];
 

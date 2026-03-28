@@ -13,6 +13,7 @@ pub mod learning;
 pub mod events;
 
 pub use storage::brain_file::BrainFile;
+pub use storage::doc_store::{DocStore, MimeType as DocMimeType, ContentHash};
 pub use storage::edge::Edge;
 pub use storage::node::Node;
 pub use storage::error::StorageError;

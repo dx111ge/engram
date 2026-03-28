@@ -1,4 +1,5 @@
 pub mod brain_file;
+pub mod doc_store;
 pub mod edge;
 pub mod error;
 pub mod header;

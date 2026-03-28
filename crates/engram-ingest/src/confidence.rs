@@ -141,6 +141,7 @@ mod tests {
             resolution: None,
             source_text: None,
             entity_span: None,
+            doc_context: None,
         }
     }
 
