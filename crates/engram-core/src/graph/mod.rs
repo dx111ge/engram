@@ -2064,4 +2064,60 @@ then flag(node, "low confidence")
         let results = g.autocomplete("", 10).unwrap();
         assert!(!results.is_empty());
     }
+
+    #[test]
+    fn source_confidence_cascades_to_facts() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        // Create a Document node
+        g.store_with_confidence("Doc:test123", 0.80, &prov).unwrap();
+        g.set_node_type("Doc:test123", "Document").unwrap();
+
+        // Create a Fact node with extraction_confidence
+        g.store_with_confidence("Russia | deployed | drones", 0.68, &prov).unwrap(); // 0.85 * 0.80
+        g.set_node_type("Russia | deployed | drones", "Fact").unwrap();
+        g.set_property("Russia | deployed | drones", "extraction_confidence", "0.85").unwrap();
+        g.set_property("Russia | deployed | drones", "confidence_source", "llm").unwrap();
+
+        // Link fact to document
+        g.relate("Russia | deployed | drones", "Doc:test123", "extracted_from", &prov).unwrap();
+
+        // Change document confidence
+        g.reinforce_confirm("Doc:test123", &prov).unwrap();
+        let doc_conf = g.get_node("Doc:test123").unwrap().unwrap().confidence;
+        assert!(doc_conf > 0.80); // should have been boosted
+
+        // Check fact confidence was recalculated
+        let fact_conf = g.get_node("Russia | deployed | drones").unwrap().unwrap().confidence;
+        let expected = 0.85 * doc_conf;
+        assert!((fact_conf - expected).abs() < 0.01, "fact conf {} should be ~{}", fact_conf, expected);
+    }
+
+    #[test]
+    fn human_override_not_cascaded() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store_with_confidence("Doc:test456", 0.80, &prov).unwrap();
+        g.set_node_type("Doc:test456", "Document").unwrap();
+
+        g.store_with_confidence("Putin | met | Biden", 0.95, &prov).unwrap();
+        g.set_node_type("Putin | met | Biden", "Fact").unwrap();
+        g.set_property("Putin | met | Biden", "extraction_confidence", "0.85").unwrap();
+        g.set_property("Putin | met | Biden", "confidence_source", "human").unwrap();
+
+        g.relate("Putin | met | Biden", "Doc:test456", "extracted_from", &prov).unwrap();
+
+        // Change document confidence
+        g.reinforce_confirm("Doc:test456", &prov).unwrap();
+
+        // Human-overridden fact should NOT be changed
+        let fact_conf = g.get_node("Putin | met | Biden").unwrap().unwrap().confidence;
+        assert!((fact_conf - 0.95).abs() < 0.01, "human fact should stay at 0.95, got {}", fact_conf);
+    }
 }

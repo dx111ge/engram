@@ -228,7 +228,7 @@ impl KbRelationExtractor {
             let doc_label = crate::document::doc_label(&hash_hex);
 
             let claims = crate::fact_extract::extract_claims(
-                &self.client, &config, &result.snippet, entity_labels,
+                &self.client, &config, &result.snippet, entity_labels, 0,
             );
             if claims.is_empty() {
                 continue;

@@ -208,3 +208,60 @@ pub async fn document_content(
         mime_type: mime.as_str().to_string(),
     }))
 }
+
+/// POST /documents/passage -- return a specific chunk from a document.
+///
+/// Accepts `{ document, chunk_index }`. Re-chunks the document with the same
+/// parameters used during ingestion (3000 chars) and returns the specified chunk.
+/// Falls back to full content if chunk_index is missing or out of range.
+pub async fn document_passage(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> ApiResult<DocumentContentResponse> {
+    let doc_label = req["document"].as_str()
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "missing 'document' field".to_string()))?;
+    let chunk_index = req["chunk_index"].as_u64().map(|v| v as usize);
+
+    let g = state.graph.read().map_err(|_| read_lock_err())?;
+    let props = g.get_properties(doc_label)
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("document not found: {doc_label}")))?;
+
+    let content_hash_hex = props.get("content_hash")
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "document has no content_hash".to_string()))?;
+
+    let hash_bytes: Vec<u8> = (0..content_hash_hex.len())
+        .step_by(2)
+        .filter_map(|i| u8::from_str_radix(&content_hash_hex[i..i+2], 16).ok())
+        .collect();
+
+    if hash_bytes.len() != 32 {
+        return Err(api_err(StatusCode::INTERNAL_SERVER_ERROR, "invalid content hash".to_string()));
+    }
+
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&hash_bytes);
+
+    let store = state.doc_store.read().map_err(|_| read_lock_err())?;
+    let (content_bytes, mime) = store.load(&hash)
+        .map_err(|e| api_err(StatusCode::NOT_FOUND, format!("content not cached: {e}")))?;
+
+    let full_content = String::from_utf8(content_bytes)
+        .unwrap_or_else(|_| "[binary content]".to_string());
+
+    // Extract the requested chunk
+    let content = if let Some(idx) = chunk_index {
+        let chunks = engram_ingest::fact_extract::chunk_text(&full_content, 3000);
+        chunks.into_iter().nth(idx).unwrap_or(full_content)
+    } else {
+        full_content
+    };
+
+    Ok(Json(DocumentContentResponse {
+        label: doc_label.to_string(),
+        title: props.get("title").cloned().unwrap_or_default(),
+        url: props.get("url").cloned().unwrap_or_default(),
+        content,
+        mime_type: mime.as_str().to_string(),
+    }))
+}

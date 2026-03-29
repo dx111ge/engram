@@ -29,6 +29,8 @@ impl Graph {
                 new_confidence: new_conf,
             });
             self.check_threshold_crossing(nid, label, old_conf, new_conf);
+            // Cascade to facts if this is a Document/Source
+            let _ = self.cascade_source_confidence(label);
         }
         Ok(true)
     }
@@ -62,6 +64,8 @@ impl Graph {
                 new_confidence: new_conf,
             });
             self.check_threshold_crossing(nid, label, old_conf, new_conf);
+            // Cascade to facts if this is a Document/Source
+            let _ = self.cascade_source_confidence(label);
         }
         Ok(true)
     }
@@ -407,5 +411,62 @@ impl Graph {
             });
         }
         Ok(true)
+    }
+
+    /// Cascade confidence changes from a Document/Source node to all facts extracted from it.
+    /// fact_confidence = extraction_confidence * source_confidence.
+    /// Skips facts where confidence_source is "human" (manually overridden).
+    pub fn cascade_source_confidence(&mut self, source_label: &str) -> Result<u32> {
+        // Check if this is a Document or Source node
+        let node_type = self.get_node_type(source_label).unwrap_or_default().to_lowercase();
+        if node_type != "document" && node_type != "source" {
+            return Ok(0);
+        }
+
+        let source_conf = match self.get_node(source_label)? {
+            Some(n) => n.confidence,
+            None => return Ok(0),
+        };
+
+        // Find all facts linked via "extracted_from" (incoming edges to this document)
+        let incoming = self.edges_to(source_label).unwrap_or_default();
+        let fact_labels: Vec<String> = incoming.into_iter()
+            .filter(|e| e.relationship == "extracted_from")
+            .map(|e| e.from)
+            .collect();
+
+        let mut updated = 0u32;
+        for fact_label in &fact_labels {
+            // Skip human-overridden facts
+            if let Ok(Some(props)) = self.get_properties(fact_label) {
+                if props.get("confidence_source").map(|s| s.as_str()) == Some("human") {
+                    continue;
+                }
+                // Get extraction_confidence
+                let ext_conf: f32 = props.get("extraction_confidence")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.60);
+
+                let new_conf = ext_conf * source_conf;
+                if let Some(slot) = self.find_slot_by_label(fact_label)? {
+                    let old_conf = self.brain.read_node(slot)?.confidence;
+                    if (old_conf - new_conf).abs() > f32::EPSILON {
+                        let nid = self.brain.read_node(slot)?.id;
+                        self.brain.update_node_field(slot, |n| {
+                            n.confidence = new_conf;
+                            n.updated_at = current_timestamp();
+                        })?;
+                        self.emit(GraphEvent::FactUpdated {
+                            node_id: nid,
+                            label: Arc::from(fact_label.as_str()),
+                            old_confidence: old_conf,
+                            new_confidence: new_conf,
+                        });
+                        updated += 1;
+                    }
+                }
+            }
+        }
+        Ok(updated)
     }
 }

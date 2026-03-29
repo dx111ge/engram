@@ -1241,9 +1241,9 @@ impl Pipeline {
             let chunks = crate::fact_extract::chunk_text(text, 3000);
 
             let mut all_claims = Vec::new();
-            for chunk in &chunks {
+            for (idx, chunk) in chunks.iter().enumerate() {
                 let claims = crate::fact_extract::extract_claims(
-                    &client, &config, chunk, entity_names,
+                    &client, &config, chunk, entity_names, idx,
                 );
                 all_claims.extend(claims);
             }
