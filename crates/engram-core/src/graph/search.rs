@@ -248,6 +248,44 @@ impl Graph {
         Ok(results)
     }
 
+    /// Prefix-based autocomplete: returns active nodes whose label starts with `prefix` (case-insensitive).
+    /// Priority: exact match > starts_with > word starts_with > contains, up to `limit`.
+    pub fn autocomplete(&self, prefix: &str, limit: usize) -> Result<Vec<NodeSearchResult>> {
+        let (node_count, _) = self.brain.stats();
+        let prefix_lower = prefix.to_lowercase();
+        let mut exact = Vec::new();
+        let mut starts = Vec::new();
+        let mut word_starts = Vec::new();
+        let mut contains = Vec::new();
+
+        for slot in 0..node_count {
+            let node = self.brain.read_node(slot)?;
+            if !node.is_active() { continue; }
+            let label = self.full_label(slot)?;
+            let label_lower = label.to_lowercase();
+            let hit = NodeSearchResult {
+                slot, node_id: node.id, label, confidence: node.confidence, score: 0.0,
+            };
+            if label_lower == prefix_lower {
+                exact.push(NodeSearchResult { score: 1.0, ..hit });
+            } else if label_lower.starts_with(&prefix_lower) {
+                starts.push(NodeSearchResult { score: 0.9, ..hit });
+            } else if label_lower.split_whitespace().any(|w| w.starts_with(&prefix_lower)) {
+                if word_starts.len() < limit { word_starts.push(NodeSearchResult { score: 0.7, ..hit }); }
+            } else if label_lower.contains(&prefix_lower) {
+                if contains.len() < limit { contains.push(NodeSearchResult { score: 0.5, ..hit }); }
+            }
+        }
+
+        // Merge in priority order
+        let mut results = exact;
+        results.append(&mut starts);
+        results.append(&mut word_starts);
+        results.append(&mut contains);
+        results.truncate(limit);
+        Ok(results)
+    }
+
     /// Iterate all active nodes, returning (label, node_type_id, confidence, memory_tier) for each.
     pub fn all_nodes(&self) -> Result<Vec<NodeSnapshot>> {
         let (node_count, _) = self.brain.stats();

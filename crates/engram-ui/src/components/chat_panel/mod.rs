@@ -214,8 +214,15 @@ pub fn ChatPanel(
                 });
             });
 
-            if !prefill_js.is_empty() {
-                let _ = js_sys::eval(&prefill_js);
+            // Inject shared JS helpers and wire up autocomplete
+            help::ensure_card_helpers();
+            let ac_fields = tool_cards::autocomplete_fields(detected.tool);
+            if !ac_fields.is_empty() || !prefill_js.is_empty() {
+                let ac_js: String = ac_fields.iter()
+                    .map(|(id, endpoint)| format!("__ec_suggest('{}','{}','label');", id, endpoint))
+                    .collect();
+                let code = format!("requestAnimationFrame(function(){{{}{}}});", prefill_js, ac_js);
+                let _ = js_sys::eval(&code);
             }
 
             set_sending.set(false);
@@ -478,7 +485,8 @@ pub fn ChatPanel(
                             display_html: Some(card_html),
                         });
                     });
-                    // Wire up autocomplete from tool_cards definitions
+                    // Inject shared JS helpers and wire up autocomplete
+                    help::ensure_card_helpers();
                     let ac_fields = tool_cards::autocomplete_fields(&tool_name);
                     if !ac_fields.is_empty() {
                         let ac_js: String = ac_fields.iter()
@@ -747,8 +755,19 @@ pub fn ChatPanel(
                         _ => Err(format!("Unknown tool: {}", tool)),
                     };
 
+                    // Update inline result feedback on the card
+                    let result_id = format!("tc-{}-result", tool);
+                    let btn_id = format!("tc-{}-btn", tool);
                     match result {
                         Ok((card_tool, json_str)) => {
+                            // Show inline success on the card
+                            let _ = js_sys::eval(&format!(
+                                "var r=document.getElementById('{}');if(r){{r.style.display='block';\
+                                 r.style.background='rgba(102,187,106,0.15)';r.style.color='#66bb6a';\
+                                 r.innerHTML='<i class=\"fa-solid fa-check\"></i> Done';}}\
+                                 var b=document.getElementById('{}');if(b){{b.disabled=true;b.style.opacity='0.5';}}",
+                                result_id, btn_id,
+                            ));
                             let card_html = cards::render_tool_card(&card_tool, &json_str);
                             dispatch_graph_data(&card_tool, &json_str);
                             set_messages.update(|msgs| {
@@ -758,12 +777,55 @@ pub fn ChatPanel(
                                 }
                                 msgs.push(ChatMessage {
                                     role: ChatRole::ToolResult,
-                                    content: if json_str.len() > 500 { format!("{}...", &json_str[..500]) } else { json_str },
+                                    content: if json_str.len() > 500 { format!("{}...", &json_str[..500]) } else { json_str.clone() },
                                     display_html: Some(card_html),
                                 });
                             });
+
+                            // After successful store: offer a relate card to connect the new entity
+                            if tool == "store" {
+                                let entity_name = params.get("entity").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                if !entity_name.is_empty() {
+                                    if let Some(relate_html) = tool_cards::generate_tool_card("relate") {
+                                        set_messages.update(|msgs| {
+                                            msgs.push(ChatMessage {
+                                                role: ChatRole::System,
+                                                content: format!("Connect {} to make it visible in the graph:", entity_name),
+                                                display_html: None,
+                                            });
+                                            msgs.push(ChatMessage {
+                                                role: ChatRole::Assistant,
+                                                content: "Tool: relate".to_string(),
+                                                display_html: Some(relate_html),
+                                            });
+                                        });
+                                        // Pre-fill "from" field and wire up autocomplete
+                                        help::ensure_card_helpers();
+                                        let ac_fields = tool_cards::autocomplete_fields("relate");
+                                        let escaped = entity_name.replace('\'', "\\'");
+                                        let ac_js: String = ac_fields.iter()
+                                            .map(|(id, endpoint)| format!("__ec_suggest('{}','{}','label');", id, endpoint))
+                                            .collect();
+                                        let code = format!(
+                                            "setTimeout(function(){{\
+                                             var el=document.getElementById('tc-relate-from');if(el)el.value='{}';\
+                                             {}}},100);",
+                                            escaped, ac_js,
+                                        );
+                                        let _ = js_sys::eval(&code);
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
+                            // Show inline error on the card
+                            let escaped = e.replace('\'', "\\'").replace('<', "&lt;");
+                            let _ = js_sys::eval(&format!(
+                                "var r=document.getElementById('{}');if(r){{r.style.display='block';\
+                                 r.style.background='rgba(239,83,80,0.15)';r.style.color='#ef5350';\
+                                 r.innerHTML='<i class=\"fa-solid fa-xmark\"></i> {}'}}",
+                                result_id, escaped,
+                            ));
                             set_messages.update(|msgs| {
                                 if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) {
                                     msgs.remove(pos);

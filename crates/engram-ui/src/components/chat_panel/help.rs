@@ -80,7 +80,7 @@ const KNOWLEDGE_TOOLS: [HelpTool; 10] = [
     HelpTool { name: "relate", description: "Create relationship", example: "Connect Putin to Russia as president", is_write: true },
     HelpTool { name: "reinforce", description: "Boost confidence", example: "Reinforce the claim about sanctions", is_write: true },
     HelpTool { name: "correct", description: "Mark as wrong", example: "Correct the outdated entry for...", is_write: true },
-    HelpTool { name: "delete", description: "Soft-delete entity", example: "Delete the duplicate entry for...", is_write: true },
+    HelpTool { name: "delete", description: "Delete entity", example: "Delete the duplicate entry for...", is_write: true },
     HelpTool { name: "prove", description: "Find evidence for a claim", example: "Prove that X is connected to Y", is_write: false },
 ];
 
@@ -245,7 +245,7 @@ fn help_reporting() -> String {
 
 /// Inject shared JS helper functions for card XHR and autocomplete.
 /// Only injected once (checks for window.__engram_card_helpers).
-fn ensure_card_helpers() {
+pub(super) fn ensure_card_helpers() {
     let _ = js_sys::eval(
         "if(!window.__engram_card_helpers){window.__engram_card_helpers=true;\
          window.__ec_auth=function(){var a=sessionStorage.getItem('engram_auth');\
@@ -263,11 +263,14 @@ fn ensure_card_helpers() {
            'position:absolute;top:100%;left:0;right:0;z-index:100;max-height:150px;overflow-y:auto;\
            background:var(--bg-tertiary,#232730);border:1px solid var(--border,#2d3139);border-radius:4px;\
            display:none;';wrap.appendChild(dd);\
-           inp.addEventListener('input',function(){var v=inp.value;if(v.length<2){dd.style.display='none';return;}\
-           var x=new XMLHttpRequest();x.open('POST',endpoint,false);x.setRequestHeader('Content-Type','application/json');\
+           inp.addEventListener('input',function(){var v=inp.value;if(v.length<1){dd.style.display='none';return;}\
+           var x=new XMLHttpRequest();var isGet=endpoint.indexOf('/config/')===0;\
+           x.open(isGet?'GET':'POST',endpoint,false);x.setRequestHeader('Content-Type','application/json');\
            var t=__ec_auth();if(t)x.setRequestHeader('Authorization','Bearer '+t);\
-           x.send(JSON.stringify({query:v,limit:8}));dd.innerHTML='';dd.style.display='none';\
+           if(isGet)x.send();else x.send(JSON.stringify({query:v,limit:8}));dd.innerHTML='';dd.style.display='none';\
            if(x.status===200){var d=JSON.parse(x.responseText);var items=d.results||d.types||d;\
+           if(isGet&&Array.isArray(items)){var vl=v.toLowerCase();items=items.filter(function(it){\
+           var s=typeof it==='string'?it:(it[field]||it.label||it.name||'');return s.toLowerCase().indexOf(vl)>=0});}\
            if(Array.isArray(items)&&items.length>0){items.forEach(function(it){\
            var label=typeof it==='string'?it:(it[field]||it.label||it.name||JSON.stringify(it));\
            var opt=document.createElement('div');opt.textContent=label;\
@@ -276,6 +279,13 @@ fn ensure_card_helpers() {
            opt.onmouseleave=function(){this.style.background='';this.style.color='var(--text,#c9ccd3)'};\
            opt.onclick=function(){inp.value=label;dd.style.display='none'};dd.appendChild(opt)});\
            dd.style.display='block'}}});inp.addEventListener('blur',function(){setTimeout(function(){dd.style.display='none'},200)})};\
+         window.__ec_confirm_delete=function(btnId){var btn=document.getElementById(btnId);\
+           if(!btn)return true;if(btn.dataset.confirmed){delete btn.dataset.confirmed;return true;}\
+           btn.dataset.confirmed='1';var orig=btn.innerHTML;var origBg=btn.style.background;var origClr=btn.style.color;\
+           btn.innerHTML='<i class=\\'fa-solid fa-triangle-exclamation\\'></i> Click again to confirm';\
+           btn.style.background='var(--warning,#f0ad4e)';btn.style.color='#1a1a2e';\
+           setTimeout(function(){if(btn&&btn.dataset.confirmed){delete btn.dataset.confirmed;\
+           btn.innerHTML=orig;btn.style.background=origBg;btn.style.color=origClr;}},3000);return false};\
         }"
     );
 }

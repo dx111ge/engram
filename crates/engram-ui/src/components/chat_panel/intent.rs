@@ -19,6 +19,43 @@ pub fn detect_intent(text: &str) -> ChatIntent {
     let lower = text.to_lowercase();
     let trimmed = text.trim();
 
+    // ── Slash commands: /tool [args] ──
+    if lower.starts_with('/') {
+        let without_slash = &trimmed[1..];
+        let (cmd, rest) = without_slash.split_once(' ').unwrap_or((without_slash, ""));
+        let rest = rest.trim().to_string();
+        let tool = match cmd.to_lowercase().as_str() {
+            "store" | "add" => "store",
+            "relate" | "connect" | "link" => "relate",
+            "query" | "explore" => "query",
+            "search" | "find" => "search",
+            "explain" => "explain",
+            "similar" => "similar",
+            "compare" => "compare",
+            "delete" | "remove" => "delete",
+            "correct" | "fix" => "correct",
+            "reinforce" | "boost" => "reinforce",
+            "timeline" => "timeline",
+            "provenance" | "sources" => "provenance",
+            "documents" | "docs" => "documents",
+            "most_connected" | "top" => "most_connected",
+            "shortest_path" | "path" => "shortest_path",
+            "prove" | "evidence" => "prove",
+            "gaps" | "gap" => "gaps",
+            "isolated" => "isolated",
+            "ingest" | "import" => "ingest",
+            "help" => "help",
+            _ => "search",  // unknown slash commands fall back to search
+        };
+        // For two-entity tools, split on " to " / " and " / " vs "
+        let (prefill, prefill2) = if matches!(tool, "relate" | "compare" | "shortest_path" | "prove") {
+            split_two_entities(&rest)
+        } else {
+            (rest, String::new())
+        };
+        return ChatIntent { tool, prefill, prefill2 };
+    }
+
     // ── Compound keywords first (longest match wins) ──
 
     // Category commands (multi-tool)
@@ -418,5 +455,75 @@ mod tests {
 
         let i = detect_intent("documents");
         assert_eq!(i.tool, "documents");
+    }
+
+    #[test]
+    fn test_slash_commands() {
+        let i = detect_intent("/store");
+        assert_eq!(i.tool, "store");
+        assert_eq!(i.prefill, "");
+
+        let i = detect_intent("/store Berlin");
+        assert_eq!(i.tool, "store");
+        assert_eq!(i.prefill, "Berlin");
+
+        let i = detect_intent("/search Ukraine");
+        assert_eq!(i.tool, "search");
+        assert_eq!(i.prefill, "Ukraine");
+
+        let i = detect_intent("/explain Putin");
+        assert_eq!(i.tool, "explain");
+        assert_eq!(i.prefill, "Putin");
+
+        let i = detect_intent("/delete NATO");
+        assert_eq!(i.tool, "delete");
+        assert_eq!(i.prefill, "NATO");
+
+        let i = detect_intent("/relate Putin to Russia");
+        assert_eq!(i.tool, "relate");
+        assert_eq!(i.prefill, "Putin");
+        assert_eq!(i.prefill2, "Russia");
+
+        let i = detect_intent("/compare NATO and CSTO");
+        assert_eq!(i.tool, "compare");
+        assert_eq!(i.prefill, "NATO");
+        assert_eq!(i.prefill2, "CSTO");
+
+        let i = detect_intent("/timeline");
+        assert_eq!(i.tool, "timeline");
+
+        let i = detect_intent("/provenance Russia");
+        assert_eq!(i.tool, "provenance");
+        assert_eq!(i.prefill, "Russia");
+    }
+
+    #[test]
+    fn test_slash_unknown_falls_back_to_search() {
+        let i = detect_intent("/foobar something");
+        assert_eq!(i.tool, "search");
+        assert_eq!(i.prefill, "something");
+    }
+
+    #[test]
+    fn test_slash_aliases() {
+        let i = detect_intent("/add Berlin");
+        assert_eq!(i.tool, "store");
+
+        let i = detect_intent("/connect A to B");
+        assert_eq!(i.tool, "relate");
+
+        let i = detect_intent("/find Ukraine");
+        assert_eq!(i.tool, "search");
+
+        let i = detect_intent("/remove Putin");
+        assert_eq!(i.tool, "delete");
+
+        let i = detect_intent("/docs");
+        assert_eq!(i.tool, "documents");
+
+        let i = detect_intent("/path A to B");
+        assert_eq!(i.tool, "shortest_path");
+        assert_eq!(i.prefill, "A");
+        assert_eq!(i.prefill2, "B");
     }
 }

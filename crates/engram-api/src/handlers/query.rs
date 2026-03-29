@@ -129,6 +129,41 @@ pub async fn search(
     }))
 }
 
+// ── POST /autocomplete ── Prefix-based label matching for autocomplete widgets
+
+pub async fn autocomplete(
+    State(state): State<AppState>,
+    Json(req): Json<SearchRequest>,
+) -> ApiResult<SearchResponse> {
+    let g = state.graph.read().map_err(|_| read_lock_err())?;
+    let limit = req.limit.unwrap_or(8);
+
+    let results = g
+        .autocomplete(&req.query, limit)
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let total = results.len();
+    let hits: Vec<NodeHit> = results
+        .into_iter()
+        .map(|r| {
+            let node_type = g.get_node_type(&r.label);
+            NodeHit {
+                node_id: r.node_id,
+                label: r.label,
+                confidence: r.confidence,
+                node_type,
+                score: Some(r.score),
+                depth: None,
+            }
+        })
+        .collect();
+
+    Ok(Json(SearchResponse {
+        results: hits,
+        total,
+    }))
+}
+
 // ── GET /node/{label} ──
 
 pub async fn get_node(

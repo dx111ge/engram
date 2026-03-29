@@ -182,7 +182,11 @@ pub fn autocomplete_fields(tool_name: &str) -> Vec<(&'static str, &'static str)>
         "provenance" => &["tc-provenance-e"],
         _ => &[],
     };
-    let mut result: Vec<(&str, &str)> = entity_fields.iter().map(|id| (*id, "/search")).collect();
+    let mut result: Vec<(&str, &str)> = entity_fields.iter().map(|id| (*id, "/autocomplete")).collect();
+    // Node type autocomplete
+    if tool_name == "store" {
+        result.push(("tc-store-type", "/config/node-types"));
+    }
     // Relationship type autocomplete
     if tool_name == "relate" {
         result.push(("tc-relate-rel", "/config/relation-types"));
@@ -279,23 +283,37 @@ fn render_card(def: &ToolCard) -> String {
             ));
         }
     }
-    // Confirm dialog for write operations
-    if def.confirm {
-        onclick.push_str(&format!("if(!confirm('Execute {}?'))return;", html_escape(def.title)));
-    }
     // Build params object and dispatch
     let param_entries: Vec<String> = def.fields.iter().map(|f| {
         let key = f.id.rsplit('-').next().unwrap_or(f.id);
         format!("{}:{}", key, key)
     }).collect();
-    onclick.push_str(&format!(
+    let dispatch_js = format!(
         "window.dispatchEvent(new CustomEvent('engram-run-tool',{{detail:JSON.stringify({{tool:'{}',params:{{{}}}}})}}))",
         def.tool, param_entries.join(","),
+    );
+
+    // For delete: two-click confirmation via shared helper
+    if def.tool == "delete" {
+        onclick.push_str(&format!(
+            "if(window.__ec_confirm_delete&&!window.__ec_confirm_delete('tc-{}-btn'))return;{}",
+            def.tool, dispatch_js,
+        ));
+    } else {
+        onclick.push_str(&dispatch_js);
+    }
+
+    // Result feedback area (hidden until action completes)
+    let result_id = format!("tc-{}-result", def.tool);
+    html.push_str(&format!(
+        "<div id=\"{}\" style=\"display:none;padding:0.3rem 0.5rem;font-size:0.75rem;\
+         border-radius:4px;margin-bottom:0.3rem;text-align:center;\"></div>",
+        result_id,
     ));
 
     html.push_str(&format!(
-        "<button onclick=\"{}\" style=\"{}\"><i class=\"{}\"></i> {}</button>",
-        onclick, btn_style, def.icon, html_escape(def.button_label),
+        "<button id=\"tc-{}-btn\" onclick=\"{}\" style=\"{}\"><i class=\"{}\"></i> {}</button>",
+        def.tool, onclick, btn_style, def.icon, html_escape(def.button_label),
     ));
 
     html.push_str("</div></div></div>");

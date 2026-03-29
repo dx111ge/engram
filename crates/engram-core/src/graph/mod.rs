@@ -1962,4 +1962,106 @@ then flag(node, "low confidence")
         let slot = g.find_edge_slot("Alice", "Acme", "related_to").unwrap();
         assert!(slot.is_none());
     }
+
+    #[test]
+    fn autocomplete_exact_match_first() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("Russia", &prov).unwrap();
+        g.store("Russia Ukraine war", &prov).unwrap();
+        g.store("Russian Academy", &prov).unwrap();
+
+        let results = g.autocomplete("Russia", 10).unwrap();
+        assert!(results.len() >= 2);
+        // Exact match first
+        assert_eq!(results[0].label, "Russia");
+        assert_eq!(results[0].score, 1.0);
+        // starts_with matches next
+        assert!(results[1].score >= 0.7);
+    }
+
+    #[test]
+    fn autocomplete_prefix_match() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("Putin", &prov).unwrap();
+        g.store("Vladimir Putin", &prov).unwrap();
+        g.store("Republic of Pudding", &prov).unwrap();
+
+        let results = g.autocomplete("Pu", 10).unwrap();
+        // "Putin" starts with "Pu" -> score 0.9, should be first
+        assert_eq!(results[0].label, "Putin");
+        assert_eq!(results[0].score, 0.9);
+        // "Vladimir Putin" has word "Putin" starting with "Pu" -> score 0.7
+        let vp = results.iter().find(|r| r.label == "Vladimir Putin").unwrap();
+        assert_eq!(vp.score, 0.7);
+    }
+
+    #[test]
+    fn autocomplete_case_insensitive() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("NATO", &prov).unwrap();
+        g.store("National Guard", &prov).unwrap();
+
+        let results = g.autocomplete("nat", 10).unwrap();
+        assert!(results.len() >= 2);
+        let labels: Vec<&str> = results.iter().map(|r| r.label.as_str()).collect();
+        assert!(labels.contains(&"NATO"));
+        assert!(labels.contains(&"National Guard"));
+    }
+
+    #[test]
+    fn autocomplete_respects_limit() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        for i in 0..20 {
+            g.store(&format!("Test Entity {}", i), &prov).unwrap();
+        }
+
+        let results = g.autocomplete("Test", 5).unwrap();
+        assert_eq!(results.len(), 5);
+    }
+
+    #[test]
+    fn autocomplete_no_deleted_nodes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("Berlin", &prov).unwrap();
+        g.store("Bern", &prov).unwrap();
+        g.delete("Berlin", &prov).unwrap();
+
+        let results = g.autocomplete("Ber", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].label, "Bern");
+    }
+
+    #[test]
+    fn autocomplete_empty_prefix() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.brain");
+        let mut g = Graph::create(&path).unwrap();
+        let prov = test_provenance();
+
+        g.store("Alpha", &prov).unwrap();
+
+        // Empty prefix should match everything
+        let results = g.autocomplete("", 10).unwrap();
+        assert!(!results.is_empty());
+    }
 }
