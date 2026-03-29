@@ -59,8 +59,11 @@ pub(super) fn render_info_tab(detail: NodeResponse) -> leptos::prelude::AnyView 
         let status = get_prop("status");
 
         // User-visible props: exclude internal keys
+        let source_passage = get_prop("source_passage");
         let internal_keys = ["claim", "event_date", "source_url", "extraction_method", "status",
-                             "kb_id", "ingest_source"];
+                             "kb_id", "ingest_source", "source_passage", "chunk_index",
+                             "subject", "predicate", "object", "extraction_confidence",
+                             "confidence_source"];
         let user_props: Vec<(String, String)> = all_props
             .iter()
             .filter(|(k, _)| !k.starts_with('_') && !internal_keys.contains(&k.as_str()))
@@ -81,9 +84,10 @@ pub(super) fn render_info_tab(detail: NodeResponse) -> leptos::prelude::AnyView 
                 </div>
 
                 // Status badge
-                {status.map(|s| {
+                {status.clone().map(|s| {
                     let (badge_color, badge_bg) = match s.to_lowercase().as_str() {
                         "active" | "confirmed" => ("#66bb6a", "rgba(102,187,106,0.15)"),
+                        "pending" => ("#f0ad4e", "rgba(240,173,78,0.15)"),
                         "disputed" | "contested" => ("#ffa726", "rgba(255,167,38,0.15)"),
                         "debunked" | "retracted" => ("#ef5350", "rgba(239,83,80,0.15)"),
                         _ => ("#78909c", "rgba(120,144,156,0.15)"),
@@ -97,6 +101,20 @@ pub(super) fn render_info_tab(detail: NodeResponse) -> leptos::prelude::AnyView 
                     }
                 })}
 
+                // Pending fact banner
+                {status.map(|s| {
+                    if s.to_lowercase() == "pending" {
+                        view! {
+                            <div style="margin-bottom: 0.75rem; padding: 0.5rem 0.75rem; background: rgba(240,173,78,0.1); border: 1px solid rgba(240,173,78,0.3); border-radius: 4px; font-size: 0.8rem; color: #f0ad4e;">
+                                <i class="fa-solid fa-triangle-exclamation" style="margin-right: 0.3rem;"></i>
+                                "This fact has not been reviewed yet. Confirm or edit it in the Edit tab."
+                            </div>
+                        }.into_any()
+                    } else {
+                        view! { <span></span> }.into_any()
+                    }
+                })}
+
                 // Claim blockquote
                 {claim.map(|c| view! {
                     <div style="margin-bottom: 0.75rem;">
@@ -107,6 +125,18 @@ pub(super) fn render_info_tab(detail: NodeResponse) -> leptos::prelude::AnyView 
                             {c}
                         </blockquote>
                     </div>
+                })}
+
+                // Source passage (collapsible)
+                {source_passage.map(|sp| view! {
+                    <details style="margin-bottom: 0.75rem;">
+                        <summary style="font-size: 0.75rem; color: rgba(255,255,255,0.5); cursor: pointer; user-select: none;">
+                            <i class="fa-solid fa-file-lines" style="margin-right: 0.25rem;"></i>"Source Passage"
+                        </summary>
+                        <blockquote style="margin: 0.25rem 0 0 0; padding: 0.5rem 0.75rem; border-left: 3px solid rgba(74,158,255,0.3); background: rgba(255,255,255,0.02); border-radius: 0 4px 4px 0; font-size: 0.8rem; line-height: 1.4; color: rgba(255,255,255,0.6); max-height: 200px; overflow-y: auto; white-space: pre-wrap;">
+                            {sp}
+                        </blockquote>
+                    </details>
                 })}
 
                 // Event date

@@ -89,6 +89,7 @@ pub fn App() -> impl IntoView {
                                 <Route path=path!("/security") view=pages::security::SecurityPage />
                                 <Route path=path!("/node/:label") view=pages::node::NodePage />
                                 <Route path=path!("/insights") view=pages::insights::InsightsPage />
+                                <Route path=path!("/facts") view=pages::facts::FactReviewPage />
                             </Routes>
                         </main>
                         <OnboardingWizard open=wizard_open on_complete=on_wizard_complete />

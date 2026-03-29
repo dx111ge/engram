@@ -154,7 +154,12 @@ pub fn GraphPage() -> impl IntoView {
                                             let l = &n.label;
                                             if l.chars().count() > 40 { format!("{}...", l.chars().take(40).collect::<String>()) } else { l.to_string() }
                                         };
-                                        (base_size * 0.5, Some("#ffa726"), Some("diamond"), claim)
+                                        // Color by confidence: low=yellow (pending), mid=orange, high=green (confirmed)
+                                        let fact_color = if conf < 0.1 { "#ef5350" }      // debunked (red)
+                                            else if conf < 0.5 { "#f0ad4e" }               // pending/low (yellow)
+                                            else if conf < 0.8 { "#ffa726" }               // moderate (orange)
+                                            else { "#66bb6a" };                             // confirmed/high (green)
+                                        (base_size * 0.5, Some(fact_color), Some("diamond"), claim)
                                     },
                                     "source" => {
                                         let short = if n.label.len() > 7 && n.label[..7].eq_ignore_ascii_case("source:") {

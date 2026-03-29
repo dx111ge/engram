@@ -1174,7 +1174,30 @@ window.__engram_graph = {
       claimRow.appendChild(claimInput);
       popup.appendChild(claimRow);
 
-      // Fetch full claim text from node properties
+      // Source passage (read-only, collapsible)
+      var sourceRow = document.createElement('div');
+      sourceRow.style.cssText = 'margin-bottom:6px; display:none;';
+      var sourceLabel = document.createElement('div');
+      sourceLabel.style.cssText = 'font-size:0.7rem; color:rgba(255,255,255,0.5); margin-bottom:2px;';
+      sourceLabel.innerHTML = '<i class="fa-solid fa-file-lines"></i> SOURCE PASSAGE';
+      sourceRow.appendChild(sourceLabel);
+      var sourceText = document.createElement('div');
+      sourceText.style.cssText = 'background:rgba(255,255,255,0.04); border-left:3px solid rgba(74,158,255,0.4); padding:6px 8px; font-size:0.72rem; color:rgba(255,255,255,0.6); max-height:120px; overflow-y:auto; border-radius:2px; white-space:pre-wrap;';
+      sourceRow.appendChild(sourceText);
+      popup.appendChild(sourceRow);
+
+      var viewSourceBtn = document.createElement('button');
+      viewSourceBtn.innerHTML = '<i class="fa-solid fa-file-lines"></i> View Source';
+      viewSourceBtn.style.cssText = 'background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:rgba(255,255,255,0.7); padding:3px 8px; border-radius:3px; cursor:pointer; font-size:0.7rem; margin-bottom:6px;';
+      viewSourceBtn.addEventListener('click', function() {
+        sourceRow.style.display = sourceRow.style.display === 'none' ? 'block' : 'none';
+        viewSourceBtn.innerHTML = sourceRow.style.display === 'none'
+          ? '<i class="fa-solid fa-file-lines"></i> View Source'
+          : '<i class="fa-solid fa-eye-slash"></i> Hide Source';
+      });
+      popup.appendChild(viewSourceBtn);
+
+      // Fetch full claim text and source passage from node properties
       var xhrClaim = new XMLHttpRequest();
       xhrClaim.open('GET', '/explain/' + encodeURIComponent(node.id));
       var tkClaim = localStorage.getItem('engram_token');
@@ -1184,6 +1207,12 @@ window.__engram_graph = {
           var data = JSON.parse(xhrClaim.responseText);
           var props = data.properties || {};
           claimInput.value = props.claim || node.id;
+          // Show source passage if available
+          if (props.source_passage) {
+            sourceText.textContent = props.source_passage;
+          } else {
+            viewSourceBtn.style.display = 'none';
+          }
           // If no custom label yet, show derived from claim
           if (!node.display_label && props.claim) {
             var words = props.claim.split(' ');
@@ -1300,6 +1329,50 @@ window.__engram_graph = {
       self._edgePopupEl = null;
     });
     btnRow.appendChild(cancelBtn);
+
+    // Delete button (two-click confirmation)
+    var delBtn = document.createElement('button');
+    delBtn.innerHTML = '<i class="fa-solid fa-trash"></i> Delete';
+    delBtn.style.cssText = 'background:var(--danger, #ef5350); border:none; color:#fff; padding:4px 12px; border-radius:3px; cursor:pointer; font-size:0.75rem; margin-left:auto;';
+    delBtn.addEventListener('click', function() {
+      if (!delBtn.dataset.confirmed) {
+        delBtn.dataset.confirmed = '1';
+        delBtn.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Confirm?';
+        delBtn.style.background = '#f0ad4e';
+        delBtn.style.color = '#1a1a2e';
+        setTimeout(function() {
+          if (delBtn && delBtn.dataset.confirmed) {
+            delete delBtn.dataset.confirmed;
+            delBtn.innerHTML = '<i class="fa-solid fa-trash"></i> Delete';
+            delBtn.style.background = 'var(--danger, #ef5350)';
+            delBtn.style.color = '#fff';
+          }
+        }, 3000);
+        return;
+      }
+      var xhr = new XMLHttpRequest();
+      xhr.open('DELETE', '/node/' + encodeURIComponent(node.id));
+      var token = localStorage.getItem('engram_token');
+      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      xhr.onload = function() {
+        if (xhr.status === 200) {
+          popup.remove();
+          self._edgePopupEl = null;
+          if (self.instance) {
+            var gd = self.instance.graphData();
+            gd.nodes = gd.nodes.filter(function(n) { return n.id !== node.id; });
+            gd.links = gd.links.filter(function(l) {
+              var s = typeof l.source === 'object' ? l.source.id : l.source;
+              var t = typeof l.target === 'object' ? l.target.id : l.target;
+              return s !== node.id && t !== node.id;
+            });
+            self.instance.graphData(gd);
+          }
+        }
+      };
+      xhr.send();
+    });
+    btnRow.appendChild(delBtn);
 
     popup.appendChild(btnRow);
     document.body.appendChild(popup);

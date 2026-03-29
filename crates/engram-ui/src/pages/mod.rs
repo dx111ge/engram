@@ -14,3 +14,4 @@ pub mod system;
 pub mod security;
 pub mod node;
 pub mod insights;
+pub mod facts;
