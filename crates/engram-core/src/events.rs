@@ -142,6 +142,23 @@ pub enum GraphEvent {
         entities_processed: u32,
         relations_found: u32,
     },
+    /// Article fetch progress during seed enrichment.
+    SeedArticleProgress {
+        session_id: Arc<str>,
+        current: u32,
+        total: u32,
+        url: Arc<str>,
+        status: Arc<str>, // "fetching", "fetched", "paywalled", "failed"
+        chars: u32,
+    },
+    /// Fact extraction progress during seed enrichment.
+    SeedFactProgress {
+        session_id: Arc<str>,
+        current: u32,
+        total: u32,
+        doc_title: Arc<str>,
+        facts_found: u32,
+    },
     /// Seed enrichment fully committed to graph.
     SeedComplete {
         session_id: Arc<str>,

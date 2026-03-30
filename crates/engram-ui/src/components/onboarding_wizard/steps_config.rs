@@ -330,6 +330,8 @@ pub(crate) fn render_step_seed(
     set_seed_known_rel_types: WriteSignal<Vec<String>>,
     seed_review_submitting: ReadSignal<bool>,
     set_seed_review_submitting: WriteSignal<bool>,
+    enrichment_status: ReadSignal<String>,
+    enrichment_complete: ReadSignal<bool>,
 ) -> AnyView {
     view! {
         <div class="wizard-step">
@@ -497,12 +499,45 @@ pub(crate) fn render_step_seed(
                 }
             })}
 
-            // Enrichment status
-            {move || (seed_phase.get() >= 1 && analyzing.get()).then(|| view! {
-                <div class="wizard-info-box mt-1">
-                    <p><span class="spinner"></span>" Enriching entities via Wikipedia + SPARQL..."</p>
-                </div>
-            })}
+            // Enrichment progress (SSE-driven)
+            {move || {
+                let status = enrichment_status.get();
+                let complete = enrichment_complete.get();
+                let phase = seed_phase.get();
+                if phase >= 1 && !status.is_empty() {
+                    let (icon, icon_class) = if complete {
+                        ("fa-solid fa-circle-check", "color: #66bb6a;")
+                    } else if status.contains("Fetching") {
+                        ("fa-solid fa-download", "color: #4fc3f7;")
+                    } else if status.contains("Extracting") || status.contains("complete") {
+                        ("fa-solid fa-brain", "color: #ce93d8;")
+                    } else {
+                        ("fa-solid fa-spinner fa-spin", "color: #ffa726;")
+                    };
+                    let border_color = if complete { "#66bb6a" } else { "#4fc3f7" };
+                    let box_style = format!("border-left: 3px solid {}; padding: 8px 12px;", border_color);
+                    view! {
+                        <div class="wizard-info-box mt-1" style=box_style>
+                            <p style="margin: 0; display: flex; align-items: center; gap: 8px;">
+                                <i class=icon style=icon_class></i>
+                                <span>{status}</span>
+                            </p>
+                        </div>
+                    }.into_any()
+                } else if phase >= 1 && analyzing.get() {
+                    // Fallback: no SSE events yet but enrichment is running
+                    view! {
+                        <div class="wizard-info-box mt-1" style="border-left: 3px solid #ffa726; padding: 8px 12px;">
+                            <p style="margin: 0; display: flex; align-items: center; gap: 8px;">
+                                <i class="fa-solid fa-spinner fa-spin" style="color: #ffa726;"></i>
+                                <span>"Enriching entities via Wikipedia + SPARQL..."</span>
+                            </p>
+                        </div>
+                    }.into_any()
+                } else {
+                    view! { <div></div> }.into_any()
+                }
+            }}
 
             // Phase 1 -> Phase 2 transition: "Review" button
             {move || (seed_phase.get() == 1 && !analyzing.get()).then(|| {

@@ -1174,28 +1174,17 @@ window.__engram_graph = {
       claimRow.appendChild(claimInput);
       popup.appendChild(claimRow);
 
-      // Source passage (read-only, collapsible)
-      var sourceRow = document.createElement('div');
-      sourceRow.style.cssText = 'margin-bottom:6px; display:none;';
-      var sourceLabel = document.createElement('div');
-      sourceLabel.style.cssText = 'font-size:0.7rem; color:rgba(255,255,255,0.5); margin-bottom:2px;';
-      sourceLabel.innerHTML = '<i class="fa-solid fa-file-lines"></i> SOURCE PASSAGE';
-      sourceRow.appendChild(sourceLabel);
-      var sourceText = document.createElement('div');
-      sourceText.style.cssText = 'background:rgba(255,255,255,0.04); border-left:3px solid rgba(74,158,255,0.4); padding:6px 8px; font-size:0.72rem; color:rgba(255,255,255,0.6); max-height:120px; overflow-y:auto; border-radius:2px; white-space:pre-wrap;';
-      sourceRow.appendChild(sourceText);
-      popup.appendChild(sourceRow);
-
-      var viewSourceBtn = document.createElement('button');
-      viewSourceBtn.innerHTML = '<i class="fa-solid fa-file-lines"></i> View Source';
-      viewSourceBtn.style.cssText = 'background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:rgba(255,255,255,0.7); padding:3px 8px; border-radius:3px; cursor:pointer; font-size:0.7rem; margin-bottom:6px;';
-      viewSourceBtn.addEventListener('click', function() {
-        sourceRow.style.display = sourceRow.style.display === 'none' ? 'block' : 'none';
-        viewSourceBtn.innerHTML = sourceRow.style.display === 'none'
-          ? '<i class="fa-solid fa-file-lines"></i> View Source'
-          : '<i class="fa-solid fa-eye-slash"></i> Hide Source';
-      });
-      popup.appendChild(viewSourceBtn);
+      // Source passage (read-only, collapsible <details>)
+      var sourceDetails = document.createElement('details');
+      sourceDetails.style.cssText = 'margin-bottom:0.5rem; display:none;';
+      var sourceSummary = document.createElement('summary');
+      sourceSummary.style.cssText = 'font-size:0.72rem; color:var(--text-secondary, rgba(255,255,255,0.5)); cursor:pointer;';
+      sourceSummary.innerHTML = '<i class="fa-solid fa-file-lines" style="margin-right:0.2rem;"></i> Source passage';
+      sourceDetails.appendChild(sourceSummary);
+      var sourceText = document.createElement('blockquote');
+      sourceText.style.cssText = 'margin:0.25rem 0 0 0; padding:0.4rem 0.6rem; border-left:3px solid rgba(74,158,255,0.3); background:rgba(255,255,255,0.02); font-size:0.75rem; color:rgba(255,255,255,0.5); max-height:150px; overflow-y:auto; white-space:pre-wrap; border-radius:0 4px 4px 0;';
+      sourceDetails.appendChild(sourceText);
+      popup.appendChild(sourceDetails);
 
       // Fetch full claim text and source passage from node properties
       var xhrClaim = new XMLHttpRequest();
@@ -1210,8 +1199,7 @@ window.__engram_graph = {
           // Show source passage if available
           if (props.source_passage) {
             sourceText.textContent = props.source_passage;
-          } else {
-            viewSourceBtn.style.display = 'none';
+            sourceDetails.style.display = 'block';
           }
           // If no custom label yet, show derived from claim
           if (!node.display_label && props.claim) {

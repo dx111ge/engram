@@ -185,6 +185,44 @@ pub fn extract_claims(
     claims
 }
 
+/// Compute a quality-adjusted confidence score for an extracted claim.
+/// Adjusts the LLM's self-rated confidence based on structural quality signals.
+fn compute_quality_score(claim: &ExtractedClaim) -> f32 {
+    let mut score = claim.confidence;
+
+    // Both subject AND object appear in source -> keep base
+    // Only one appears -> penalize
+    if !claim.source_passage.is_empty() {
+        let src = claim.source_passage.to_lowercase();
+        let subj_in = src.contains(&claim.subject.to_lowercase());
+        let obj_in = src.contains(&claim.object.to_lowercase());
+        if subj_in && obj_in {
+            // Both grounded -- good
+        } else {
+            score *= 0.8;
+        }
+    }
+
+    // Specific object (>3 words) -> slight boost
+    let obj_words = claim.object.split_whitespace().count();
+    if obj_words >= 3 {
+        score *= 1.1;
+    }
+
+    // Short source passage (likely a snippet, not full article) -> penalize
+    if claim.source_passage.len() < 500 {
+        score *= 0.7;
+    }
+
+    // Has entity links -> slight boost
+    if !claim.entities.is_empty() {
+        score *= 1.05;
+    }
+
+    // Clamp to [0.05, 0.90]
+    score.clamp(0.05, 0.90)
+}
+
 /// Create Fact nodes in the graph from extracted claims.
 pub fn store_facts_in_graph(
     graph: &mut engram_core::graph::Graph,
@@ -209,7 +247,8 @@ pub fn store_facts_in_graph(
             continue; // dedup
         }
 
-        if graph.store_with_confidence(&fact_label, claim.confidence, &prov).is_err() {
+        let quality_confidence = compute_quality_score(claim);
+        if graph.store_with_confidence(&fact_label, quality_confidence, &prov).is_err() {
             continue;
         }
         let _ = graph.set_node_type(&fact_label, "Fact");
@@ -407,29 +446,78 @@ fn parse_confidence(s: &str) -> f32 {
     }
 }
 
+/// Stopwords that should not be standalone objects or subjects.
+const STOP_WORDS: &[&str] = &[
+    "in", "by", "the", "a", "an", "to", "for", "of", "on", "at",
+    "is", "are", "was", "were", "with", "from", "as",
+];
+
+/// Common verbs that should not appear as subjects (sign of garbled SPO).
+const VERB_SUBJECTS: &[&str] = &[
+    "damaged", "destroyed", "reported", "said", "claimed", "stated",
+    "noted", "confirmed", "announced", "described",
+];
+
+/// Pronouns rejected as subjects.
+const PRONOUNS: &[&str] = &[
+    "he", "she", "it", "they", "this", "that", "these", "those", "who", "which",
+];
+
 /// Validate an extracted claim for quality.
 fn validate_claim(claim: &ExtractedClaim, source_chunk: &str) -> bool {
-    // Atomicity: subject and object must be non-empty
-    if claim.subject.trim().is_empty() || claim.object.trim().is_empty() {
+    let subj = claim.subject.trim();
+    let pred = claim.predicate.trim();
+    let obj = claim.object.trim();
+
+    // Atomicity: all three must be non-empty
+    if subj.is_empty() || pred.is_empty() || obj.is_empty() {
         return false;
     }
-    // Predicate must be non-empty
-    if claim.predicate.trim().is_empty() {
+
+    // Minimum meaningful length
+    if subj.len() < 2 || obj.len() < 2 {
         return false;
     }
+
     // Faithfulness: at least subject OR object should appear in source text
     let source_lower = source_chunk.to_lowercase();
-    let subj_in = source_lower.contains(&claim.subject.to_lowercase());
-    let obj_in = source_lower.contains(&claim.object.to_lowercase());
+    let subj_in = source_lower.contains(&subj.to_lowercase());
+    let obj_in = source_lower.contains(&obj.to_lowercase());
     if !subj_in && !obj_in {
         return false;
     }
-    // Decontextualization: reject pronouns as subject
-    let pronouns = ["he", "she", "it", "they", "this", "that", "these", "those", "who", "which"];
-    let subj_lower = claim.subject.trim().to_lowercase();
-    if pronouns.contains(&subj_lower.as_str()) {
+
+    // Reject pronouns as subject
+    let subj_lower = subj.to_lowercase();
+    if PRONOUNS.contains(&subj_lower.as_str()) {
         return false;
     }
+
+    // Reject standalone stopword as object (e.g., "in", "by", "the")
+    let obj_lower = obj.to_lowercase();
+    if STOP_WORDS.contains(&obj_lower.as_str()) {
+        return false;
+    }
+
+    // Reject trailing preposition in object (sign of truncated extraction)
+    let obj_words: Vec<&str> = obj.split_whitespace().collect();
+    if obj_words.len() > 1 {
+        let last = obj_words.last().unwrap().to_lowercase();
+        if STOP_WORDS.contains(&last.as_str()) {
+            return false;
+        }
+    }
+
+    // Reject common verb as subject (garbled SPO)
+    if VERB_SUBJECTS.contains(&subj_lower.as_str()) {
+        return false;
+    }
+
+    // Reject circular facts (subject == object)
+    if subj_lower == obj_lower {
+        return false;
+    }
+
     true
 }
 
@@ -513,6 +601,63 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_stopword_object() {
+        let claim = ExtractedClaim {
+            subject: "Leopard 2".into(), predicate: "failing".into(), object: "in".into(),
+            claim: "Leopard 2 failing in".into(),
+            entities: vec![], date: None, confidence: 0.85,
+            chunk_index: 0, source_passage: String::new(),
+        };
+        assert!(!validate_claim(&claim, "Leopard 2 failing in Ukraine."));
+    }
+
+    #[test]
+    fn test_validate_rejects_trailing_preposition() {
+        let claim = ExtractedClaim {
+            subject: "Leopard 2".into(), predicate: "echoes".into(),
+            object: "German Tiger tank in".into(),
+            claim: "Leopard 2 echoes German Tiger tank in".into(),
+            entities: vec![], date: None, confidence: 0.85,
+            chunk_index: 0, source_passage: String::new(),
+        };
+        assert!(!validate_claim(&claim, "Leopard 2 echoes German Tiger tank in WW2."));
+    }
+
+    #[test]
+    fn test_validate_rejects_verb_subject() {
+        let claim = ExtractedClaim {
+            subject: "damaged".into(), predicate: "remainder of".into(),
+            object: "Leopard 2 tanks".into(),
+            claim: "damaged remainder of Leopard 2 tanks".into(),
+            entities: vec![], date: None, confidence: 0.85,
+            chunk_index: 0, source_passage: String::new(),
+        };
+        assert!(!validate_claim(&claim, "damaged remainder of Leopard 2 tanks."));
+    }
+
+    #[test]
+    fn test_validate_rejects_circular() {
+        let claim = ExtractedClaim {
+            subject: "Russia".into(), predicate: "is".into(), object: "Russia".into(),
+            claim: "Russia is Russia".into(),
+            entities: vec![], date: None, confidence: 0.85,
+            chunk_index: 0, source_passage: String::new(),
+        };
+        assert!(!validate_claim(&claim, "Russia is Russia."));
+    }
+
+    #[test]
+    fn test_validate_rejects_short() {
+        let claim = ExtractedClaim {
+            subject: "X".into(), predicate: "is".into(), object: "Y".into(),
+            claim: "X is Y".into(),
+            entities: vec![], date: None, confidence: 0.85,
+            chunk_index: 0, source_passage: String::new(),
+        };
+        assert!(!validate_claim(&claim, "X is Y."));
+    }
+
+    #[test]
     fn test_validate_rejects_pronouns() {
         let claim = ExtractedClaim {
             subject: "He".into(), predicate: "said".into(), object: "it was wrong".into(),
@@ -563,5 +708,68 @@ mod tests {
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].claim, "Putin warned NATO");
         assert!(claims[0].subject.is_empty()); // legacy has no SPO
+    }
+
+    #[test]
+    fn test_quality_score_full_article() {
+        // Long source passage (>500 chars) with both S and O grounded
+        let long_passage = "Russia deployed Shahed drones in Ukraine. ".repeat(20); // ~800 chars
+        let claim = ExtractedClaim {
+            subject: "Russia".into(), predicate: "deployed".into(),
+            object: "Shahed drones".into(),
+            claim: "Russia deployed Shahed drones".into(),
+            entities: vec!["Russia".into()], date: None, confidence: 0.85,
+            chunk_index: 0,
+            source_passage: long_passage,
+        };
+        let score = compute_quality_score(&claim);
+        // Full article, both grounded, entities -> should be near or above base
+        assert!(score > 0.80, "score {score} should be > 0.80 for full article");
+    }
+
+    #[test]
+    fn test_quality_score_snippet_penalized() {
+        let claim = ExtractedClaim {
+            subject: "Russia".into(), predicate: "deployed".into(),
+            object: "drones".into(),
+            claim: "Russia deployed drones".into(),
+            entities: vec![], date: None, confidence: 0.85,
+            chunk_index: 0,
+            source_passage: "Russia deployed drones.".into(), // short snippet
+        };
+        let score = compute_quality_score(&claim);
+        // Short source passage -> penalized by 0.7x
+        assert!(score < 0.70, "score {score} should be < 0.70 for snippet");
+    }
+
+    #[test]
+    fn test_quality_score_snippet_vs_article() {
+        // Same claim from snippet vs full article should differ
+        let claim_snippet = ExtractedClaim {
+            subject: "Russia".into(), predicate: "deployed".into(),
+            object: "Shahed drones in Ukraine".into(),
+            claim: "Russia deployed Shahed drones in Ukraine".into(),
+            entities: vec![], date: None, confidence: 0.85,
+            chunk_index: 0,
+            source_passage: "Russia deployed Shahed drones.".into(),
+        };
+        let long_passage = "Russia deployed Shahed drones in Ukraine during the ongoing conflict. ".repeat(15);
+        let claim_article = ExtractedClaim {
+            source_passage: long_passage,
+            ..claim_snippet.clone()
+        };
+        let snippet_score = compute_quality_score(&claim_snippet);
+        let article_score = compute_quality_score(&claim_article);
+        assert!(article_score > snippet_score,
+            "article score {article_score} should be > snippet score {snippet_score}");
+    }
+
+    #[test]
+    fn test_chunk_text_large() {
+        // Use sentence-splittable text so chunk_text can split on ". "
+        let sentence = "The Leopard 2 tank is deployed in Ukraine. ";
+        let text = sentence.repeat(250); // ~10500 chars
+        let chunks = chunk_text(&text, 3000);
+        assert!(chunks.len() >= 3, "10K chars should produce >= 3 chunks at 3000 max, got {}", chunks.len());
     }
 }

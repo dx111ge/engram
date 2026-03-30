@@ -207,6 +207,7 @@ pub async fn seed_confirm_aoi(
     // Run entity linking + AoI article co-occurrence in background
     let sid = session_id.clone();
     let sessions_arc = state.seed_sessions.clone();
+    let completion_bus = state.event_bus.clone();
     tokio::task::spawn_blocking(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         use engram_ingest::RelationExtractor;
@@ -240,6 +241,8 @@ pub async fn seed_confirm_aoi(
         );
         // Defer property expansion writes to session for user review
         extractor.defer_graph_writes = true;
+        // Set session ID for SSE progress events
+        extractor.session_id = Some(sid.clone());
         // Wire DocStore for web search document provenance
         extractor.set_doc_store(doc_store.clone());
 
@@ -358,7 +361,7 @@ pub async fn seed_confirm_aoi(
         match result {
             Ok(()) => {
                 // Mark session as complete
-                if let Ok(mut sessions) = sessions_arc.write() {
+                let review_count = if let Ok(mut sessions) = sessions_arc.write() {
                     if let Some(session) = sessions.get_mut(&sid) {
                         session.status = "complete".to_string();
                         tracing::info!(
@@ -366,8 +369,16 @@ pub async fn seed_confirm_aoi(
                             review_items = session.review_items.len(),
                             "seed enrichment complete"
                         );
-                    }
-                }
+                        session.review_items.len() as u32
+                    } else { 0 }
+                } else { 0 };
+                // Emit enrichment-done event so SSE frontend transitions
+                completion_bus.publish(engram_core::events::GraphEvent::SeedPhaseComplete {
+                    session_id: std::sync::Arc::from(sid.as_str()),
+                    phase: 99, // special: enrichment done (not a numbered phase)
+                    entities_processed: 0,
+                    relations_found: review_count,
+                });
             }
             Err(e) => {
                 let msg = if let Some(s) = e.downcast_ref::<&str>() {
@@ -701,6 +712,20 @@ pub async fn seed_stream(
                             ("seed_phase_complete", serde_json::json!({
                                 "phase": phase, "entities_processed": entities_processed,
                                 "relations_found": relations_found
+                            }))
+                        }
+                        engram_core::events::GraphEvent::SeedArticleProgress { session_id: sid, current, total, url, status, chars } => {
+                            if sid.as_ref() != session_id { return None; }
+                            ("seed_article_progress", serde_json::json!({
+                                "current": current, "total": total,
+                                "url": url.as_ref(), "status": status.as_ref(), "chars": chars
+                            }))
+                        }
+                        engram_core::events::GraphEvent::SeedFactProgress { session_id: sid, current, total, doc_title, facts_found } => {
+                            if sid.as_ref() != session_id { return None; }
+                            ("seed_fact_progress", serde_json::json!({
+                                "current": current, "total": total,
+                                "doc_title": doc_title.as_ref(), "facts_found": facts_found
                             }))
                         }
                         engram_core::events::GraphEvent::SeedComplete { session_id: sid, facts_stored, relations_created } => {

@@ -948,6 +948,8 @@ fn event_type_name(event: &engram_core::events::GraphEvent) -> &'static str {
         GraphEvent::SeedConnectionFound { .. } => "seed_connection_found",
         GraphEvent::SeedSparqlRelation { .. } => "seed_sparql_relation",
         GraphEvent::SeedPhaseComplete { .. } => "seed_phase_complete",
+        GraphEvent::SeedArticleProgress { .. } => "seed_article_progress",
+        GraphEvent::SeedFactProgress { .. } => "seed_fact_progress",
         GraphEvent::SeedComplete { .. } => "seed_complete",
     }
 }

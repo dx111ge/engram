@@ -83,6 +83,8 @@ pub struct KbRelationExtractor {
     deferred_expansion: Mutex<Vec<(String, String, String, String, Option<String>, Option<String>)>>,
     /// Document store for caching web search content as provenance.
     doc_store: Option<Arc<RwLock<engram_core::storage::doc_store::DocStore>>>,
+    /// Session ID for SSE progress events (set during seed enrichment).
+    pub session_id: Option<String>,
 }
 
 impl KbRelationExtractor {
@@ -107,6 +109,7 @@ impl KbRelationExtractor {
             defer_graph_writes: false,
             deferred_expansion: Mutex::new(Vec::new()),
             doc_store: None,
+            session_id: None,
         }
     }
 

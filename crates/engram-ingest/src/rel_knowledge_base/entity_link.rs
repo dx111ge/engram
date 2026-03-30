@@ -3,7 +3,76 @@
 
 use super::*;
 
+const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
 impl KbRelationExtractor {
+    /// Fetch full article content from a URL using HTTP GET + dom_smoothie extraction.
+    /// Returns (article_text, title, fetch_status).
+    pub(super) fn fetch_url_content(&self, url: &str) -> (Option<String>, Option<String>, &'static str) {
+        if url.is_empty() {
+            return (None, None, "no_url");
+        }
+
+        // URL rewriting (reddit -> old.reddit for plain HTML)
+        let fetch_url = if url.contains("reddit.com/") && !url.contains("old.reddit.com") {
+            url.replace("www.reddit.com", "old.reddit.com")
+                .replace("reddit.com", "old.reddit.com")
+        } else {
+            url.to_string()
+        };
+
+        // Fetch with browser UA
+        let resp = match self.client
+            .get(&fetch_url)
+            .header("User-Agent", BROWSER_UA)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+        {
+            Ok(r) => r,
+            Err(_) => return (None, None, "timeout"),
+        };
+
+        let status = resp.status().as_u16();
+        let html = match resp.text() {
+            Ok(t) => t,
+            Err(_) => return (None, None, "body_error"),
+        };
+
+        // Detect paywall / blocking
+        if status == 402 || status == 403 || status == 451 {
+            return (None, None, "paywalled");
+        }
+        if html.len() < 1000 {
+            return (None, None, "js_required");
+        }
+
+        // Extract article text using dom_smoothie (Mozilla Readability)
+        let mut readability = match dom_smoothie::Readability::new(html, None, None) {
+            Ok(r) => r,
+            Err(_) => return (None, None, "parse_error"),
+        };
+        let article = match readability.parse() {
+            Ok(a) => a,
+            Err(_) => return (None, None, "extract_error"),
+        };
+
+        let text = article.text_content.to_string();
+        let title = if article.title.is_empty() { None } else { Some(article.title) };
+
+        // Quality check: if extracted text is very short, likely soft paywall
+        if text.len() < 200 {
+            return (None, title, "soft_paywall");
+        }
+
+        // Truncate to 50KB max
+        let text = if text.len() > 50_000 {
+            text[..50_000].to_string()
+        } else {
+            text
+        };
+
+        (Some(text), title, "fetched")
+    }
     /// Search the web using the configured search provider.
     /// Returns results with title, snippet, and URL for document provenance.
     pub(super) fn web_search(&self, query: &str) -> Vec<WebSearchResult> {
@@ -107,6 +176,7 @@ impl KbRelationExtractor {
     }
 
     /// Store web search results as Document nodes in the graph and cache content in DocStore.
+    /// Fetches full article content from URLs for better fact extraction.
     /// Creates: Document -> Publisher edges, and Fact -> Document for each entity mentioned.
     pub(super) fn store_web_search_documents(
         &self,
@@ -116,6 +186,108 @@ impl KbRelationExtractor {
         if results.is_empty() {
             return;
         }
+
+        // Phase 1: Fetch full article content in parallel (before acquiring graph lock)
+        let total_urls = results.len() as u32;
+        let session_id = self.session_id.clone().unwrap_or_default();
+        let event_bus = self.event_bus.clone();
+
+        let fetched_articles: Vec<(Option<String>, &'static str)> = std::thread::scope(|s| {
+            let handles: Vec<_> = results.iter().enumerate().map(|(idx, result)| {
+                let client = &self.client;
+                let sid = session_id.clone();
+                let bus = event_bus.clone();
+                s.spawn(move || {
+                    if result.url.is_empty() || result.snippet.is_empty() {
+                        return (None, "no_url");
+                    }
+
+                    // Emit "fetching" event
+                    if let Some(ref bus) = bus {
+                        bus.publish(engram_core::events::GraphEvent::SeedArticleProgress {
+                            session_id: std::sync::Arc::from(sid.as_str()),
+                            current: idx as u32 + 1,
+                            total: total_urls,
+                            url: std::sync::Arc::from(result.url.as_str()),
+                            status: std::sync::Arc::from("fetching"),
+                            chars: 0,
+                        });
+                    }
+
+                    let fetch_url = if result.url.contains("reddit.com/") && !result.url.contains("old.reddit.com") {
+                        result.url.replace("www.reddit.com", "old.reddit.com")
+                            .replace("reddit.com", "old.reddit.com")
+                    } else {
+                        result.url.clone()
+                    };
+
+                    let resp = match client
+                        .get(&fetch_url)
+                        .header("User-Agent", BROWSER_UA)
+                        .timeout(std::time::Duration::from_secs(15))
+                        .send()
+                    {
+                        Ok(r) => r,
+                        Err(_) => return (None, "timeout"),
+                    };
+
+                    let status = resp.status().as_u16();
+                    let html = match resp.text() {
+                        Ok(t) => t,
+                        Err(_) => return (None, "body_error"),
+                    };
+
+                    if status == 402 || status == 403 || status == 451 {
+                        if let Some(ref bus) = bus {
+                            bus.publish(engram_core::events::GraphEvent::SeedArticleProgress {
+                                session_id: std::sync::Arc::from(sid.as_str()),
+                                current: idx as u32 + 1, total: total_urls,
+                                url: std::sync::Arc::from(result.url.as_str()),
+                                status: std::sync::Arc::from("paywalled"), chars: 0,
+                            });
+                        }
+                        return (None, "paywalled");
+                    }
+                    if html.len() < 1000 {
+                        return (None, "js_required");
+                    }
+
+                    let mut readability = match dom_smoothie::Readability::new(html, None, None) {
+                        Ok(r) => r,
+                        Err(_) => return (None, "parse_error"),
+                    };
+                    let article = match readability.parse() {
+                        Ok(a) => a,
+                        Err(_) => return (None, "extract_error"),
+                    };
+
+                    let text = article.text_content.to_string();
+                    if text.len() < 200 {
+                        return (None, "soft_paywall");
+                    }
+
+                    let text = if text.len() > 50_000 { text[..50_000].to_string() } else { text };
+
+                    // Emit "fetched" event
+                    if let Some(ref bus) = bus {
+                        bus.publish(engram_core::events::GraphEvent::SeedArticleProgress {
+                            session_id: std::sync::Arc::from(sid.as_str()),
+                            current: idx as u32 + 1, total: total_urls,
+                            url: std::sync::Arc::from(result.url.as_str()),
+                            status: std::sync::Arc::from("fetched"),
+                            chars: text.len() as u32,
+                        });
+                    }
+
+                    tracing::info!(url = %result.url, chars = text.len(), "Fetched full article content");
+                    (Some(text), "fetched")
+                })
+            }).collect();
+
+            handles.into_iter().map(|h| h.join().unwrap_or((None, "thread_error"))).collect()
+        });
+
+        // Phase 2: Store documents in graph (with graph lock)
         let prov = engram_core::graph::Provenance {
             source_type: engram_core::graph::SourceType::Api,
             source_id: "web_search".to_string(),
@@ -130,13 +302,16 @@ impl KbRelationExtractor {
             Err(_) => return,
         };
 
-        for result in results {
+        for (i, result) in results.iter().enumerate() {
             if result.snippet.is_empty() {
                 continue;
             }
-            // Compute content hash and create Document node
+            let (ref article_text, fetch_status) = fetched_articles[i];
+
+            // Use full article for content hash if available, else snippet
+            let primary_content = article_text.as_deref().unwrap_or(&result.snippet);
             let content_hash = engram_core::storage::doc_store::DocStore::hash_content(
-                result.snippet.as_bytes(),
+                primary_content.as_bytes(),
             );
             let hash_hex = engram_core::storage::doc_store::DocStore::hash_hex(&content_hash);
             let doc_label = crate::document::doc_label(&hash_hex);
@@ -159,7 +334,10 @@ impl KbRelationExtractor {
             let _ = graph.set_property(&doc_label, "mime_type", "text/html");
             let _ = graph.set_property(&doc_label, "ingested_at", &now_ts.to_string());
             let _ = graph.set_property(&doc_label, "content_length",
-                &result.snippet.len().to_string());
+                &primary_content.len().to_string());
+            let _ = graph.set_property(&doc_label, "fetch_status", fetch_status);
+            let content_type = if article_text.is_some() { "article" } else { "snippet" };
+            let _ = graph.set_property(&doc_label, "content_type", content_type);
 
             // Create Publisher node from URL
             let publisher_label = if !result.url.is_empty() {
@@ -174,10 +352,10 @@ impl KbRelationExtractor {
             }
             let _ = graph.relate_upsert(&doc_label, &publisher_label, "published_by", &prov);
 
-            // Layer 1: Entity -> Document (mentioned_in) for each entity in the snippet
-            let snippet_lower = result.snippet.to_lowercase();
+            // Layer 1: Entity -> Document (mentioned_in) for each entity in content
+            let search_text = primary_content.to_lowercase();
             for label in entity_labels {
-                if snippet_lower.contains(&label.to_lowercase()) {
+                if search_text.contains(&label.to_lowercase()) {
                     let _ = graph.relate_upsert(label, &doc_label, "mentioned_in", &prov);
                 }
             }
@@ -185,8 +363,8 @@ impl KbRelationExtractor {
             // Cache content in DocStore
             if let Some(ref store_arc) = self.doc_store {
                 if let Ok(mut store) = store_arc.write() {
-                    let mime = engram_core::storage::doc_store::MimeType::Html;
-                    let _ = store.store(result.snippet.as_bytes(), mime);
+                    let mime = engram_core::storage::doc_store::MimeType::Text;
+                    let _ = store.store(primary_content.as_bytes(), mime);
                 }
             }
         }
@@ -194,14 +372,16 @@ impl KbRelationExtractor {
         // Drop graph lock before LLM calls
         drop(graph);
 
-        // Layer 2: LLM fact extraction from web search documents
-        self.extract_facts_from_results(results, entity_labels);
+        // Layer 2: LLM fact extraction -- use full article text when available
+        self.extract_facts_from_results(results, &fetched_articles, entity_labels);
     }
 
     /// Run LLM fact extraction on web search results and store Fact nodes.
+    /// Uses full article text when available, falls back to snippet.
     fn extract_facts_from_results(
         &self,
         results: &[WebSearchResult],
+        fetched_articles: &[(Option<String>, &'static str)],
         entity_labels: &[String],
     ) {
         let (endpoint, model) = match (&self.llm_endpoint, &self.llm_model) {
@@ -209,41 +389,81 @@ impl KbRelationExtractor {
             _ => return,
         };
 
-        let config = crate::fact_extract::FactExtractConfig {
-            llm_endpoint: endpoint,
-            llm_model: model,
-            gleaning: false, // skip gleaning for short snippets
-            max_tokens: 1000,
-            temperature: 0.1,
-        };
+        let total_docs = results.len() as u32;
+        let session_id = self.session_id.clone().unwrap_or_default();
+        let mut cumulative_facts = 0u32;
 
-        for result in results {
+        for (i, result) in results.iter().enumerate() {
             if result.snippet.is_empty() {
                 continue;
             }
+            let (ref article_text, _fetch_status) = fetched_articles[i];
+
+            // Emit fact extraction progress
+            self.emit(engram_core::events::GraphEvent::SeedFactProgress {
+                session_id: std::sync::Arc::from(session_id.as_str()),
+                current: i as u32 + 1,
+                total: total_docs,
+                doc_title: std::sync::Arc::from(result.title.as_str()),
+                facts_found: cumulative_facts,
+            });
+
+            // Use full article text if available, otherwise snippet
+            let extract_text = article_text.as_deref().unwrap_or(&result.snippet);
+            let is_full_article = article_text.is_some();
+
+            // Configure extraction based on content type
+            let config = crate::fact_extract::FactExtractConfig {
+                llm_endpoint: endpoint.clone(),
+                llm_model: model.clone(),
+                gleaning: is_full_article, // enable gleaning for full articles
+                max_tokens: if is_full_article { 2000 } else { 1000 },
+                temperature: 0.1,
+            };
+
+            // Chunk the text (full articles may need multiple chunks)
+            let chunks = crate::fact_extract::chunk_text(extract_text, 3000);
+
+            let primary_content = article_text.as_deref().unwrap_or(&result.snippet);
             let content_hash = engram_core::storage::doc_store::DocStore::hash_content(
-                result.snippet.as_bytes(),
+                primary_content.as_bytes(),
             );
             let hash_hex = engram_core::storage::doc_store::DocStore::hash_hex(&content_hash);
             let doc_label = crate::document::doc_label(&hash_hex);
 
-            let claims = crate::fact_extract::extract_claims(
-                &self.client, &config, &result.snippet, entity_labels, 0,
-            );
-            if claims.is_empty() {
+            let mut all_claims = Vec::new();
+            for (chunk_idx, chunk) in chunks.iter().enumerate() {
+                let claims = crate::fact_extract::extract_claims(
+                    &self.client, &config, chunk, entity_labels, chunk_idx,
+                );
+                all_claims.extend(claims);
+            }
+
+            if all_claims.is_empty() {
                 continue;
             }
 
             if let Ok(mut graph) = self.graph.write() {
                 let count = crate::fact_extract::store_facts_in_graph(
-                    &mut graph, &claims, &doc_label, entity_labels,
+                    &mut graph, &all_claims, &doc_label, entity_labels,
                 );
                 if count > 0 {
+                    let source = if is_full_article { "full article" } else { "snippet" };
                     tracing::info!(
                         doc = %doc_label,
                         facts = count,
+                        source = source,
                         "LLM extracted facts from web search result"
                     );
+                    cumulative_facts += count;
+                    // Emit cumulative fact count update
+                    self.emit(engram_core::events::GraphEvent::SeedFactProgress {
+                        session_id: std::sync::Arc::from(session_id.as_str()),
+                        current: i as u32 + 1,
+                        total: total_docs,
+                        doc_title: std::sync::Arc::from(result.title.as_str()),
+                        facts_found: cumulative_facts,
+                    });
                 }
             }
         }
