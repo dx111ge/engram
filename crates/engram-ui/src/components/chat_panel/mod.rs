@@ -48,6 +48,106 @@ fn dispatch_graph_data(tool_name: &str, raw_json: &str) {
     }
 }
 
+// ── LLM analysis helper for tool augmentation ──
+
+async fn llm_analysis(
+    api: &ApiClient,
+    set_messages: WriteSignal<Vec<ChatMessage>>,
+    analysis_prompt: &str,
+    user_content: &str,
+) {
+    let config: Result<serde_json::Value, _> = api.get("/config").await;
+    let cfg = match config {
+        Ok(c) => c,
+        Err(_) => {
+            set_messages.update(|msgs| {
+                msgs.push(ChatMessage {
+                    role: ChatRole::System,
+                    content: "Could not load config for LLM analysis.".into(),
+                    display_html: None,
+                });
+            });
+            return;
+        }
+    };
+
+    let model = cfg.get("llm_model").and_then(|v| v.as_str()).unwrap_or("");
+    let endpoint = cfg.get("llm_endpoint").and_then(|v| v.as_str()).unwrap_or("");
+    if model.is_empty() || endpoint.is_empty() {
+        set_messages.update(|msgs| {
+            msgs.push(ChatMessage {
+                role: ChatRole::System,
+                content: "<i class=\"fa-solid fa-triangle-exclamation\"></i> LLM not configured. Go to <strong>System > Language Model</strong> to set up.".into(),
+                display_html: Some("<div style=\"color:#ffa726;font-size:0.85rem\"><i class=\"fa-solid fa-triangle-exclamation\"></i> LLM not configured. Go to <strong>System &gt; Language Model</strong> to set up.</div>".into()),
+            });
+        });
+        return;
+    }
+
+    let persona = cfg.get("llm_system_prompt").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Show loading indicator
+    set_messages.update(|msgs| {
+        msgs.push(ChatMessage {
+            role: ChatRole::Context,
+            content: "Analyzing...".into(),
+            display_html: Some("<div style=\"display:flex;align-items:center;gap:6px;color:var(--text-muted);font-size:0.85rem\"><i class=\"fa-solid fa-spinner fa-spin\"></i> AI Analysis running...</div>".into()),
+        });
+    });
+
+    let system = format!("{}\n\n{}", persona, analysis_prompt);
+    let llm_req = serde_json::json!({
+        "model": model,
+        "temperature": 0.3,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content}
+        ]
+    });
+
+    let llm_result: Result<LlmProxyResponse, _> = api.post("/proxy/llm", &llm_req).await;
+
+    // Remove "Analyzing..." indicator
+    set_messages.update(|msgs| {
+        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context && m.content == "Analyzing...") {
+            msgs.remove(pos);
+        }
+    });
+
+    match llm_result {
+        Ok(resp) => {
+            if let Some(text) = resp.choices.first().and_then(|c| c.message.as_ref()).and_then(|m| m.content.clone()) {
+                let rendered = markdown::markdown_to_html(&text);
+                let html = format!(
+                    "<details open class=\"chat-ai-analysis\"><summary style=\"cursor:pointer;font-weight:600;font-size:0.85rem;color:var(--accent);display:flex;align-items:center;gap:6px\">\
+                        <i class=\"fa-solid fa-brain\"></i> AI Analysis</summary>\
+                        <div style=\"margin-top:6px;font-size:0.85rem;line-height:1.5\">{}</div></details>",
+                    rendered,
+                );
+                set_messages.update(|msgs| {
+                    msgs.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: text,
+                        display_html: Some(html),
+                    });
+                });
+            }
+        }
+        Err(e) => {
+            set_messages.update(|msgs| {
+                msgs.push(ChatMessage {
+                    role: ChatRole::System,
+                    content: format!("AI Analysis failed: {}", e),
+                    display_html: Some(format!(
+                        "<div style=\"color:#ef5350;font-size:0.85rem\"><i class=\"fa-solid fa-triangle-exclamation\"></i> AI Analysis failed: {}</div>",
+                        markdown::html_escape(&e.to_string()),
+                    )),
+                });
+            });
+        }
+    }
+}
+
 // ── Convert chat messages to LLM wire format ──
 
 fn build_llm_messages(messages: &[ChatMessage]) -> Vec<LlmMessage> {
@@ -685,11 +785,55 @@ pub fn ChatPanel(
                         }
                         "prove" | "shortest_path" => {
                             let body = serde_json::json!({"from": p("from"), "to": p("to"), "max_depth": 6});
-                            api.post_text("/paths", &body).await.map(|r| ("engram_shortest_path".into(), r)).map_err(|e| e.to_string())
+                            match api.post_text("/chat/shortest_path", &body).await {
+                                Ok(json_str) => {
+                                    let card_html = cards::render_tool_card("engram_shortest_path", &json_str);
+                                    dispatch_graph_data("engram_shortest_path", &json_str);
+                                    set_messages.update(|msgs| {
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: json_str.chars().take(500).collect(),
+                                            display_html: Some(card_html),
+                                        });
+                                    });
+                                    // LLM analysis of the path
+                                    let found = serde_json::from_str::<serde_json::Value>(&json_str).ok()
+                                        .and_then(|v| v.get("found").and_then(|f| f.as_bool())).unwrap_or(false);
+                                    if found {
+                                        llm_analysis(&api, set_messages,
+                                            "Explain the significance of this connection path between entities in a knowledge graph. Describe what each hop reveals about the relationship. Be concise (2-3 sentences).",
+                                            &format!("Explain this path:\n{}", json_str),
+                                        ).await;
+                                    }
+                                    return;
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
                         }
                         "compare" => {
                             let body = serde_json::json!({"entity_a": p("a"), "entity_b": p("b")});
-                            api.post_text("/chat/compare", &body).await.map(|r| ("engram_compare".into(), r)).map_err(|e| e.to_string())
+                            match api.post_text("/chat/compare", &body).await {
+                                Ok(json_str) => {
+                                    let card_html = cards::render_tool_card("engram_compare", &json_str);
+                                    dispatch_graph_data("engram_compare", &json_str);
+                                    set_messages.update(|msgs| {
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: json_str.chars().take(500).collect(),
+                                            display_html: Some(card_html),
+                                        });
+                                    });
+                                    // LLM analysis of the comparison
+                                    llm_analysis(&api, set_messages,
+                                        "Compare these two entities based on the knowledge graph data. Highlight key similarities and differences, shared connections, and what makes each unique. Be concise (2-3 sentences).",
+                                        &format!("Compare these entities:\n{}", json_str),
+                                    ).await;
+                                    return;
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
                         }
                         "most_connected" => {
                             let limit = params.get("limit").and_then(|v| v.as_str()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(10);
@@ -751,6 +895,11 @@ pub fn ChatPanel(
                             let entity = p("e");
                             let encoded = js_sys::encode_uri_component(&entity);
                             api.delete(&format!("/node/{}", encoded.as_string().unwrap_or_default())).await.map(|r| ("engram_delete".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "isolated" => {
+                            let max_edges = params.get("max").and_then(|v| v.as_str()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+                            let body = serde_json::json!({"max_edges": max_edges});
+                            api.post_text("/chat/isolated", &body).await.map(|r| ("engram_isolated".into(), r)).map_err(|e| e.to_string())
                         }
                         _ => Err(format!("Unknown tool: {}", tool)),
                     };

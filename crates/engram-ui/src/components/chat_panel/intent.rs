@@ -78,14 +78,14 @@ pub fn detect_intent(text: &str) -> ChatIntent {
     }
 
     // Path / connection between two entities
-    if starts_any(&lower, &["path from ", "path between ", "find path "]) {
-        let rest = after_keyword(trimmed, &["path from ", "path between ", "find path "]);
+    if starts_any(&lower, &["path from ", "path between ", "find path ", "shortest path "]) {
+        let rest = after_keyword(trimmed, &["path from ", "path between ", "find path ", "shortest path "]);
         let (a, b) = split_two_entities(&rest);
-        return ChatIntent { tool: "path", prefill: a, prefill2: b };
+        return ChatIntent { tool: "shortest_path", prefill: a, prefill2: b };
     }
     if lower.contains("connected to") || lower.contains("connection between") {
         let (a, b) = extract_two_from_connected(trimmed);
-        return ChatIntent { tool: "path", prefill: a, prefill2: b };
+        return ChatIntent { tool: "shortest_path", prefill: a, prefill2: b };
     }
 
     // Compare

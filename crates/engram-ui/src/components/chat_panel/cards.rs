@@ -250,6 +250,9 @@ fn compare_card(data: &serde_json::Value) -> String {
         if let Some(conf) = a.get("confidence").and_then(|v| v.as_f64()) {
             html.push_str(&confidence_bar(conf));
         }
+        if let Some(ec) = a.get("edge_count").and_then(|v| v.as_u64()) {
+            html.push_str(&format!("<div style=\"font-size:0.75rem;color:var(--text-muted)\">{} connections</div>", ec));
+        }
     }
     html.push_str("</div>");
 
@@ -264,16 +267,67 @@ fn compare_card(data: &serde_json::Value) -> String {
         if let Some(conf) = b.get("confidence").and_then(|v| v.as_f64()) {
             html.push_str(&confidence_bar(conf));
         }
+        if let Some(ec) = b.get("edge_count").and_then(|v| v.as_u64()) {
+            html.push_str(&format!("<div style=\"font-size:0.75rem;color:var(--text-muted)\">{} connections</div>", ec));
+        }
     }
     html.push_str("</div>");
 
-    // Common connections if present
-    if let Some(common) = data.get("common_connections").and_then(|v| v.as_array()) {
-        if !common.is_empty() {
+    // Shared neighbors
+    if let Some(shared) = data.get("shared_neighbors").or_else(|| data.get("common_connections")).and_then(|v| v.as_array()) {
+        if !shared.is_empty() {
             html.push_str(&format!(
-                "<div class=\"chat-compare-common\"><strong>{} shared connections</strong></div>",
-                common.len(),
+                "<div class=\"chat-compare-section\" style=\"grid-column:1/-1;margin-top:8px\">\
+                    <strong><i class=\"fa-solid fa-link\" style=\"font-size:0.7rem\"></i> {} shared connection{}</strong><div style=\"margin-top:4px;display:flex;flex-wrap:wrap;gap:4px\">",
+                shared.len(), if shared.len() != 1 { "s" } else { "" },
             ));
+            for (i, s) in shared.iter().enumerate() {
+                if i >= 10 { html.push_str("<span style=\"color:var(--text-muted);font-size:0.75rem\">...</span>"); break; }
+                if let Some(name) = s.as_str() {
+                    html.push_str(&format!("<span style=\"font-size:0.8rem\">{}</span>", entity_link(name)));
+                }
+            }
+            html.push_str("</div></div>");
+        }
+    }
+
+    // Unique to A
+    let label_a = entity_a.and_then(|a| a.get("label")).and_then(|v| v.as_str()).unwrap_or("A");
+    if let Some(unique) = data.get("unique_to_a").and_then(|v| v.as_array()) {
+        if !unique.is_empty() {
+            html.push_str(&format!(
+                "<div class=\"chat-compare-section\" style=\"grid-column:1/-1;margin-top:4px\">\
+                    <strong style=\"font-size:0.8rem\">Only {}: </strong>",
+                html_escape(label_a),
+            ));
+            for (i, s) in unique.iter().enumerate() {
+                if i >= 10 { html.push_str("<span style=\"color:var(--text-muted);font-size:0.75rem\">...</span>"); break; }
+                if let Some(name) = s.as_str() {
+                    if i > 0 { html.push_str(", "); }
+                    html.push_str(&format!("<span style=\"font-size:0.8rem\">{}</span>", entity_link(name)));
+                }
+            }
+            html.push_str("</div>");
+        }
+    }
+
+    // Unique to B
+    let label_b = entity_b.and_then(|b| b.get("label")).and_then(|v| v.as_str()).unwrap_or("B");
+    if let Some(unique) = data.get("unique_to_b").and_then(|v| v.as_array()) {
+        if !unique.is_empty() {
+            html.push_str(&format!(
+                "<div class=\"chat-compare-section\" style=\"grid-column:1/-1;margin-top:4px\">\
+                    <strong style=\"font-size:0.8rem\">Only {}: </strong>",
+                html_escape(label_b),
+            ));
+            for (i, s) in unique.iter().enumerate() {
+                if i >= 10 { html.push_str("<span style=\"color:var(--text-muted);font-size:0.75rem\">...</span>"); break; }
+                if let Some(name) = s.as_str() {
+                    if i > 0 { html.push_str(", "); }
+                    html.push_str(&format!("<span style=\"font-size:0.8rem\">{}</span>", entity_link(name)));
+                }
+            }
+            html.push_str("</div>");
         }
     }
 
@@ -389,17 +443,19 @@ fn bar_chart_card(data: &serde_json::Value) -> String {
     let mut html = "<div class=\"chat-card\"><div class=\"chat-card-header\"><i class=\"fa-solid fa-chart-bar\"></i> Most Connected</div><div class=\"chat-card-body\">".to_string();
 
     for (i, e) in entities.iter().enumerate() {
-        if i >= 10 { break; }
+        if i >= 15 { break; }
         let label = e.get("label").and_then(|v| v.as_str()).unwrap_or("?");
+        let ntype = e.get("node_type").and_then(|v| v.as_str());
         let count = e.get("edge_count").and_then(|v| v.as_u64()).unwrap_or(0);
         let pct = if max_count > 0.0 { (count as f64 / max_count * 100.0).round() } else { 0.0 };
+        let badge = ntype.map(|t| type_badge(t)).unwrap_or_default();
         html.push_str(&format!(
             "<div class=\"chat-bar-row\">\
-                <span class=\"chat-bar-label\">{}</span>\
+                <span class=\"chat-bar-label\">{} {}</span>\
                 <div class=\"chat-bar-track\"><div class=\"chat-bar-fill\" style=\"width:{}%\"></div></div>\
                 <span class=\"chat-bar-count\">{}</span>\
              </div>",
-            entity_link(label), pct, count,
+            entity_link(label), badge, pct, count,
         ));
     }
 
@@ -441,38 +497,83 @@ fn briefing_card(data: &serde_json::Value) -> String {
 }
 
 fn path_card(data: &serde_json::Value) -> String {
+    let found = data.get("found").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !found {
+        return "<div class=\"chat-card chat-card-empty\"><i class=\"fa-solid fa-route\"></i> No path found between these entities</div>".to_string();
+    }
+
+    // Single path: { found, path: [PathStep], length }
+    let path = data.get("path").and_then(|v| v.as_array());
+    // Multi-path fallback: { paths: [[str]] }
     let paths = data.get("paths").and_then(|v| v.as_array());
-    if paths.is_none() || paths.unwrap().is_empty() {
-        return "<div class=\"chat-card chat-card-empty\"><i class=\"fa-solid fa-route\"></i> No paths found</div>".to_string();
-    }
-    let paths = paths.unwrap();
 
-    let mut html = format!(
-        "<div class=\"chat-card\">\
-            <div class=\"chat-card-header\"><i class=\"fa-solid fa-route\"></i> {} Path{} Found</div>\
-            <div class=\"chat-card-body\">",
-        paths.len(), if paths.len() != 1 { "s" } else { "" },
-    );
-
-    for (i, p) in paths.iter().enumerate() {
-        if i >= 5 { break; }
-        if let Some(nodes) = p.as_array() {
-            let labels: Vec<&str> = nodes.iter()
-                .filter_map(|n| n.as_str())
-                .collect();
-            let path_html: Vec<String> = labels.iter()
-                .map(|l| entity_link(l))
-                .collect();
-            html.push_str(&format!(
-                "<div class=\"chat-path-row\"><span class=\"chat-path-hops\">{} hops</span> {}</div>",
-                labels.len().saturating_sub(1),
-                path_html.join(" <i class=\"fa-solid fa-arrow-right\" style=\"font-size:0.6rem;color:var(--text-muted)\"></i> "),
-            ));
+    if let Some(steps) = path {
+        if steps.is_empty() {
+            return "<div class=\"chat-card chat-card-empty\"><i class=\"fa-solid fa-route\"></i> No path found</div>".to_string();
         }
+        let length = data.get("length").and_then(|v| v.as_u64()).unwrap_or(steps.len() as u64);
+
+        let mut html = format!(
+            "<div class=\"chat-card\">\
+                <div class=\"chat-card-header\"><i class=\"fa-solid fa-route\"></i> Path Found ({} hop{})</div>\
+                <div class=\"chat-card-body\"><div class=\"chat-path-chain\">",
+            length, if length != 1 { "s" } else { "" },
+        );
+
+        // Build: Entity -[rel]-> Entity -[rel]-> Entity
+        // The path starts from the first step; we need to infer the start entity
+        // PathStep: { entity, relationship, direction }
+        for (i, step) in steps.iter().enumerate() {
+            let entity = step.get("entity").and_then(|v| v.as_str()).unwrap_or("?");
+            let rel = step.get("relationship").and_then(|v| v.as_str()).unwrap_or("");
+            let dir = step.get("direction").and_then(|v| v.as_str()).unwrap_or("->");
+
+            if i > 0 || !rel.is_empty() {
+                let arrow = if dir == "<-" {
+                    "<i class=\"fa-solid fa-arrow-left\" style=\"font-size:0.6rem;color:var(--text-muted)\"></i>"
+                } else {
+                    "<i class=\"fa-solid fa-arrow-right\" style=\"font-size:0.6rem;color:var(--text-muted)\"></i>"
+                };
+                html.push_str(&format!(
+                    " <span style=\"font-size:0.7rem;color:var(--accent);padding:0 2px\">[{}]</span> {} ",
+                    html_escape(rel), arrow,
+                ));
+            }
+            html.push_str(&entity_link(entity));
+        }
+
+        html.push_str("</div></div></div>");
+        return html;
     }
 
-    html.push_str("</div></div>");
-    html
+    // Fallback: multi-path format (array of string arrays)
+    if let Some(paths) = paths {
+        if paths.is_empty() {
+            return "<div class=\"chat-card chat-card-empty\"><i class=\"fa-solid fa-route\"></i> No paths found</div>".to_string();
+        }
+        let mut html = format!(
+            "<div class=\"chat-card\">\
+                <div class=\"chat-card-header\"><i class=\"fa-solid fa-route\"></i> {} Path{} Found</div>\
+                <div class=\"chat-card-body\">",
+            paths.len(), if paths.len() != 1 { "s" } else { "" },
+        );
+        for (i, p) in paths.iter().enumerate() {
+            if i >= 5 { break; }
+            if let Some(nodes) = p.as_array() {
+                let labels: Vec<&str> = nodes.iter().filter_map(|n| n.as_str()).collect();
+                let path_html: Vec<String> = labels.iter().map(|l| entity_link(l)).collect();
+                html.push_str(&format!(
+                    "<div class=\"chat-path-row\"><span class=\"chat-path-hops\">{} hops</span> {}</div>",
+                    labels.len().saturating_sub(1),
+                    path_html.join(" <i class=\"fa-solid fa-arrow-right\" style=\"font-size:0.6rem;color:var(--text-muted)\"></i> "),
+                ));
+            }
+        }
+        html.push_str("</div></div>");
+        return html;
+    }
+
+    "<div class=\"chat-card chat-card-empty\"><i class=\"fa-solid fa-route\"></i> No path data</div>".to_string()
 }
 
 fn assessment_card(data: &serde_json::Value) -> String {
@@ -606,12 +707,14 @@ fn isolated_card(data: &serde_json::Value) -> String {
     );
 
     for (i, e) in entities.iter().enumerate() {
-        if i >= 10 { break; }
+        if i >= 20 { break; }
         let label = e.get("label").and_then(|v| v.as_str()).unwrap_or("?");
-        let ntype = e.get("node_type").and_then(|v| v.as_str()).unwrap_or("Entity");
+        let ntype = e.get("node_type").and_then(|v| v.as_str()).unwrap_or("entity");
+        let edge_count = e.get("edge_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let edge_label = if edge_count == 0 { "no connections".to_string() } else { format!("{} connection{}", edge_count, if edge_count != 1 { "s" } else { "" }) };
         html.push_str(&format!(
-            "<div class=\"chat-entity-row\">{} {}</div>",
-            entity_link(label), type_badge(ntype),
+            "<div class=\"chat-entity-row\">{} {} <span style=\"color:var(--text-muted);font-size:0.75rem;margin-left:auto\">{}</span></div>",
+            entity_link(label), type_badge(ntype), edge_label,
         ));
     }
 

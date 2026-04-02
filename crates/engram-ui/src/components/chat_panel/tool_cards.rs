@@ -135,6 +135,12 @@ static CARDS: &[ToolCard] = &[
             Field { id: "tc-mc-limit", label: "Limit", placeholder: "", field_type: FieldType::Number { default: "10", min: "1", max: "50", step: "1" }, required: false },
         ],
     },
+    ToolCard { tool: "isolated", title: "Isolated Entities", icon: "fa-solid fa-circle-dot", is_write: false, confirm: false,
+        button_label: "Find",
+        fields: &[
+            Field { id: "tc-iso-max", label: "Max Edges", placeholder: "", field_type: FieldType::Number { default: "1", min: "0", max: "5", step: "1" }, required: false },
+        ],
+    },
     // Temporal
     ToolCard { tool: "timeline", title: "Entity Timeline", icon: "fa-solid fa-clock", is_write: false, confirm: false,
         button_label: "Show Timeline",

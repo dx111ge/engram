@@ -108,9 +108,9 @@ pub async fn shortest_path(
 pub async fn most_connected(
     State(state): State<AppState>,
     Json(req): Json<MostConnectedRequest>,
-) -> ApiResult<Vec<ConnectedNode>> {
+) -> ApiResult<serde_json::Value> {
     let g = state.graph.read().map_err(|_| read_lock_err())?;
-    let limit = req.limit.unwrap_or(10);
+    let limit = req.limit.unwrap_or(10).min(50);
 
     let all = g.all_nodes().map_err(|e| api_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let mut nodes: Vec<ConnectedNode> = all.into_iter()
@@ -128,19 +128,19 @@ pub async fn most_connected(
     nodes.sort_by(|a, b| b.edge_count.cmp(&a.edge_count));
     nodes.truncate(limit);
 
-    Ok(Json(nodes))
+    Ok(Json(serde_json::json!({ "entities": nodes })))
 }
 
 /// POST /chat/isolated -- nodes with few/no connections
 pub async fn isolated(
     State(state): State<AppState>,
     Json(req): Json<IsolatedRequest>,
-) -> ApiResult<Vec<ConnectedNode>> {
+) -> ApiResult<serde_json::Value> {
     let g = state.graph.read().map_err(|_| read_lock_err())?;
     let max_edges = req.max_edges.unwrap_or(1);
 
     let all = g.all_nodes().map_err(|e| api_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let nodes: Vec<ConnectedNode> = all.into_iter()
+    let mut nodes: Vec<ConnectedNode> = all.into_iter()
         .filter(|n| {
             let total = n.edge_out_count as u32 + n.edge_in_count as u32;
             total <= max_edges && req.node_type.as_ref().map_or(true, |nt| n.node_type.as_deref() == Some(nt.as_str()))
@@ -153,7 +153,10 @@ pub async fn isolated(
         })
         .collect();
 
-    Ok(Json(nodes))
+    nodes.sort_by(|a, b| a.edge_count.cmp(&b.edge_count));
+    nodes.truncate(50);
+
+    Ok(Json(serde_json::json!({ "entities": nodes })))
 }
 
 /// POST /chat/what_if -- confidence cascade simulation
