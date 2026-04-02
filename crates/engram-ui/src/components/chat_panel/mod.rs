@@ -289,6 +289,10 @@ pub fn ChatPanel(
                     "network_analysis" => "tc-net-entity",
                     "entity_360" => "tc-360-entity",
                     "entity_gaps" => "tc-gaps-entity",
+                    "briefing" => "tc-brief-topic",
+                    "export" => "tc-export-entity",
+                    "dossier" => "tc-dossier-entity",
+                    "topic_map" => "tc-topicmap-topic",
                     _ => "",
                 };
                 if !id_prefix.is_empty() {
@@ -399,8 +403,8 @@ pub fn ChatPanel(
                     api.post_text("/chat/briefing", &body).await
                 }
                 "timeline" => {
-                    let body = serde_json::json!({"entity": prefill, "limit": 20});
-                    api.post_text("/chat/timeline", &body).await
+                    let body = serde_json::json!({"entity": prefill});
+                    api.post_text("/chat/entity_timeline", &body).await
                 }
                 "what_if" => {
                     // Show parameter card for what-if (needs entity + confidence)
@@ -856,8 +860,8 @@ pub fn ChatPanel(
                             api.post_text("/chat/most_connected", &body).await.map(|r| ("engram_most_connected".into(), r)).map_err(|e| e.to_string())
                         }
                         "timeline" => {
-                            let body = serde_json::json!({"entity": p("e"), "limit": 20});
-                            api.post_text("/chat/timeline", &body).await.map(|r| ("engram_timeline".into(), r)).map_err(|e| e.to_string())
+                            let body = serde_json::json!({"entity": p("e"), "from_date": p("from"), "to_date": p("to")});
+                            api.post_text("/chat/entity_timeline", &body).await.map(|r| ("engram_timeline".into(), r)).map_err(|e| e.to_string())
                         }
                         "date_query" => {
                             let body = serde_json::json!({"entity": p("entity"), "from_date": p("from"), "to_date": p("to")});
@@ -1096,6 +1100,70 @@ pub fn ChatPanel(
                             let entity = p("entity");
                             let body = serde_json::json!({"entity": entity});
                             api.post_text("/chat/entity_gaps", &body).await.map(|r| ("engram_entity_gaps".into(), r)).map_err(|e| e.to_string())
+                        }
+                        // Reporting tools
+                        "briefing" => {
+                            let topic = p("topic");
+                            let body = serde_json::json!({"topic": topic, "depth": "standard"});
+                            match api.post_text("/chat/briefing", &body).await {
+                                Ok(json_str) => {
+                                    let card_html = cards::render_tool_card("engram_briefing", &json_str);
+                                    dispatch_graph_data("engram_briefing", &json_str);
+                                    set_messages.update(|msgs| {
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: json_str.chars().take(500).collect(),
+                                            display_html: Some(card_html),
+                                        });
+                                    });
+                                    llm_analysis(&api, set_messages,
+                                        "Generate a structured briefing from this knowledge graph data. Include: key entities and their roles, major relationships and dynamics, temporal context where available, and confidence assessment. Format with clear sections.",
+                                        &format!("Generate briefing on '{}':\n{}", topic, &json_str[..json_str.len().min(4000)]),
+                                    ).await;
+                                    return;
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        }
+                        "export" => {
+                            let entity = p("entity");
+                            let depth = params.get("depth").and_then(|v| v.as_str()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(2);
+                            let body = serde_json::json!({"entity": entity, "depth": depth});
+                            api.post_text("/chat/export_subgraph", &body).await.map(|r| ("engram_export".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "dossier" => {
+                            let entity = p("entity");
+                            let body = serde_json::json!({"entity": entity});
+                            match api.post_text("/chat/dossier", &body).await {
+                                Ok(json_str) => {
+                                    let card_html = cards::render_tool_card("engram_dossier", &json_str);
+                                    dispatch_graph_data("engram_dossier", &json_str);
+                                    set_messages.update(|msgs| {
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: json_str.chars().take(500).collect(),
+                                            display_html: Some(card_html),
+                                        });
+                                    });
+                                    llm_analysis(&api, set_messages,
+                                        "Generate a comprehensive dossier report on this entity based on the knowledge graph data. Include an executive summary, key relationships, notable properties, temporal context, and any gaps or areas needing further investigation.",
+                                        &format!("Generate dossier on '{}':\n{}", entity, &json_str[..json_str.len().min(4000)]),
+                                    ).await;
+                                    return;
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        }
+                        "topic_map" => {
+                            let topic = p("topic");
+                            let body = serde_json::json!({"topic": topic});
+                            api.post_text("/chat/topic_map", &body).await.map(|r| ("engram_topic_map".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "graph_stats" => {
+                            let body = serde_json::json!({});
+                            api.post_text("/chat/graph_stats", &body).await.map(|r| ("engram_graph_stats".into(), r)).map_err(|e| e.to_string())
                         }
                         _ => Err(format!("Unknown tool: {}", tool)),
                     };

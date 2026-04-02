@@ -133,6 +133,19 @@ pub struct EntityGapsRequest {
 }
 
 #[derive(Deserialize)]
+pub struct DossierRequest {
+    pub entity: String,
+}
+
+#[derive(Deserialize)]
+pub struct TopicMapRequest {
+    pub topic: String,
+}
+
+#[derive(Deserialize)]
+pub struct GraphStatsRequest {}
+
+#[derive(Deserialize)]
 pub struct WatchRequest {
     pub entity: String,
 }

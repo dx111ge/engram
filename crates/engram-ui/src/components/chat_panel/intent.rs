@@ -100,6 +100,24 @@ pub fn detect_intent(text: &str) -> ChatIntent {
     if starts_any(&lower, &["ingest ", "ingest: ", "import "]) {
         return ChatIntent { tool: "ingest", prefill: after_keyword(trimmed, &["ingest ", "ingest: ", "import "]), prefill2: String::new() };
     }
+
+    // Reporting tools
+    // "export" / "download"
+    if starts_any(&lower, &["export ", "download "]) {
+        return ChatIntent { tool: "export", prefill: after_keyword(trimmed, &["export ", "export all about ", "download "]), prefill2: String::new() };
+    }
+    // "dossier" / "report on"
+    if starts_any(&lower, &["dossier ", "dossier on ", "report on ", "full report "]) {
+        return ChatIntent { tool: "dossier", prefill: after_keyword(trimmed, &["dossier on ", "dossier ", "report on ", "full report on ", "full report "]), prefill2: String::new() };
+    }
+    // "topic map" / "what do I know about"
+    if starts_any(&lower, &["topic map ", "what do i know about ", "map of ", "coverage of "]) {
+        return ChatIntent { tool: "topic_map", prefill: after_keyword(trimmed, &["topic map of ", "topic map ", "what do i know about ", "map of ", "coverage of "]), prefill2: String::new() };
+    }
+    // "graph stats" / "knowledge health"
+    if lower.contains("graph stat") || lower.contains("knowledge health") || lower.contains("graph overview") || lower == "stats" || lower.contains("how much do i know") {
+        return ChatIntent { tool: "graph_stats", prefill: String::new(), prefill2: String::new() };
+    }
     if starts_any(&lower, &["briefing on ", "briefing about ", "brief me on ", "brief me about ", "summarize ", "summary of "]) {
         return ChatIntent { tool: "briefing", prefill: after_keyword(trimmed, &["briefing on ", "briefing about ", "brief me on ", "brief me about ", "summarize ", "summary of "]), prefill2: String::new() };
     }

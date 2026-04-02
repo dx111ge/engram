@@ -244,6 +244,36 @@ static CARDS: &[ToolCard] = &[
             Field { id: "tc-gaps-entity", label: "Entity", placeholder: "Entity name...", field_type: FieldType::Text, required: true },
         ],
     },
+    // Reporting tools
+    ToolCard { tool: "briefing", title: "Briefing", icon: "fa-solid fa-file-lines", is_write: false, confirm: false,
+        button_label: "Generate Briefing",
+        fields: &[
+            Field { id: "tc-brief-topic", label: "Topic", placeholder: "Topic or entity...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "export", title: "Export Subgraph", icon: "fa-solid fa-file-export", is_write: false, confirm: false,
+        button_label: "Export JSON",
+        fields: &[
+            Field { id: "tc-export-entity", label: "Entity", placeholder: "Center entity...", field_type: FieldType::Text, required: true },
+            Field { id: "tc-export-depth", label: "Depth", placeholder: "", field_type: FieldType::Number { default: "2", min: "1", max: "5", step: "1" }, required: false },
+        ],
+    },
+    ToolCard { tool: "dossier", title: "Entity Dossier", icon: "fa-solid fa-address-card", is_write: false, confirm: false,
+        button_label: "Generate Dossier",
+        fields: &[
+            Field { id: "tc-dossier-entity", label: "Entity", placeholder: "Entity name...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "topic_map", title: "Topic Map", icon: "fa-solid fa-sitemap", is_write: false, confirm: false,
+        button_label: "Map Topic",
+        fields: &[
+            Field { id: "tc-topicmap-topic", label: "Topic", placeholder: "Topic or theme...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "graph_stats", title: "Knowledge Health", icon: "fa-solid fa-chart-pie", is_write: false, confirm: false,
+        button_label: "Show Stats",
+        fields: &[],
+    },
 ];
 
 /// Generate a tool parameter card. Returns None if tool has no card definition.
