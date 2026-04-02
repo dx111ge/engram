@@ -32,6 +32,25 @@ pub enum ScoreTrigger {
     Decay,
 }
 
+/// A single piece of evidence linked to an assessment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceEntry {
+    /// Label of the evidence node in the graph.
+    pub node_label: String,
+    /// Confidence value at time of addition.
+    pub confidence: f32,
+    /// true = supports hypothesis, false = contradicts.
+    pub supports: bool,
+    /// When this evidence was added (unix seconds).
+    pub added_at: i64,
+    /// Source of this evidence (e.g. "kb:wikidata", "user", "llm", "graph_propagation").
+    #[serde(default)]
+    pub source: String,
+    /// Optional graph edge ID linking evidence to assessment.
+    #[serde(default)]
+    pub edge_id: Option<u64>,
+}
+
 /// Per-assessment record stored in the sidecar file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssessmentRecord {
@@ -41,10 +60,73 @@ pub struct AssessmentRecord {
     pub node_id: u64,
     /// Append-only time-series of score changes.
     pub history: Vec<ScorePoint>,
-    /// Cached confidence values for supporting evidence.
+    /// Structured evidence entries (replaces flat f32 arrays).
+    #[serde(default)]
+    pub evidence: Vec<EvidenceEntry>,
+    /// Success criteria -- what would confirm or deny this hypothesis.
+    #[serde(default)]
+    pub success_criteria: Option<String>,
+    /// Tags for grouping/filtering.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Resolution state: active, confirmed, denied, inconclusive, superseded.
+    #[serde(default = "default_resolution")]
+    pub resolution: String,
+
+    // Legacy fields (backward compat with old .brain.assessments files)
+    /// Deprecated: use `evidence` instead. Kept for migration.
+    #[serde(default, skip_serializing)]
     pub evidence_for: Vec<f32>,
-    /// Cached confidence values for contradicting evidence.
+    /// Deprecated: use `evidence` instead. Kept for migration.
+    #[serde(default, skip_serializing)]
     pub evidence_against: Vec<f32>,
+}
+
+fn default_resolution() -> String { "active".to_string() }
+
+impl AssessmentRecord {
+    /// Migrate legacy flat arrays to structured evidence entries.
+    /// Called once on load if old format detected.
+    pub fn migrate_legacy_evidence(&mut self) {
+        if self.evidence.is_empty() && (!self.evidence_for.is_empty() || !self.evidence_against.is_empty()) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            for (i, &conf) in self.evidence_for.iter().enumerate() {
+                self.evidence.push(EvidenceEntry {
+                    node_label: format!("legacy_evidence_{}", i),
+                    confidence: conf,
+                    supports: true,
+                    added_at: now,
+                    source: "migrated".to_string(),
+                    edge_id: None,
+                });
+            }
+            for (i, &conf) in self.evidence_against.iter().enumerate() {
+                self.evidence.push(EvidenceEntry {
+                    node_label: format!("legacy_contra_{}", i),
+                    confidence: conf,
+                    supports: false,
+                    added_at: now,
+                    source: "migrated".to_string(),
+                    edge_id: None,
+                });
+            }
+            self.evidence_for.clear();
+            self.evidence_against.clear();
+        }
+    }
+
+    /// Get supporting evidence entries.
+    pub fn evidence_for_entries(&self) -> Vec<&EvidenceEntry> {
+        self.evidence.iter().filter(|e| e.supports).collect()
+    }
+
+    /// Get contradicting evidence entries.
+    pub fn evidence_against_entries(&self) -> Vec<&EvidenceEntry> {
+        self.evidence.iter().filter(|e| !e.supports).collect()
+    }
 }
 
 /// Request to create an assessment.
@@ -63,6 +145,11 @@ pub struct CreateAssessmentRequest {
     /// Entity labels to watch.
     #[serde(default)]
     pub watches: Vec<String>,
+    /// What would confirm or deny this hypothesis.
+    pub success_criteria: Option<String>,
+    /// Tags for grouping/filtering.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Request to update an assessment.
@@ -75,6 +162,11 @@ pub struct UpdateAssessmentRequest {
     pub timeframe: Option<String>,
     /// Manual probability override [0.05, 0.95].
     pub probability: Option<f32>,
+    pub success_criteria: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// Resolution state: active, confirmed, denied, inconclusive, superseded.
+    pub resolution: Option<String>,
 }
 
 /// Request to add evidence.
@@ -107,6 +199,11 @@ pub struct AssessmentSummary {
     pub last_evaluated: i64,
     pub evidence_count: usize,
     pub watch_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_shift: Option<f32>,
+    pub resolution: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// Full detail response for an assessment.
@@ -124,6 +221,11 @@ pub struct AssessmentDetail {
     pub evidence_for: Vec<EvidenceItem>,
     pub evidence_against: Vec<EvidenceItem>,
     pub watches: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success_criteria: Option<String>,
+    pub resolution: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// An evidence item with source info.
@@ -132,6 +234,10 @@ pub struct EvidenceItem {
     pub node_label: String,
     pub confidence: f32,
     pub edge_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Result of an evaluation run.

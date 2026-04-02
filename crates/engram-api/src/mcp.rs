@@ -796,6 +796,10 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
                     reason: "Created via MCP".to_string(),
                     path: None,
                 }],
+                evidence: vec![],
+                success_criteria: None,
+                tags: vec![],
+                resolution: "active".to_string(),
                 evidence_for: vec![],
                 evidence_against: vec![],
             };
@@ -894,6 +898,8 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
                 engram_assess::ScoreTrigger::EvidenceAdded { node_id: 0 },
                 format!("{} {} assessment (via MCP)", node_label, direction),
                 None,
+                node_label,
+                "mcp",
             );
             state.mark_dirty();
 

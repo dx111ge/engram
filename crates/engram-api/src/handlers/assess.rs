@@ -62,6 +62,10 @@ pub async fn create_assessment(
                 reason: "Initial assessment created".to_string(),
                 path: None,
             }],
+            evidence: vec![],
+            success_criteria: req.success_criteria.clone(),
+            tags: req.tags.clone(),
+            resolution: "active".to_string(),
             evidence_for: vec![],
             evidence_against: vec![],
         };
@@ -368,6 +372,8 @@ pub async fn add_assessment_evidence(
             engram_assess::ScoreTrigger::EvidenceAdded { node_id },
             format!("Evidence '{}' {} assessment", req.node_label, if supports { "supports" } else { "contradicts" }),
             None,
+            &req.node_label,
+            "user",
         )
     };
 

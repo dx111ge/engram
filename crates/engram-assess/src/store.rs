@@ -145,6 +145,10 @@ mod tests {
                 reason: "Initial assessment".to_string(),
                 path: None,
             }],
+            evidence: vec![],
+            success_criteria: None,
+            tags: vec![],
+            resolution: "active".to_string(),
             evidence_for: vec![],
             evidence_against: vec![],
         }

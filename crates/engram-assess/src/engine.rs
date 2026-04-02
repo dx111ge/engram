@@ -2,8 +2,8 @@
 ///
 /// Handles:
 /// - Adaptive BFS pathfinding to find affected assessments
-/// - Probability recalculation using engram-intel probability module
-/// - Evidence management (add/remove supporting/contradicting evidence)
+/// - Bayesian log-odds probability with time decay
+/// - Structured evidence management via EvidenceEntry
 /// - EventBus subscription for auto-evaluation
 
 use std::collections::{HashSet, VecDeque};
@@ -14,9 +14,54 @@ use engram_core::graph::Graph;
 use crate::store::AssessmentStore;
 use crate::types::*;
 
-/// Bayesian probability calculation (mirrors engram-intel::probability).
-/// Inlined here to avoid WASM crate dependency.
-fn calculate_probability(evidence_for: &[f32], evidence_against: &[f32]) -> f32 {
+/// Half-life for time decay in seconds (30 days).
+const HALF_LIFE_SECS: f64 = 30.0 * 24.0 * 3600.0;
+
+/// ln(2) constant for decay calculation.
+const LN2: f64 = std::f64::consts::LN_2;
+
+/// Current unix timestamp in seconds.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+/// Bayesian log-odds probability calculation with time decay.
+///
+/// - Starts from prior log-odds = 0 (probability 0.50)
+/// - Each evidence: strength = confidence^2 * time_decay
+/// - Time decay: exp(-(age_secs / half_life) * ln2), half_life = 30 days
+/// - Supporting evidence adds to log-odds, contradicting subtracts
+/// - Final: p = 1 / (1 + exp(-log_odds)), clamped [0.05, 0.95]
+fn calculate_probability(evidence: &[EvidenceEntry]) -> f32 {
+    if evidence.is_empty() {
+        return 0.50;
+    }
+
+    let now = now_secs();
+    let mut log_odds: f64 = 0.0;
+
+    for entry in evidence {
+        let age_secs = (now - entry.added_at).max(0) as f64;
+        let decay = (-age_secs / HALF_LIFE_SECS * LN2).exp();
+        let strength = (entry.confidence as f64) * (entry.confidence as f64) * decay;
+
+        if entry.supports {
+            log_odds += strength;
+        } else {
+            log_odds -= strength;
+        }
+    }
+
+    let p = 1.0 / (1.0 + (-log_odds).exp());
+    (p as f32).clamp(0.05, 0.95)
+}
+
+/// Legacy probability calculation for backward compatibility.
+/// Uses the old weighted-average approach without time decay.
+fn calculate_probability_legacy(evidence_for: &[f32], evidence_against: &[f32]) -> f32 {
     if evidence_for.is_empty() && evidence_against.is_empty() {
         return 0.50;
     }
@@ -44,21 +89,6 @@ fn calculate_probability(evidence_for: &[f32], evidence_against: &[f32]) -> f32 
 
     let prob = weighted_for * (1.0 - weighted_against * discount);
     prob.clamp(0.05, 0.95)
-}
-
-fn _calculate_with_shift(
-    existing_for: &[f32],
-    existing_against: &[f32],
-    new_for: &[f32],
-    new_against: &[f32],
-) -> (f32, f32) {
-    let old_prob = calculate_probability(existing_for, existing_against);
-    let mut all_for = existing_for.to_vec();
-    all_for.extend_from_slice(new_for);
-    let mut all_against = existing_against.to_vec();
-    all_against.extend_from_slice(new_against);
-    let new_prob = calculate_probability(&all_for, &all_against);
-    (new_prob, new_prob - old_prob)
 }
 
 /// Find assessments affected by a new/updated node via adaptive BFS.
@@ -154,12 +184,12 @@ fn bfs_find_assessments(
     results
 }
 
-/// Recalculate probability for an assessment based on its evidence arrays.
+/// Recalculate probability for an assessment based on its structured evidence.
 pub fn recalculate_probability(record: &AssessmentRecord) -> f32 {
-    calculate_probability(&record.evidence_for, &record.evidence_against)
+    calculate_probability(&record.evidence)
 }
 
-/// Add evidence to an assessment and recalculate probability.
+/// Add structured evidence to an assessment and recalculate probability.
 /// Returns the new ScorePoint.
 pub fn add_evidence(
     record: &mut AssessmentRecord,
@@ -168,22 +198,23 @@ pub fn add_evidence(
     trigger: ScoreTrigger,
     reason: String,
     path: Option<Vec<String>>,
+    node_label: &str,
+    source: &str,
 ) -> ScorePoint {
-    let old_prob = calculate_probability(&record.evidence_for, &record.evidence_against);
+    let now = now_secs();
+    let old_prob = calculate_probability(&record.evidence);
 
-    if supports {
-        record.evidence_for.push(confidence);
-    } else {
-        record.evidence_against.push(confidence);
-    }
+    record.evidence.push(EvidenceEntry {
+        node_label: node_label.to_string(),
+        confidence,
+        supports,
+        added_at: now,
+        source: source.to_string(),
+        edge_id: None,
+    });
 
-    let new_prob = calculate_probability(&record.evidence_for, &record.evidence_against);
+    let new_prob = calculate_probability(&record.evidence);
     let shift = new_prob - old_prob;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
 
     let point = ScorePoint {
         timestamp: now,
@@ -198,20 +229,17 @@ pub fn add_evidence(
     point
 }
 
-/// Full re-evaluation: recalculate probability from evidence arrays.
+/// Full re-evaluation: recalculate probability from structured evidence.
 /// Returns the new ScorePoint.
 pub fn evaluate(record: &mut AssessmentRecord) -> ScorePoint {
     let old_prob = record.history.last()
         .map(|p| p.probability)
         .unwrap_or(0.50);
 
-    let new_prob = calculate_probability(&record.evidence_for, &record.evidence_against);
+    let new_prob = calculate_probability(&record.evidence);
     let shift = new_prob - old_prob;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let now = now_secs();
 
     let point = ScorePoint {
         timestamp: now,
@@ -260,7 +288,7 @@ impl AssessmentEngine {
 
         for assessment in affected {
             if let Some(record) = store.get_mut(&assessment.label) {
-                let old_prob = calculate_probability(&record.evidence_for, &record.evidence_against);
+                let old_prob = calculate_probability(&record.evidence);
 
                 let point = add_evidence(
                     record,
@@ -269,6 +297,8 @@ impl AssessmentEngine {
                     ScoreTrigger::GraphPropagation { source_node_id: 0 },
                     format!("New fact '{}' propagated via {} hops", label, assessment.path_labels.len()),
                     Some(assessment.path_labels.clone()),
+                    label,
+                    "graph_propagation",
                 );
 
                 results.push(EvaluationResult {
@@ -290,38 +320,115 @@ impl AssessmentEngine {
 mod tests {
     use super::*;
 
+    fn make_evidence(confidence: f32, supports: bool) -> EvidenceEntry {
+        EvidenceEntry {
+            node_label: "test_node".to_string(),
+            confidence,
+            supports,
+            added_at: now_secs(),
+            source: "test".to_string(),
+            edge_id: None,
+        }
+    }
+
+    fn make_record() -> AssessmentRecord {
+        AssessmentRecord {
+            label: "Assessment:test".to_string(),
+            node_id: 1,
+            history: vec![],
+            evidence: vec![],
+            success_criteria: None,
+            tags: vec![],
+            resolution: "active".to_string(),
+            evidence_for: vec![],
+            evidence_against: vec![],
+        }
+    }
+
     #[test]
     fn probability_no_evidence() {
-        assert!((calculate_probability(&[], &[]) - 0.50).abs() < 0.01);
+        assert!((calculate_probability(&[]) - 0.50).abs() < 0.01);
     }
 
     #[test]
     fn probability_strong_support() {
-        let p = calculate_probability(&[0.90, 0.88, 0.85], &[]);
+        let evidence = vec![
+            make_evidence(0.90, true),
+            make_evidence(0.88, true),
+            make_evidence(0.85, true),
+        ];
+        let p = calculate_probability(&evidence);
+        assert!(p > 0.60, "expected > 0.60, got {}", p);
+    }
+
+    #[test]
+    fn probability_contradicting_lowers() {
+        let support_only = vec![
+            make_evidence(0.85, true),
+            make_evidence(0.80, true),
+        ];
+        let with_contra = vec![
+            make_evidence(0.85, true),
+            make_evidence(0.80, true),
+            make_evidence(0.90, false),
+        ];
+        let p_support = calculate_probability(&support_only);
+        let p_mixed = calculate_probability(&with_contra);
+        assert!(p_mixed < p_support, "contradicting evidence should lower probability: {} vs {}", p_mixed, p_support);
+    }
+
+    #[test]
+    fn probability_clamped() {
+        // Even with extreme evidence, should stay in [0.05, 0.95]
+        let extreme_for: Vec<EvidenceEntry> = (0..20).map(|_| make_evidence(0.99, true)).collect();
+        let p = calculate_probability(&extreme_for);
+        assert!(p <= 0.95, "should be clamped to 0.95, got {}", p);
+        assert!(p >= 0.05);
+
+        let extreme_against: Vec<EvidenceEntry> = (0..20).map(|_| make_evidence(0.99, false)).collect();
+        let p = calculate_probability(&extreme_against);
+        assert!(p >= 0.05, "should be clamped to 0.05, got {}", p);
+        assert!(p <= 0.95);
+    }
+
+    #[test]
+    fn time_decay_reduces_old_evidence() {
+        let now = now_secs();
+        let fresh = vec![EvidenceEntry {
+            node_label: "fresh".to_string(),
+            confidence: 0.90,
+            supports: true,
+            added_at: now,
+            source: "test".to_string(),
+            edge_id: None,
+        }];
+        let old = vec![EvidenceEntry {
+            node_label: "old".to_string(),
+            confidence: 0.90,
+            supports: true,
+            added_at: now - 90 * 24 * 3600, // 90 days ago
+            source: "test".to_string(),
+            edge_id: None,
+        }];
+        let p_fresh = calculate_probability(&fresh);
+        let p_old = calculate_probability(&old);
+        assert!(p_fresh > p_old, "fresh evidence should have more impact: {} vs {}", p_fresh, p_old);
+    }
+
+    #[test]
+    fn legacy_probability_no_evidence() {
+        assert!((calculate_probability_legacy(&[], &[]) - 0.50).abs() < 0.01);
+    }
+
+    #[test]
+    fn legacy_probability_strong_support() {
+        let p = calculate_probability_legacy(&[0.90, 0.88, 0.85], &[]);
         assert!(p > 0.60);
     }
 
     #[test]
-    fn probability_shift() {
-        let (new_p, shift) = _calculate_with_shift(
-            &[0.85, 0.80],
-            &[0.90],
-            &[0.78],
-            &[],
-        );
-        assert!(shift > 0.0);
-        assert!(new_p > calculate_probability(&[0.85, 0.80], &[0.90]));
-    }
-
-    #[test]
     fn add_evidence_updates_record() {
-        let mut record = AssessmentRecord {
-            label: "Assessment:test".to_string(),
-            node_id: 1,
-            history: vec![],
-            evidence_for: vec![],
-            evidence_against: vec![],
-        };
+        let mut record = make_record();
 
         let point = add_evidence(
             &mut record,
@@ -330,10 +437,26 @@ mod tests {
             ScoreTrigger::Manual,
             "Test evidence".to_string(),
             None,
+            "test_node",
+            "user",
         );
 
-        assert_eq!(record.evidence_for.len(), 1);
+        assert_eq!(record.evidence.len(), 1);
+        assert!(record.evidence[0].supports);
+        assert_eq!(record.evidence[0].node_label, "test_node");
+        assert_eq!(record.evidence[0].source, "user");
         assert!(point.probability > 0.05);
+        assert_eq!(record.history.len(), 1);
+    }
+
+    #[test]
+    fn evaluate_uses_structured_evidence() {
+        let mut record = make_record();
+        record.evidence.push(make_evidence(0.90, true));
+        record.evidence.push(make_evidence(0.85, true));
+
+        let point = evaluate(&mut record);
+        assert!(point.probability > 0.50, "should be above prior with supporting evidence");
         assert_eq!(record.history.len(), 1);
     }
 }

@@ -592,6 +592,10 @@ mod assess_service {
                         reason: "Assessment created".to_string(),
                         path: None,
                     }],
+                    evidence: vec![],
+                    success_criteria: None,
+                    tags: vec![],
+                    resolution: "active".to_string(),
                     evidence_for: vec![],
                     evidence_against: vec![],
                 };
@@ -731,6 +735,8 @@ mod assess_service {
                 engram_assess::ScoreTrigger::Manual,
                 format!("gRPC evidence: {}", req.node_label),
                 None,
+                &req.node_label,
+                "grpc",
             );
 
             Ok(Response::new(proto::EvidenceResponse {
