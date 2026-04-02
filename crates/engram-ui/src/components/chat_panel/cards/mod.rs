@@ -308,9 +308,11 @@ mod tests {
 
     #[test]
     fn test_path_card() {
-        let data = r#"{"paths":[["Putin","Russia","Moscow"]]}"#;
+        // Current path_card checks `found` field first; without it, defaults to not-found
+        // Use the new structured format with found=true and path steps
+        let data = r#"{"found":true,"length":2,"path":[{"entity":"Putin","relationship":"","direction":"->"},{"entity":"Russia","relationship":"leads","direction":"->"},{"entity":"Moscow","relationship":"capital_of","direction":"->"}]}"#;
         let html = render_tool_card("engram_shortest_path", data);
-        assert!(html.contains("Path"));
+        assert!(html.contains("Path Found"));
         assert!(html.contains("Putin"));
         assert!(html.contains("Moscow"));
         assert!(html.contains("2 hops"));
@@ -318,17 +320,19 @@ mod tests {
 
     #[test]
     fn test_path_card_empty() {
-        let data = r#"{"paths":[]}"#;
+        // found=false triggers the no-path message
+        let data = r#"{"found":false}"#;
         let html = render_tool_card("engram_shortest_path", data);
-        assert!(html.contains("No paths found"));
+        assert!(html.contains("No path found"));
     }
 
     #[test]
     fn test_assessment_card() {
-        let data = r#"{"title":"Sanctions Impact","category":"economic","probability":0.65}"#;
+        // assess_create_card reads "label" field (not "title")
+        let data = r#"{"label":"Assessment:sanctions-impact","probability":0.65,"status":"active"}"#;
         let html = render_tool_card("engram_assess_create", data);
-        assert!(html.contains("Sanctions Impact"));
-        assert!(html.contains("economic"));
+        assert!(html.contains("Assessment:sanctions-impact"));
+        assert!(html.contains("Assessment Created"));
         assert!(html.contains("chat-confidence-bar"));
     }
 
@@ -421,5 +425,195 @@ mod tests {
         assert!(result.is_none());
         let result = extract_graph_data("engram_ingest_text", r#"{"text":"test"}"#);
         assert!(result.is_none());
+    }
+
+    // ── NEW: Compare card with shared neighbors and unique sets ──
+
+    #[test]
+    fn test_compare_card_shared_neighbors() {
+        let data = r#"{
+            "entity_a": {"label": "Russia", "node_type": "Country", "confidence": 0.9},
+            "entity_b": {"label": "Ukraine", "node_type": "Country", "confidence": 0.85},
+            "shared_neighbors": ["NATO", "EU", "USA"],
+            "unique_to_a": ["BRICS", "China"],
+            "unique_to_b": ["Poland", "UK"]
+        }"#;
+        let html = render_tool_card("engram_compare", data);
+        assert!(html.contains("Russia"), "should contain entity A label");
+        assert!(html.contains("Ukraine"), "should contain entity B label");
+        assert!(html.contains("3 shared connections"), "should show shared count");
+        assert!(html.contains("NATO"), "should list shared neighbor NATO");
+        assert!(html.contains("EU"), "should list shared neighbor EU");
+        assert!(html.contains("USA"), "should list shared neighbor USA");
+    }
+
+    #[test]
+    fn test_compare_card_unique_to_a_and_b() {
+        let data = r#"{
+            "entity_a": {"label": "NATO", "node_type": "Organization", "confidence": 0.95},
+            "entity_b": {"label": "CSTO", "node_type": "Organization", "confidence": 0.7},
+            "unique_to_a": ["USA", "UK", "France"],
+            "unique_to_b": ["Russia", "Armenia"]
+        }"#;
+        let html = render_tool_card("engram_compare", data);
+        assert!(html.contains("Only NATO"), "should show 'Only NATO' section");
+        assert!(html.contains("USA"), "should list unique to A");
+        assert!(html.contains("Only CSTO"), "should show 'Only CSTO' section");
+        assert!(html.contains("Armenia"), "should list unique to B");
+    }
+
+    #[test]
+    fn test_compare_card_no_shared_no_unique() {
+        let data = r#"{
+            "entity_a": {"label": "X", "node_type": "Entity", "confidence": 0.5},
+            "entity_b": {"label": "Y", "node_type": "Entity", "confidence": 0.5}
+        }"#;
+        let html = render_tool_card("engram_compare", data);
+        assert!(html.contains("X"), "should still show entity A");
+        assert!(html.contains("Y"), "should still show entity B");
+        assert!(!html.contains("shared connection"), "should not mention shared connections");
+    }
+
+    #[test]
+    fn test_compare_card_single_shared() {
+        let data = r#"{
+            "entity_a": {"label": "A", "node_type": "Entity", "confidence": 0.5},
+            "entity_b": {"label": "B", "node_type": "Entity", "confidence": 0.5},
+            "shared_neighbors": ["Common"]
+        }"#;
+        let html = render_tool_card("engram_compare", data);
+        assert!(html.contains("1 shared connection"), "should use singular 'connection'");
+        assert!(!html.contains("connections"), "should not use plural");
+    }
+
+    // ── NEW: Path card with found=false ──
+
+    #[test]
+    fn test_path_card_found_false() {
+        let data = r#"{"found": false}"#;
+        let html = render_tool_card("engram_shortest_path", data);
+        assert!(html.contains("No path found between these entities"), "found=false should show no-path message");
+        assert!(html.contains("chat-card-empty"), "should have empty card class");
+    }
+
+    #[test]
+    fn test_path_card_found_true_with_steps() {
+        let data = r#"{
+            "found": true,
+            "length": 2,
+            "path": [
+                {"entity": "Putin", "relationship": "", "direction": "->"},
+                {"entity": "Russia", "relationship": "leads", "direction": "->"},
+                {"entity": "Moscow", "relationship": "has_capital", "direction": "->"}
+            ]
+        }"#;
+        let html = render_tool_card("engram_shortest_path", data);
+        assert!(html.contains("Path Found"), "should show path found header");
+        assert!(html.contains("2 hops"), "should show hop count");
+        assert!(html.contains("Putin"), "should contain start entity");
+        assert!(html.contains("Moscow"), "should contain end entity");
+        assert!(html.contains("leads"), "should show relationship label");
+    }
+
+    #[test]
+    fn test_path_card_found_true_empty_path() {
+        let data = r#"{"found": true, "path": []}"#;
+        let html = render_tool_card("engram_shortest_path", data);
+        assert!(html.contains("No path found"), "empty path array should show no-path");
+    }
+
+    // ── NEW: Graph stats card ──
+
+    #[test]
+    fn test_graph_stats_card_entity_type_breakdown() {
+        let data = r#"{
+            "total_nodes": 150,
+            "total_edges": 320,
+            "nodes_by_type": [
+                {"type": "Person", "count": 50},
+                {"type": "Organization", "count": 40},
+                {"type": "Country", "count": 30},
+                {"type": "Event", "count": 20},
+                {"type": "Entity", "count": 10}
+            ],
+            "confidence_distribution": {"high": 80, "medium": 50, "low": 20}
+        }"#;
+        let html = render_tool_card("engram_graph_stats", data);
+        assert!(html.contains("150"), "should show total node count");
+        assert!(html.contains("320"), "should show total edge count");
+        assert!(html.contains("Person"), "should show Person type");
+        assert!(html.contains("Organization"), "should show Organization type");
+        assert!(html.contains("Country"), "should show Country type");
+        assert!(html.contains("50"), "should show Person count");
+        assert!(html.contains("Knowledge Base Health"), "should have health header");
+    }
+
+    #[test]
+    fn test_graph_stats_card_confidence_distribution() {
+        let data = r#"{
+            "total_nodes": 100,
+            "total_edges": 200,
+            "confidence_distribution": {"high": 60, "medium": 30, "low": 10}
+        }"#;
+        let html = render_tool_card("engram_graph_stats", data);
+        assert!(html.contains("60 high"), "should show high confidence count");
+        assert!(html.contains("30 medium"), "should show medium confidence count");
+        assert!(html.contains("10 low"), "should show low confidence count");
+        // Check color coding
+        assert!(html.contains("#66bb6a"), "should have green for high");
+        assert!(html.contains("#ffa726"), "should have orange for medium");
+        assert!(html.contains("#ef5350"), "should have red for low");
+    }
+
+    #[test]
+    fn test_graph_stats_card_empty() {
+        let data = r#"{"total_nodes": 0, "total_edges": 0}"#;
+        let html = render_tool_card("engram_graph_stats", data);
+        assert!(html.contains("0"), "should show zero counts");
+        assert!(html.contains("Knowledge Base Health"), "should still show header");
+    }
+
+    // ── NEW: Isolated card tests ──
+
+    #[test]
+    fn test_isolated_card_empty() {
+        let data = r#"{"entities": []}"#;
+        let html = render_tool_card("engram_isolated", data);
+        assert!(html.contains("No isolated") || html.contains("chat-card-empty"),
+            "empty entities should show empty state");
+    }
+
+    #[test]
+    fn test_isolated_card_multiple() {
+        let data = r#"{"entities": [
+            {"label": "Orphan1", "node_type": "Person"},
+            {"label": "Orphan2", "node_type": "Organization"}
+        ]}"#;
+        let html = render_tool_card("engram_isolated", data);
+        assert!(html.contains("Orphan1"));
+        assert!(html.contains("Orphan2"));
+    }
+
+    // ── NEW: Bar chart (most connected) card tests ──
+
+    #[test]
+    fn test_bar_chart_card_empty() {
+        let data = r#"{"entities": []}"#;
+        let html = render_tool_card("engram_most_connected", data);
+        assert!(html.contains("No results") || html.contains("chat-card-empty"));
+    }
+
+    #[test]
+    fn test_bar_chart_card_renders_bars() {
+        let data = r#"{"entities": [
+            {"label": "Russia", "edge_count": 42},
+            {"label": "USA", "edge_count": 38},
+            {"label": "China", "edge_count": 25}
+        ]}"#;
+        let html = render_tool_card("engram_most_connected", data);
+        assert!(html.contains("Russia"), "should show top entity");
+        assert!(html.contains("USA"), "should show second entity");
+        assert!(html.contains("China"), "should show third entity");
+        assert!(html.contains("Most Connected"), "should have correct header");
     }
 }

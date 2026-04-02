@@ -468,4 +468,256 @@ mod tests {
         assert!(point.probability > 0.50, "should be above prior with supporting evidence");
         assert_eq!(record.history.len(), 1);
     }
+
+    // ── NEW: Bayesian calculation with mixed evidence ──
+
+    #[test]
+    fn probability_mixed_evidence_partial_cancellation() {
+        // 2 supporting, 1 contradicting at equal confidence -> still above 0.50
+        let evidence = vec![
+            make_evidence(0.80, true),
+            make_evidence(0.80, true),
+            make_evidence(0.80, false),
+        ];
+        let p = calculate_probability(&evidence);
+        assert!(p > 0.50, "2 for vs 1 against should still be above 0.50, got {}", p);
+    }
+
+    #[test]
+    fn probability_equal_opposing_evidence_near_neutral() {
+        // Equal support and contradiction should be near 0.50
+        let evidence = vec![
+            make_evidence(0.85, true),
+            make_evidence(0.85, false),
+        ];
+        let p = calculate_probability(&evidence);
+        assert!((p - 0.50).abs() < 0.05, "equal opposing evidence should be near 0.50, got {}", p);
+    }
+
+    #[test]
+    fn probability_overwhelming_against() {
+        let evidence = vec![
+            make_evidence(0.90, false),
+            make_evidence(0.88, false),
+            make_evidence(0.92, false),
+        ];
+        let p = calculate_probability(&evidence);
+        assert!(p < 0.40, "overwhelming contradicting evidence should be well below 0.50, got {}", p);
+    }
+
+    #[test]
+    fn probability_low_confidence_evidence_weak_effect() {
+        let low_conf = vec![make_evidence(0.10, true)];
+        let high_conf = vec![make_evidence(0.90, true)];
+        let p_low = calculate_probability(&low_conf);
+        let p_high = calculate_probability(&high_conf);
+        // Low confidence uses confidence^2 so 0.10^2 = 0.01, very weak
+        assert!(p_high - 0.50 > (p_low - 0.50) * 5.0,
+            "high confidence should have much stronger effect: low={}, high={}", p_low, p_high);
+    }
+
+    // ── NEW: Time decay tests ──
+
+    #[test]
+    fn time_decay_30_day_half_life() {
+        let now = now_secs();
+        // Evidence from exactly one half-life ago should have ~half the strength
+        let fresh = vec![EvidenceEntry {
+            node_label: "fresh".to_string(),
+            confidence: 0.90,
+            supports: true,
+            added_at: now,
+            source: "test".to_string(),
+            edge_id: None,
+        }];
+        let one_halflife = vec![EvidenceEntry {
+            node_label: "old".to_string(),
+            confidence: 0.90,
+            supports: true,
+            added_at: now - (30 * 24 * 3600), // exactly 30 days
+            source: "test".to_string(),
+            edge_id: None,
+        }];
+        let p_fresh = calculate_probability(&fresh);
+        let p_old = calculate_probability(&one_halflife);
+
+        // The shift from 0.50 for old evidence should be roughly half of fresh
+        let fresh_shift = p_fresh - 0.50;
+        let old_shift = p_old - 0.50;
+        let ratio = old_shift / fresh_shift;
+        assert!(ratio > 0.3 && ratio < 0.7,
+            "after one half-life, effect should be ~half: ratio={}, fresh_shift={}, old_shift={}",
+            ratio, fresh_shift, old_shift);
+    }
+
+    #[test]
+    fn time_decay_very_old_evidence_negligible() {
+        let now = now_secs();
+        let ancient = vec![EvidenceEntry {
+            node_label: "ancient".to_string(),
+            confidence: 0.90,
+            supports: true,
+            added_at: now - (365 * 24 * 3600), // 1 year ago
+            source: "test".to_string(),
+            edge_id: None,
+        }];
+        let p = calculate_probability(&ancient);
+        assert!((p - 0.50).abs() < 0.05,
+            "1-year-old evidence should barely move probability from 0.50, got {}", p);
+    }
+
+    // ── NEW: Pending count tests ──
+
+    #[test]
+    fn pending_count_incremented_on_graph_propagation() {
+        let mut record = make_record();
+        assert_eq!(record.pending_count, 0);
+
+        add_evidence(
+            &mut record,
+            0.70,
+            true,
+            ScoreTrigger::GraphPropagation { source_node_id: 42 },
+            "Propagated evidence".to_string(),
+            Some(vec!["A".to_string(), "B".to_string()]),
+            "node_B",
+            "graph_propagation",
+        );
+
+        assert_eq!(record.pending_count, 1, "pending_count should be 1 after GraphPropagation");
+    }
+
+    #[test]
+    fn pending_count_not_incremented_on_manual() {
+        let mut record = make_record();
+
+        add_evidence(
+            &mut record,
+            0.70,
+            true,
+            ScoreTrigger::Manual,
+            "Manual evidence".to_string(),
+            None,
+            "node_A",
+            "user",
+        );
+
+        assert_eq!(record.pending_count, 0, "pending_count should stay 0 for Manual trigger");
+    }
+
+    #[test]
+    fn pending_count_reset_on_evaluate() {
+        let mut record = make_record();
+        // Add some auto-propagated evidence
+        add_evidence(&mut record, 0.70, true,
+            ScoreTrigger::GraphPropagation { source_node_id: 1 },
+            "auto".to_string(), None, "node_A", "auto");
+        add_evidence(&mut record, 0.60, true,
+            ScoreTrigger::GraphPropagation { source_node_id: 2 },
+            "auto2".to_string(), None, "node_B", "auto");
+        assert_eq!(record.pending_count, 2);
+
+        // Evaluate resets pending_count
+        evaluate(&mut record);
+        assert_eq!(record.pending_count, 0, "evaluate should reset pending_count to 0");
+    }
+
+    #[test]
+    fn pending_count_accumulates() {
+        let mut record = make_record();
+        for i in 0..5 {
+            add_evidence(&mut record, 0.50, true,
+                ScoreTrigger::GraphPropagation { source_node_id: i },
+                format!("auto_{}", i), None, &format!("node_{}", i), "auto");
+        }
+        assert_eq!(record.pending_count, 5);
+    }
+
+    // ── NEW: Evidence metadata preservation ──
+
+    #[test]
+    fn evidence_preserves_node_label_and_source() {
+        let mut record = make_record();
+
+        add_evidence(
+            &mut record,
+            0.75,
+            true,
+            ScoreTrigger::EvidenceAdded { node_id: 99 },
+            "Added by analyst".to_string(),
+            None,
+            "NATO_expansion",
+            "kb:reuters",
+        );
+
+        assert_eq!(record.evidence.len(), 1);
+        let ev = &record.evidence[0];
+        assert_eq!(ev.node_label, "NATO_expansion");
+        assert_eq!(ev.source, "kb:reuters");
+        assert_eq!(ev.confidence, 0.75);
+        assert!(ev.supports);
+        assert!(ev.added_at > 0);
+    }
+
+    #[test]
+    fn evidence_contradicting_preserves_metadata() {
+        let mut record = make_record();
+
+        add_evidence(
+            &mut record,
+            0.60,
+            false,
+            ScoreTrigger::Manual,
+            "Contradicting finding".to_string(),
+            Some(vec!["X".to_string(), "Y".to_string()]),
+            "contra_node",
+            "user:analyst",
+        );
+
+        assert_eq!(record.evidence.len(), 1);
+        let ev = &record.evidence[0];
+        assert_eq!(ev.node_label, "contra_node");
+        assert_eq!(ev.source, "user:analyst");
+        assert!(!ev.supports);
+    }
+
+    // ── NEW: History tracking ──
+
+    #[test]
+    fn add_evidence_records_history_with_shift() {
+        let mut record = make_record();
+
+        let point1 = add_evidence(&mut record, 0.80, true,
+            ScoreTrigger::Manual, "first".to_string(), None, "A", "user");
+        assert!(point1.shift > 0.0, "supporting evidence should have positive shift");
+
+        let point2 = add_evidence(&mut record, 0.80, false,
+            ScoreTrigger::Manual, "second".to_string(), None, "B", "user");
+        assert!(point2.shift < 0.0, "contradicting evidence should have negative shift");
+
+        assert_eq!(record.history.len(), 2);
+    }
+
+    #[test]
+    fn evaluate_records_manual_trigger() {
+        let mut record = make_record();
+        record.evidence.push(make_evidence(0.80, true));
+
+        let point = evaluate(&mut record);
+        assert!(matches!(point.trigger, ScoreTrigger::Manual));
+        assert_eq!(point.reason, "Manual re-evaluation");
+        assert!(point.path.is_none());
+    }
+
+    #[test]
+    fn recalculate_probability_matches_evaluate() {
+        let mut record = make_record();
+        record.evidence.push(make_evidence(0.85, true));
+        record.evidence.push(make_evidence(0.70, false));
+
+        let p_recalc = recalculate_probability(&record);
+        let point = evaluate(&mut record);
+        assert!((p_recalc - point.probability).abs() < 0.001,
+            "recalculate_probability and evaluate should agree: {} vs {}", p_recalc, point.probability);
+    }
 }

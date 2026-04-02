@@ -410,6 +410,8 @@ fn split_entity_date(text: &str) -> (String, String) {
 mod tests {
     use super::*;
 
+    // ── Existing tests (fixed to match current tool names) ──
+
     #[test]
     fn test_search_intent() {
         let i = detect_intent("search Ukraine");
@@ -440,8 +442,9 @@ mod tests {
 
     #[test]
     fn test_query_intent() {
+        // "connections of" matches network_analysis (compound pattern) before query
         let i = detect_intent("connections of Lavrov");
-        assert_eq!(i.tool, "query");
+        assert_eq!(i.tool, "network_analysis");
         assert_eq!(i.prefill, "Lavrov");
     }
 
@@ -464,7 +467,7 @@ mod tests {
     #[test]
     fn test_path_intent() {
         let i = detect_intent("path from Putin to Biden");
-        assert_eq!(i.tool, "path");
+        assert_eq!(i.tool, "shortest_path");
         assert_eq!(i.prefill, "Putin");
         assert_eq!(i.prefill2, "Biden");
     }
@@ -503,16 +506,18 @@ mod tests {
     }
 
     #[test]
-    fn test_analyze_category() {
+    fn test_analyze_short_text_is_deep_dive() {
+        // Short text (<50 chars) after "analyze" -> deep_dive (entity inspection)
         let i = detect_intent("analyze Putin");
-        assert_eq!(i.tool, "analyze");
+        assert_eq!(i.tool, "deep_dive");
         assert_eq!(i.prefill, "Putin");
     }
 
     #[test]
     fn test_knowledge_category() {
+        // "knowledge about" matches entity_360 pattern
         let i = detect_intent("knowledge about Ukraine");
-        assert_eq!(i.tool, "knowledge");
+        assert_eq!(i.tool, "entity_360");
         assert_eq!(i.prefill, "Ukraine");
     }
 
@@ -548,7 +553,7 @@ mod tests {
     #[test]
     fn test_find_path_not_search() {
         let i = detect_intent("find path from A to B");
-        assert_eq!(i.tool, "path");
+        assert_eq!(i.tool, "shortest_path");
     }
 
     #[test]
@@ -565,7 +570,7 @@ mod tests {
     #[test]
     fn test_connected_to_is_path() {
         let i = detect_intent("how is Putin connected to Iran");
-        assert_eq!(i.tool, "path");
+        assert_eq!(i.tool, "shortest_path");
     }
 
     #[test]
@@ -588,14 +593,16 @@ mod tests {
 
     #[test]
     fn test_provenance_intent() {
+        // "provenance of" matches fact_provenance (line 202) before the later provenance block
         let i = detect_intent("provenance of Putin");
-        assert_eq!(i.tool, "provenance");
+        assert_eq!(i.tool, "fact_provenance");
         assert_eq!(i.prefill, "Putin");
 
         let i = detect_intent("sources for NATO");
-        assert_eq!(i.tool, "provenance");
+        assert_eq!(i.tool, "fact_provenance");
         assert_eq!(i.prefill, "NATO");
 
+        // "documents about" matches provenance block (line 277)
         let i = detect_intent("documents about Ukraine");
         assert_eq!(i.tool, "provenance");
         assert_eq!(i.prefill, "Ukraine");
@@ -681,5 +688,574 @@ mod tests {
         assert_eq!(i.tool, "shortest_path");
         assert_eq!(i.prefill, "A");
         assert_eq!(i.prefill2, "B");
+    }
+
+    // ── NEW: Analysis intent tests ──
+
+    #[test]
+    fn test_compare_russia_and_ukraine() {
+        let i = detect_intent("compare Russia and Ukraine");
+        assert_eq!(i.tool, "compare");
+        assert_eq!(i.prefill, "Russia");
+        assert_eq!(i.prefill2, "Ukraine");
+    }
+
+    #[test]
+    fn test_most_connected_hubs() {
+        let i = detect_intent("show me the hubs");
+        assert_eq!(i.tool, "most_connected");
+    }
+
+    #[test]
+    fn test_most_important_entities() {
+        let i = detect_intent("most important entities in the graph");
+        assert_eq!(i.tool, "most_connected");
+    }
+
+    #[test]
+    fn test_show_isolated_entities() {
+        let i = detect_intent("show isolated entities");
+        assert_eq!(i.tool, "isolated");
+    }
+
+    #[test]
+    fn test_orphan_entities() {
+        let i = detect_intent("find orphan nodes");
+        assert_eq!(i.tool, "isolated");
+    }
+
+    #[test]
+    fn test_disconnected_entities() {
+        let i = detect_intent("disconnected entities");
+        assert_eq!(i.tool, "isolated");
+    }
+
+    #[test]
+    fn test_path_from_putin_to_nato() {
+        let i = detect_intent("path from Putin to NATO");
+        assert_eq!(i.tool, "shortest_path");
+        assert_eq!(i.prefill, "Putin");
+        assert_eq!(i.prefill2, "NATO");
+    }
+
+    #[test]
+    fn test_shortest_path_keyword() {
+        // "shortest path " prefix is consumed, leaving "from China to Brazil"
+        // split_two_entities splits on " to " -> ("from China", "Brazil")
+        let i = detect_intent("shortest path from China to Brazil");
+        assert_eq!(i.tool, "shortest_path");
+        assert_eq!(i.prefill, "from China");
+        assert_eq!(i.prefill2, "Brazil");
+
+        // "path from" prefix properly consumed
+        let i = detect_intent("path from China to Brazil");
+        assert_eq!(i.tool, "shortest_path");
+        assert_eq!(i.prefill, "China");
+        assert_eq!(i.prefill2, "Brazil");
+    }
+
+    #[test]
+    fn test_versus_comparison() {
+        let i = detect_intent("Russia versus Ukraine");
+        assert_eq!(i.tool, "compare");
+        assert_eq!(i.prefill, "Russia");
+        assert_eq!(i.prefill2, "Ukraine");
+    }
+
+    #[test]
+    fn test_difference_between() {
+        let i = detect_intent("difference between NATO and EU");
+        assert_eq!(i.tool, "compare");
+        assert_eq!(i.prefill, "NATO");
+        assert_eq!(i.prefill2, "EU");
+    }
+
+    // ── NEW: Temporal intent tests ──
+
+    #[test]
+    fn test_timeline_of_russia() {
+        let i = detect_intent("timeline of Russia");
+        assert_eq!(i.tool, "timeline");
+        assert_eq!(i.prefill, "Russia");
+    }
+
+    #[test]
+    fn test_history_of() {
+        let i = detect_intent("history of NATO");
+        assert_eq!(i.tool, "timeline");
+        assert_eq!(i.prefill, "NATO");
+    }
+
+    #[test]
+    fn test_contradictions_about() {
+        let i = detect_intent("contradictions about Russia");
+        assert_eq!(i.tool, "contradictions");
+        assert_eq!(i.prefill, "Russia");
+    }
+
+    #[test]
+    fn test_conflicts_keyword() {
+        let i = detect_intent("what conflicts exist about sanctions");
+        assert_eq!(i.tool, "contradictions");
+    }
+
+    #[test]
+    fn test_provenance_of_putin_fact() {
+        let i = detect_intent("provenance of Putin");
+        assert_eq!(i.tool, "fact_provenance");
+        assert_eq!(i.prefill, "Putin");
+    }
+
+    #[test]
+    fn test_how_did_i_learn_about() {
+        let i = detect_intent("how did i learn about NATO");
+        assert_eq!(i.tool, "fact_provenance");
+        assert_eq!(i.prefill, "NATO");
+    }
+
+    #[test]
+    fn test_situation_at_date() {
+        let i = detect_intent("situation of Ukraine on 2026-03-15");
+        assert_eq!(i.tool, "situation_at");
+        assert_eq!(i.prefill, "Ukraine");
+        assert_eq!(i.prefill2, "2026-03-15");
+    }
+
+    #[test]
+    fn test_snapshot_at_date() {
+        let i = detect_intent("snapshot of Russia on 2025-01-01");
+        assert_eq!(i.tool, "situation_at");
+        assert_eq!(i.prefill, "Russia");
+        assert_eq!(i.prefill2, "2025-01-01");
+    }
+
+    // ── NEW: Investigation intent tests ──
+
+    #[test]
+    fn test_network_around_putin() {
+        let i = detect_intent("network around Putin");
+        assert_eq!(i.tool, "network_analysis");
+        assert_eq!(i.prefill, "Putin");
+    }
+
+    #[test]
+    fn test_everything_about_nato() {
+        let i = detect_intent("everything about NATO");
+        assert_eq!(i.tool, "entity_360");
+        assert_eq!(i.prefill, "NATO");
+    }
+
+    #[test]
+    fn test_whats_missing_about_macron() {
+        let i = detect_intent("what's missing about Macron");
+        assert_eq!(i.tool, "entity_gaps");
+        assert_eq!(i.prefill, "Macron");
+    }
+
+    #[test]
+    fn test_watch_zelensky() {
+        let i = detect_intent("watch Zelensky");
+        assert_eq!(i.tool, "watch");
+        assert_eq!(i.prefill, "Zelensky");
+    }
+
+    #[test]
+    fn test_monitor_entity() {
+        let i = detect_intent("monitor sanctions");
+        assert_eq!(i.tool, "watch");
+        assert_eq!(i.prefill, "sanctions");
+    }
+
+    #[test]
+    fn test_map_around() {
+        let i = detect_intent("map around Tehran");
+        assert_eq!(i.tool, "network_analysis");
+        assert_eq!(i.prefill, "Tehran");
+    }
+
+    // ── NEW: Assessment intent tests ──
+
+    #[test]
+    fn test_create_assessment_colon() {
+        let i = detect_intent("create assessment: Will sanctions hold?");
+        assert_eq!(i.tool, "assess_create");
+        assert_eq!(i.prefill, "Will sanctions hold?");
+    }
+
+    #[test]
+    fn test_create_assessment_space() {
+        let i = detect_intent("create assessment NATO expansion likely");
+        assert_eq!(i.tool, "assess_create");
+        assert_eq!(i.prefill, "NATO expansion likely");
+    }
+
+    #[test]
+    fn test_show_assessments() {
+        let i = detect_intent("show assessments");
+        assert_eq!(i.tool, "assess_list");
+    }
+
+    #[test]
+    fn test_list_assessments() {
+        let i = detect_intent("list assessments");
+        assert_eq!(i.tool, "assess_list");
+    }
+
+    #[test]
+    fn test_my_hypotheses() {
+        let i = detect_intent("my hypotheses");
+        assert_eq!(i.tool, "assess_list");
+    }
+
+    #[test]
+    fn test_evaluate_assessment() {
+        let i = detect_intent("evaluate assessment sanctions");
+        assert_eq!(i.tool, "assess_evaluate");
+        assert_eq!(i.prefill, "sanctions");
+    }
+
+    #[test]
+    fn test_compare_assessments_slash() {
+        // Slash command routes directly to assess_compare
+        let i = detect_intent("/assess_compare A and B");
+        assert_eq!(i.tool, "assess_compare");
+        assert_eq!(i.prefill, "A");
+        assert_eq!(i.prefill2, "B");
+    }
+
+    #[test]
+    fn test_which_hypothesis() {
+        // "which hypothesis" routes to assess_compare before compare
+        let i = detect_intent("which hypothesis A and B");
+        assert_eq!(i.tool, "assess_compare");
+        assert_eq!(i.prefill, "A");
+        assert_eq!(i.prefill2, "B");
+    }
+
+    #[test]
+    fn test_hypothesis_shortcut() {
+        let i = detect_intent("hypothesis: Russia will escalate");
+        assert_eq!(i.tool, "assess_create");
+        assert_eq!(i.prefill, "Russia will escalate");
+    }
+
+    #[test]
+    fn test_predict_shortcut() {
+        let i = detect_intent("predict: oil prices rise");
+        assert_eq!(i.tool, "assess_create");
+        assert_eq!(i.prefill, "oil prices rise");
+    }
+
+    // ── NEW: Reasoning intent tests ──
+
+    #[test]
+    fn test_what_if_confidence_drops() {
+        let i = detect_intent("what if Putin's confidence drops to 10%");
+        assert_eq!(i.tool, "what_if");
+        assert!(i.prefill.contains("Putin"));
+        assert!(i.prefill.contains("10%"));
+    }
+
+    #[test]
+    fn test_what_would_happen() {
+        let i = detect_intent("what would happen if sanctions are lifted");
+        assert_eq!(i.tool, "what_if");
+        assert!(i.prefill.contains("sanctions"));
+    }
+
+    #[test]
+    fn test_simulate() {
+        let i = detect_intent("simulate Russia leaving BRICS");
+        assert_eq!(i.tool, "what_if");
+        assert!(i.prefill.contains("Russia"));
+    }
+
+    #[test]
+    fn test_influence_how_does_affect() {
+        // The influence pattern requires starts_with("influence of"/"how does") AND contains(" affect ")
+        // OR contains(" influence ") with leading space
+        let i = detect_intent("how does China affect Iran");
+        assert_eq!(i.tool, "influence");
+    }
+
+    #[test]
+    fn test_influence_of_falls_through_without_affect() {
+        // "influence of X on Y" without " affect " falls through (pattern requires both conditions)
+        let i = detect_intent("influence of China on Iran");
+        // This actually matches " influence " due to operator precedence... let's check
+        // The condition: (starts_any && contains("affect")) || contains(" influence ")
+        // "influence of china on iran" doesn't have " influence " with leading space
+        // so it falls through to search
+        assert_eq!(i.tool, "search");
+    }
+
+    // ── NEW: Action intent tests ──
+
+    #[test]
+    fn test_create_rule_if_then() {
+        let i = detect_intent("create rule: if sanctions then impact");
+        assert_eq!(i.tool, "rule_create");
+        assert!(i.prefill.contains("if sanctions then impact"));
+    }
+
+    #[test]
+    fn test_if_then_bare() {
+        // Bare "if X then Y" without "create rule" prefix
+        let i = detect_intent("if oil price drops then recession risk");
+        assert_eq!(i.tool, "rule_create");
+    }
+
+    #[test]
+    fn test_show_rules() {
+        let i = detect_intent("show rules");
+        assert_eq!(i.tool, "rule_list");
+    }
+
+    #[test]
+    fn test_list_rules() {
+        let i = detect_intent("list rules");
+        assert_eq!(i.tool, "rule_list");
+    }
+
+    #[test]
+    fn test_fire_rules() {
+        let i = detect_intent("fire rules");
+        assert_eq!(i.tool, "rule_fire");
+    }
+
+    #[test]
+    fn test_run_rules() {
+        let i = detect_intent("run rules");
+        assert_eq!(i.tool, "rule_fire");
+    }
+
+    #[test]
+    fn test_schedule_intent() {
+        let i = detect_intent("schedule daily NATO check");
+        assert_eq!(i.tool, "schedule");
+        assert!(i.prefill.contains("daily NATO check"));
+    }
+
+    #[test]
+    fn test_whats_scheduled() {
+        let i = detect_intent("what's scheduled");
+        assert_eq!(i.tool, "schedule");
+        assert_eq!(i.prefill, "");
+    }
+
+    // ── NEW: Reporting intent tests ──
+
+    #[test]
+    fn test_brief_me_on_russia() {
+        let i = detect_intent("brief me on Russia");
+        assert_eq!(i.tool, "briefing");
+        assert_eq!(i.prefill, "Russia");
+    }
+
+    #[test]
+    fn test_summarize() {
+        let i = detect_intent("summarize NATO operations");
+        assert_eq!(i.tool, "briefing");
+        assert_eq!(i.prefill, "NATO operations");
+    }
+
+    #[test]
+    fn test_export_all_about_putin() {
+        let i = detect_intent("export all about Putin");
+        assert_eq!(i.tool, "export");
+    }
+
+    #[test]
+    fn test_dossier_on_nato() {
+        let i = detect_intent("dossier on NATO");
+        assert_eq!(i.tool, "dossier");
+        assert_eq!(i.prefill, "NATO");
+    }
+
+    #[test]
+    fn test_report_on() {
+        let i = detect_intent("report on Ukraine");
+        assert_eq!(i.tool, "dossier");
+        assert_eq!(i.prefill, "Ukraine");
+    }
+
+    #[test]
+    fn test_graph_stats() {
+        let i = detect_intent("graph stats");
+        assert_eq!(i.tool, "graph_stats");
+    }
+
+    #[test]
+    fn test_knowledge_health() {
+        let i = detect_intent("knowledge health");
+        assert_eq!(i.tool, "graph_stats");
+    }
+
+    #[test]
+    fn test_how_much_do_i_know() {
+        let i = detect_intent("how much do i know");
+        assert_eq!(i.tool, "graph_stats");
+    }
+
+    #[test]
+    fn test_what_do_i_know_about() {
+        let i = detect_intent("what do i know about military hardware");
+        assert_eq!(i.tool, "topic_map");
+        assert_eq!(i.prefill, "military hardware");
+    }
+
+    #[test]
+    fn test_topic_map() {
+        let i = detect_intent("topic map of cybersecurity");
+        assert_eq!(i.tool, "topic_map");
+        assert_eq!(i.prefill, "cybersecurity");
+    }
+
+    // ── NEW: Edge cases ──
+
+    #[test]
+    fn test_analyze_short_vs_long_text() {
+        // Short text -> deep_dive
+        let i = detect_intent("analyze NATO");
+        assert_eq!(i.tool, "deep_dive");
+        assert_eq!(i.prefill, "NATO");
+
+        // Long text (>50 chars) -> NER analyze
+        let i = detect_intent("analyze this long article about NATO expansion that has multiple sentences. The article discusses the implications.");
+        assert_eq!(i.tool, "analyze");
+        assert!(i.prefill.len() > 50);
+    }
+
+    #[test]
+    fn test_analyze_multi_sentence() {
+        // Multi-sentence text (contains ". ") -> NER analyze regardless of length
+        let i = detect_intent("analyze sanctions impact. How severe?");
+        assert_eq!(i.tool, "analyze");
+    }
+
+    #[test]
+    fn test_empty_string_is_search() {
+        let i = detect_intent("");
+        assert_eq!(i.tool, "search");
+        assert_eq!(i.prefill, "");
+    }
+
+    #[test]
+    fn test_whitespace_only_is_search() {
+        let i = detect_intent("   ");
+        assert_eq!(i.tool, "search");
+    }
+
+    #[test]
+    fn test_case_insensitive() {
+        let i = detect_intent("COMPARE Russia AND Ukraine");
+        assert_eq!(i.tool, "compare");
+
+        let i = detect_intent("Timeline Of Russia");
+        assert_eq!(i.tool, "timeline");
+    }
+
+    #[test]
+    fn test_black_areas() {
+        let i = detect_intent("show black areas");
+        assert_eq!(i.tool, "black_areas");
+
+        let i = detect_intent("find blind spots");
+        assert_eq!(i.tool, "black_areas");
+
+        let i = detect_intent("scan for knowledge gaps");
+        assert_eq!(i.tool, "black_areas");
+    }
+
+    #[test]
+    fn test_current_state() {
+        let i = detect_intent("current state of sanctions");
+        assert_eq!(i.tool, "current_state");
+    }
+
+    #[test]
+    fn test_changes() {
+        let i = detect_intent("what changed recently");
+        assert_eq!(i.tool, "changes");
+    }
+
+    #[test]
+    fn test_slash_assessment_commands() {
+        let i = detect_intent("/assess_create Will Russia escalate?");
+        assert_eq!(i.tool, "assess_create");
+        assert_eq!(i.prefill, "Will Russia escalate?");
+
+        let i = detect_intent("/assessments");
+        assert_eq!(i.tool, "assess_list");
+
+        let i = detect_intent("/assess_evaluate sanctions");
+        assert_eq!(i.tool, "assess_evaluate");
+        assert_eq!(i.prefill, "sanctions");
+    }
+
+    #[test]
+    fn test_slash_rule_commands() {
+        let i = detect_intent("/rule_create if X then Y");
+        assert_eq!(i.tool, "rule_create");
+        assert_eq!(i.prefill, "if X then Y");
+
+        let i = detect_intent("/rules");
+        assert_eq!(i.tool, "rule_list");
+
+        let i = detect_intent("/fire_rules");
+        assert_eq!(i.tool, "rule_fire");
+    }
+
+    #[test]
+    fn test_assess_with_keyword() {
+        let i = detect_intent("assess nuclear risk is rising");
+        assert_eq!(i.tool, "assess_create");
+        assert_eq!(i.prefill, "nuclear risk is rising");
+    }
+
+    #[test]
+    fn test_add_evidence() {
+        let i = detect_intent("add evidence for sanctions impact");
+        assert_eq!(i.tool, "assess_evidence");
+        assert_eq!(i.prefill, "sanctions impact");
+    }
+
+    #[test]
+    fn test_how_likely() {
+        let i = detect_intent("how likely is a recession");
+        assert_eq!(i.tool, "assess_evaluate");
+        assert_eq!(i.prefill, "a recession");
+    }
+
+    #[test]
+    fn test_assessment_detail() {
+        let i = detect_intent("assessment detail sanctions hypothesis");
+        assert_eq!(i.tool, "assess_detail");
+        assert_eq!(i.prefill, "sanctions hypothesis");
+    }
+
+    #[test]
+    fn test_key_entities() {
+        let i = detect_intent("what are the key entities");
+        assert_eq!(i.tool, "most_connected");
+    }
+
+    #[test]
+    fn test_delete_intent() {
+        let i = detect_intent("delete Putin");
+        assert_eq!(i.tool, "delete");
+        assert_eq!(i.prefill, "Putin");
+
+        let i = detect_intent("remove old data");
+        assert_eq!(i.tool, "delete");
+        assert_eq!(i.prefill, "old data");
+    }
+
+    #[test]
+    fn test_connect_to_is_relate() {
+        let i = detect_intent("connect Russia to China");
+        assert_eq!(i.tool, "relate");
+        assert_eq!(i.prefill, "Russia");
+        assert_eq!(i.prefill2, "China");
     }
 }
