@@ -578,3 +578,95 @@ pub async fn compare_assessments(
 pub async fn compare_assessments() -> impl axum::response::IntoResponse {
     feature_not_enabled("assess")
 }
+
+// POST /assessments/suggest-watches -- LLM + graph search for relevant entities
+#[cfg(feature = "assess")]
+pub async fn suggest_watches(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let hypothesis = req.get("hypothesis").and_then(|v| v.as_str()).unwrap_or("");
+    if hypothesis.is_empty() {
+        return Ok(Json(serde_json::json!({ "suggestions": [], "error": "No hypothesis text provided" })));
+    }
+
+    let g = state.graph.read().map_err(|_| read_lock_err())?;
+
+    // Strategy 1: Extract words from hypothesis and search graph
+    let words: Vec<&str> = hypothesis.split_whitespace()
+        .filter(|w| w.len() > 2)
+        .filter(|w| !matches!(w.to_lowercase().as_str(),
+            "the" | "and" | "will" | "that" | "this" | "with" | "for" | "from" | "are" | "was"
+            | "were" | "been" | "have" | "has" | "had" | "not" | "but" | "what" | "how"
+            | "can" | "could" | "would" | "should" | "may" | "might" | "shall" | "does"
+            | "did" | "its" | "his" | "her" | "our" | "their" | "about" | "into" | "over"
+            | "than" | "then" | "when" | "where" | "which" | "who" | "whom" | "why"
+            | "all" | "any" | "each" | "every" | "more" | "most" | "other" | "some" | "such"
+            | "very" | "also" | "just" | "only" | "still" | "already" | "between" | "through"
+        ))
+        .collect();
+
+    let mut found_entities: std::collections::HashMap<String, (String, f32, u32)> = std::collections::HashMap::new();
+
+    // Search each significant word
+    for word in &words {
+        if let Ok(hits) = g.search_text(word, 5) {
+            for hit in hits {
+                let nt = g.get_node_type(&hit.label).unwrap_or_else(|| "entity".to_string());
+                // Skip internal types
+                if matches!(nt.as_str(), "Fact" | "fact" | "Document" | "document" | "Source" | "source") {
+                    continue;
+                }
+                let edges_out = g.edges_from(&hit.label).map(|e| e.len()).unwrap_or(0);
+                let edges_in = g.edges_to(&hit.label).map(|e| e.len()).unwrap_or(0);
+                let ec = (edges_out + edges_in) as u32;
+                found_entities.entry(hit.label.clone())
+                    .or_insert((nt, hit.confidence, ec));
+            }
+        }
+    }
+
+    // Also try full-phrase search
+    if let Ok(hits) = g.search_text(hypothesis, 10) {
+        for hit in hits {
+            let nt = g.get_node_type(&hit.label).unwrap_or_else(|| "entity".to_string());
+            if matches!(nt.as_str(), "Fact" | "fact" | "Document" | "document" | "Source" | "source") {
+                continue;
+            }
+            let edges_out = g.edges_from(&hit.label).map(|e| e.len()).unwrap_or(0);
+            let edges_in = g.edges_to(&hit.label).map(|e| e.len()).unwrap_or(0);
+            let ec = (edges_out + edges_in) as u32;
+            found_entities.entry(hit.label.clone())
+                .or_insert((nt, hit.confidence, ec));
+        }
+    }
+
+    // Sort by edge count (most connected = most relevant)
+    let mut suggestions: Vec<serde_json::Value> = found_entities.into_iter()
+        .map(|(label, (nt, conf, ec))| {
+            serde_json::json!({
+                "label": label,
+                "node_type": nt,
+                "confidence": conf,
+                "edge_count": ec,
+            })
+        })
+        .collect();
+    suggestions.sort_by(|a, b| {
+        let ea = a.get("edge_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let eb = b.get("edge_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        eb.cmp(&ea)
+    });
+    suggestions.truncate(20);
+
+    Ok(Json(serde_json::json!({
+        "hypothesis": hypothesis,
+        "suggestions": suggestions,
+        "search_terms": words,
+    })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn suggest_watches() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}

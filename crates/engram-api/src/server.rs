@@ -123,6 +123,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/assessments/{label}/watch", post(handlers::add_assessment_watch))
         .route("/assessments/{label}/watch/{entity}", delete(handlers::remove_assessment_watch))
         .route("/assessments/compare/{label_a}/{label_b}", get(handlers::compare_assessments))
+        .route("/assessments/suggest-watches", post(handlers::suggest_watches))
         // Facts (list, confirm/debunk with trust propagation)
         .route("/facts", post(handlers::fact::list_facts))
         .route("/facts/{label}/confirm", post(handlers::fact_confirm))
