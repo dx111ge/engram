@@ -70,6 +70,9 @@ pub mod kb;
 pub mod seed;
 pub mod chat;
 pub mod chat_analysis;
+pub mod chat_temporal;
+pub mod chat_investigation;
+pub mod chat_reporting;
 pub mod document;
 pub mod fact;
 
