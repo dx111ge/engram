@@ -323,15 +323,19 @@ pub struct AssessmentsResponse {
     pub assessments: Vec<Assessment>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Assessment {
     pub label: String,
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub probability: Option<f64>,
+    #[serde(default)]
+    pub current_probability: Option<f64>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -342,6 +346,12 @@ pub struct Assessment {
     pub last_evaluated: Option<String>,
     #[serde(default)]
     pub probability_shift: Option<f64>,
+    #[serde(default)]
+    pub last_shift: Option<f64>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -363,11 +373,15 @@ pub struct AssessmentCreate {
 pub struct AssessmentDetail {
     pub label: String,
     #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub probability: Option<f64>,
+    #[serde(default)]
+    pub current_probability: Option<f64>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -375,9 +389,21 @@ pub struct AssessmentDetail {
     #[serde(default)]
     pub evidence: Vec<Evidence>,
     #[serde(default)]
+    pub evidence_for: Vec<Evidence>,
+    #[serde(default)]
+    pub evidence_against: Vec<Evidence>,
+    #[serde(default)]
     pub watches: Vec<String>,
     #[serde(default)]
     pub history: Vec<AssessmentHistory>,
+    #[serde(default)]
+    pub success_criteria: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub last_evaluated: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -386,14 +412,38 @@ pub struct Evidence {
     pub id: Option<String>,
     #[serde(default)]
     pub entity: Option<String>,
+    #[serde(default, alias = "node_label")]
+    pub node_label: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
     pub weight: Option<f64>,
+    #[serde(default, alias = "confidence")]
+    pub confidence: Option<f64>,
     #[serde(default)]
     pub direction: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UpdateAssessmentRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeframe: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success_criteria: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
