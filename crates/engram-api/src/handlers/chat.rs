@@ -117,6 +117,22 @@ pub struct SituationAtRequest {
 }
 
 #[derive(Deserialize)]
+pub struct NetworkAnalysisRequest {
+    pub entity: String,
+    pub depth: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct Entity360Request {
+    pub entity: String,
+}
+
+#[derive(Deserialize)]
+pub struct EntityGapsRequest {
+    pub entity: String,
+}
+
+#[derive(Deserialize)]
 pub struct WatchRequest {
     pub entity: String,
 }

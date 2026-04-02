@@ -58,15 +58,47 @@ pub fn detect_intent(text: &str) -> ChatIntent {
 
     // ── Compound keywords first (longest match wins) ──
 
-    // Category commands (multi-tool)
+    // Investigation tools
+    // "analyze" with long text -> NER analyze. Short entity name -> deep_dive (explain+query).
     if starts_any(&lower, &["analyze ", "analyse "]) {
-        return ChatIntent { tool: "analyze", prefill: after_keyword(trimmed, &["analyze ", "analyse "]), prefill2: String::new() };
+        let rest = after_keyword(trimmed, &["analyze ", "analyse "]);
+        // If the text is long (>50 chars or multi-sentence), treat as NER content analysis
+        if rest.len() > 50 || rest.contains(". ") || rest.contains('\n') {
+            return ChatIntent { tool: "analyze", prefill: rest, prefill2: String::new() };
+        }
+        // Short text: treat as entity deep-dive (show network around entity)
+        return ChatIntent { tool: "deep_dive", prefill: rest, prefill2: String::new() };
     }
-    if starts_any(&lower, &["knowledge about ", "everything about ", "knowledge of "]) {
-        return ChatIntent { tool: "knowledge", prefill: after_keyword(trimmed, &["knowledge about ", "everything about ", "knowledge of "]), prefill2: String::new() };
+    // "everything about" -> entity_360
+    if starts_any(&lower, &["everything about ", "knowledge about ", "knowledge of ", "360 ", "full view of "]) {
+        return ChatIntent { tool: "entity_360", prefill: after_keyword(trimmed, &["everything about ", "knowledge about ", "knowledge of ", "360 ", "full view of "]), prefill2: String::new() };
     }
+    // "investigate" -> web search investigation
     if starts_any(&lower, &["investigate "]) {
         return ChatIntent { tool: "investigate", prefill: after_keyword(trimmed, &["investigate "]), prefill2: String::new() };
+    }
+    // "network around" / "connections of" -> network_analysis
+    if starts_any(&lower, &["network ", "network around ", "connections of ", "map around "]) || lower.contains("within") && lower.contains("hop") {
+        return ChatIntent { tool: "network_analysis", prefill: after_keyword(trimmed, &["network around ", "network of ", "network ", "connections of ", "map around "]), prefill2: String::new() };
+    }
+    // "what's missing" / "gaps in" -> entity_gaps
+    if (lower.contains("missing") || lower.contains("gaps")) && !lower.contains("knowledge") {
+        let rest = after_keyword(trimmed, &["what's missing about ", "what is missing about ", "gaps in ", "gaps for ", "missing about "]);
+        if !rest.is_empty() {
+            return ChatIntent { tool: "entity_gaps", prefill: rest, prefill2: String::new() };
+        }
+    }
+    // "changes" / "what changed"
+    if lower.contains("changed") || lower.contains("changes") || lower.contains("recent") && lower.contains("update") {
+        return ChatIntent { tool: "changes", prefill: String::new(), prefill2: String::new() };
+    }
+    // "watch" / "monitor"
+    if starts_any(&lower, &["watch ", "monitor ", "track "]) {
+        return ChatIntent { tool: "watch", prefill: after_keyword(trimmed, &["watch ", "monitor ", "track "]), prefill2: String::new() };
+    }
+    // "ingest" / "import"
+    if starts_any(&lower, &["ingest ", "ingest: ", "import "]) {
+        return ChatIntent { tool: "ingest", prefill: after_keyword(trimmed, &["ingest ", "ingest: ", "import "]), prefill2: String::new() };
     }
     if starts_any(&lower, &["briefing on ", "briefing about ", "brief me on ", "brief me about ", "summarize ", "summary of "]) {
         return ChatIntent { tool: "briefing", prefill: after_keyword(trimmed, &["briefing on ", "briefing about ", "brief me on ", "brief me about ", "summarize ", "summary of "]), prefill2: String::new() };

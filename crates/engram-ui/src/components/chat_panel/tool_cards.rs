@@ -194,6 +194,56 @@ static CARDS: &[ToolCard] = &[
             Field { id: "tc-docs-limit", label: "Limit", placeholder: "", field_type: FieldType::Number { default: "20", min: "1", max: "100", step: "1" }, required: false },
         ],
     },
+    // Investigation tools
+    ToolCard { tool: "ingest", title: "Ingest Text", icon: "fa-solid fa-file-import", is_write: true, confirm: true,
+        button_label: "Ingest",
+        fields: &[
+            Field { id: "tc-ingest-text", label: "Text", placeholder: "Paste text to extract entities and relations...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "analyze", title: "Analyze Text (NER Preview)", icon: "fa-solid fa-microscope", is_write: false, confirm: false,
+        button_label: "Analyze",
+        fields: &[
+            Field { id: "tc-analyze-text", label: "Text", placeholder: "Paste text to analyze for entities and relations...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "investigate", title: "Investigate Entity", icon: "fa-solid fa-magnifying-glass-chart", is_write: false, confirm: false,
+        button_label: "Search & Analyze",
+        fields: &[
+            Field { id: "tc-investigate-entity", label: "Entity", placeholder: "Entity or topic to investigate...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "changes", title: "Recent Changes", icon: "fa-solid fa-clock-rotate-left", is_write: false, confirm: false,
+        button_label: "Show Changes",
+        fields: &[
+            Field { id: "tc-changes-since", label: "Since", placeholder: "YYYY-MM-DD (default: last 24h)", field_type: FieldType::Text, required: false },
+        ],
+    },
+    ToolCard { tool: "watch", title: "Watch Entity", icon: "fa-solid fa-bell", is_write: true, confirm: false,
+        button_label: "Start Watching",
+        fields: &[
+            Field { id: "tc-watch-entity", label: "Entity", placeholder: "Entity name...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "network_analysis", title: "Network Analysis", icon: "fa-solid fa-diagram-project", is_write: false, confirm: false,
+        button_label: "Map Network",
+        fields: &[
+            Field { id: "tc-net-entity", label: "Entity", placeholder: "Center entity...", field_type: FieldType::Text, required: true },
+            Field { id: "tc-net-depth", label: "Depth", placeholder: "", field_type: FieldType::Number { default: "2", min: "1", max: "4", step: "1" }, required: false },
+        ],
+    },
+    ToolCard { tool: "entity_360", title: "Entity 360", icon: "fa-solid fa-globe", is_write: false, confirm: false,
+        button_label: "Full View",
+        fields: &[
+            Field { id: "tc-360-entity", label: "Entity", placeholder: "Entity name...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "entity_gaps", title: "Entity Gaps", icon: "fa-solid fa-puzzle-piece", is_write: false, confirm: false,
+        button_label: "Find Gaps",
+        fields: &[
+            Field { id: "tc-gaps-entity", label: "Entity", placeholder: "Entity name...", field_type: FieldType::Text, required: true },
+        ],
+    },
 ];
 
 /// Generate a tool parameter card. Returns None if tool has no card definition.

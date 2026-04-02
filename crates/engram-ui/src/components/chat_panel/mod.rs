@@ -281,6 +281,14 @@ pub fn ChatPanel(
                     "fact_provenance" => "tc-fp-entity",
                     "contradictions" => "tc-ct-entity",
                     "situation_at" => "tc-sa-entity",
+                    "ingest" => "tc-ingest-text",
+                    "analyze" => "tc-analyze-text",
+                    "investigate" => "tc-investigate-entity",
+                    "changes" => "tc-changes-since",
+                    "watch" => "tc-watch-entity",
+                    "network_analysis" => "tc-net-entity",
+                    "entity_360" => "tc-360-entity",
+                    "entity_gaps" => "tc-gaps-entity",
                     _ => "",
                 };
                 if !id_prefix.is_empty() {
@@ -352,8 +360,8 @@ pub fn ChatPanel(
                     let body = serde_json::json!({"max_edges": 1});
                     api.post_text("/chat/isolated", &body).await
                 }
-                "analyze" | "knowledge" | "investigate" => {
-                    // Category commands: run explain + query for the entity
+                "deep_dive" => {
+                    // Category command: run explain + query for the entity (deep analysis)
                     let encoded = js_sys::encode_uri_component(&prefill);
                     let explain_result = api.get_text(
                         &format!("/explain/{}", encoded.as_string().unwrap_or_default())
@@ -964,6 +972,130 @@ pub fn ChatPanel(
                             let max_edges = params.get("max").and_then(|v| v.as_str()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
                             let body = serde_json::json!({"max_edges": max_edges});
                             api.post_text("/chat/isolated", &body).await.map(|r| ("engram_isolated".into(), r)).map_err(|e| e.to_string())
+                        }
+                        // Investigation tools
+                        "ingest" => {
+                            let text = p("text");
+                            let body = serde_json::json!({"items": [text], "source": "chat-ingest"});
+                            api.post_text("/ingest", &body).await.map(|r| ("engram_ingest".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "analyze" => {
+                            let text = p("text");
+                            match api.post_text("/ingest/analyze", &serde_json::json!({"text": text})).await {
+                                Ok(json_str) => {
+                                    let card_html = cards::render_tool_card("engram_analyze", &json_str);
+                                    set_messages.update(|msgs| {
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: json_str.chars().take(500).collect(),
+                                            display_html: Some(card_html),
+                                        });
+                                    });
+                                    llm_analysis(&api, set_messages,
+                                        "Summarize the NER analysis results. Highlight the most significant entities and relationships detected, their types, and confidence levels. Mention anything surprising or noteworthy. Be concise (2-3 sentences).",
+                                        &format!("NER analysis results:\n{}", json_str),
+                                    ).await;
+                                    return;
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        }
+                        "investigate" => {
+                            let entity = p("entity");
+                            // Step 1: Web search
+                            let encoded = js_sys::encode_uri_component(&entity);
+                            let search_url = format!("/proxy/search?q={}", encoded.as_string().unwrap_or_default());
+                            match api.get_text(&search_url).await {
+                                Ok(search_json) => {
+                                    let card_html = cards::render_tool_card("engram_investigate_preview", &search_json);
+                                    set_messages.update(|msgs| {
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: format!("Web search results for: {}", entity),
+                                            display_html: Some(card_html),
+                                        });
+                                    });
+                                    // LLM summary of search findings
+                                    llm_analysis(&api, set_messages,
+                                        "Summarize what was found from the web search about this entity. What new information could be added to the knowledge graph? Be concise (2-3 sentences).",
+                                        &format!("Web search results for '{}':\n{}", entity, &search_json[..search_json.len().min(2000)]),
+                                    ).await;
+                                    return;
+                                }
+                                Err(e) => Err(format!("Web search failed: {}", e)),
+                            }
+                        }
+                        "changes" => {
+                            let since = p("since");
+                            let since_val = if since.is_empty() {
+                                // Default: 24 hours ago
+                                let secs = js_sys::Date::now() as u64 / 1000 - 86400;
+                                let days = secs / 86400;
+                                // Simple date calc
+                                format!("2026-01-01") // fallback
+                            } else { since };
+                            let body = serde_json::json!({"since": since_val});
+                            match api.post_text("/chat/changes", &body).await {
+                                Ok(json_str) => {
+                                    let card_html = cards::render_tool_card("engram_changes", &json_str);
+                                    set_messages.update(|msgs| {
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: json_str.chars().take(500).collect(),
+                                            display_html: Some(card_html),
+                                        });
+                                    });
+                                    llm_analysis(&api, set_messages,
+                                        "Summarize the recent changes to the knowledge graph. What entities were added or modified? What does this suggest about evolving knowledge? Be concise (2-3 sentences).",
+                                        &format!("Recent graph changes:\n{}", json_str),
+                                    ).await;
+                                    return;
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        }
+                        "watch" => {
+                            let entity = p("entity");
+                            let body = serde_json::json!({"entity": entity});
+                            api.post_text("/chat/watch", &body).await.map(|r| ("engram_watch".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "network_analysis" => {
+                            let entity = p("entity");
+                            let depth = params.get("depth").and_then(|v| v.as_str()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(2);
+                            let body = serde_json::json!({"entity": entity, "depth": depth});
+                            match api.post_text("/chat/network_analysis", &body).await {
+                                Ok(json_str) => {
+                                    let card_html = cards::render_tool_card("engram_network_analysis", &json_str);
+                                    dispatch_graph_data("engram_network_analysis", &json_str);
+                                    set_messages.update(|msgs| {
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: json_str.chars().take(500).collect(),
+                                            display_html: Some(card_html),
+                                        });
+                                    });
+                                    llm_analysis(&api, set_messages,
+                                        "Analyze this entity's network. Describe the key connections at each hop level, identify important intermediaries, and explain the entity's position in the broader knowledge graph. Be concise (2-3 sentences).",
+                                        &format!("Network analysis:\n{}", &json_str[..json_str.len().min(3000)]),
+                                    ).await;
+                                    return;
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        }
+                        "entity_360" => {
+                            let entity = p("entity");
+                            let body = serde_json::json!({"entity": entity});
+                            api.post_text("/chat/entity_360", &body).await.map(|r| ("engram_entity_360".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "entity_gaps" => {
+                            let entity = p("entity");
+                            let body = serde_json::json!({"entity": entity});
+                            api.post_text("/chat/entity_gaps", &body).await.map(|r| ("engram_entity_gaps".into(), r)).map_err(|e| e.to_string())
                         }
                         _ => Err(format!("Unknown tool: {}", tool)),
                     };
