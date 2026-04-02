@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 
 use crate::api::ApiClient;
-use crate::api::types::GapsResponse;
+use crate::api::types::{GapsResponse, IngestResponse};
 
 const PAGE_SIZE: usize = 50;
 
@@ -12,6 +12,20 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
     let (scanning, set_scanning) = signal(false);
     let (current_page, set_current_page) = signal(0usize);
     let (type_filter, set_type_filter) = signal(String::new()); // "" = all
+
+    // Dismissed gap labels (frontend-only, resets on page reload)
+    let (dismissed, set_dismissed) = signal(Vec::<String>::new());
+    let (show_dismissed, set_show_dismissed) = signal(false);
+
+    // Which entity is currently being enriched (shows spinner)
+    let (enriching_entity, set_enriching_entity) = signal(Option::<String>::None);
+    // Inline result message per entity: (entity_label, message)
+    let (enrich_result, set_enrich_result) = signal(Option::<(String, String)>::None);
+
+    // Search mode: which entity has the search input open
+    let (search_entity, set_search_entity) = signal(Option::<String>::None);
+    let (search_query, set_search_query) = signal(String::new());
+    let (searching, set_searching) = signal(false);
 
     // Auto-load gaps on mount
     let api_load = api.clone();
@@ -45,6 +59,66 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
         }
     });
 
+    // Enrich action: POST /ingest with entity text
+    let api_enrich = api.clone();
+    let enrich_action = Action::new_local(move |entity: &String| {
+        let api = api_enrich.clone();
+        let entity = entity.clone();
+        async move {
+            set_enriching_entity.set(Some(entity.clone()));
+            set_enrich_result.set(None);
+            let body = serde_json::json!({
+                "text": entity,
+                "source": "gap-enrichment"
+            });
+            match api.post::<_, IngestResponse>("/ingest", &body).await {
+                Ok(r) => {
+                    let msg = format!(
+                        "Added {} facts, {} relations",
+                        r.facts_stored, r.relations_created
+                    );
+                    set_enrich_result.set(Some((entity.clone(), msg.clone())));
+                    set_status_msg.set(msg);
+                }
+                Err(e) => {
+                    let msg = format!("Enrich failed: {e}");
+                    set_enrich_result.set(Some((entity.clone(), msg.clone())));
+                    set_status_msg.set(msg);
+                }
+            }
+            set_enriching_entity.set(None);
+        }
+    });
+
+    // Search & ingest action: POST /ingest with search query
+    let api_search = api.clone();
+    let search_action = Action::new_local(move |query: &String| {
+        let api = api_search.clone();
+        let query = query.clone();
+        async move {
+            set_searching.set(true);
+            let body = serde_json::json!({
+                "text": query,
+                "source": "gap-search"
+            });
+            match api.post::<_, IngestResponse>("/ingest", &body).await {
+                Ok(r) => {
+                    let msg = format!(
+                        "Ingested {} facts, {} relations from search",
+                        r.facts_stored, r.relations_created
+                    );
+                    set_status_msg.set(msg);
+                    set_search_entity.set(None);
+                    set_search_query.set(String::new());
+                }
+                Err(e) => {
+                    set_status_msg.set(format!("Search ingest failed: {e}"));
+                }
+            }
+            set_searching.set(false);
+        }
+    });
+
     let severity_color = |sev: f64| -> &'static str {
         if sev >= 0.7 { "#e74c3c" }
         else if sev >= 0.4 { "#f1c40f" }
@@ -55,14 +129,38 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
         <div class="card" style="padding: 1.5rem;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                 <h3 style="margin: 0;"><i class="fa-solid fa-triangle-exclamation"></i>" Intelligence Gaps"</h3>
-                <button
-                    class="btn btn-primary btn-sm"
-                    on:click=move |_| { scan_gaps.dispatch(()); }
-                    disabled=move || scanning.get()
-                >
-                    <i class="fa-solid fa-radar"></i>
-                    {move || if scanning.get() { " Scanning..." } else { " Rescan" }}
-                </button>
+                <div style="display: flex; gap: 0.5rem; align-items: center;">
+                    // Show dismissed toggle
+                    <button
+                        class="btn btn-sm"
+                        style=move || {
+                            let count = dismissed.get().len();
+                            if count == 0 {
+                                "opacity: 0.3; pointer-events: none;".to_string()
+                            } else if show_dismissed.get() {
+                                "background: var(--accent); color: white;".to_string()
+                            } else {
+                                String::new()
+                            }
+                        }
+                        on:click=move |_| { set_show_dismissed.update(|v| *v = !*v); }
+                        title="Toggle showing dismissed gaps"
+                    >
+                        <i class="fa-solid fa-eye-slash"></i>
+                        {move || {
+                            let count = dismissed.get().len();
+                            if count > 0 { format!(" Dismissed ({count})") } else { " Dismissed (0)".to_string() }
+                        }}
+                    </button>
+                    <button
+                        class="btn btn-primary btn-sm"
+                        on:click=move |_| { scan_gaps.dispatch(()); }
+                        disabled=move || scanning.get()
+                    >
+                        <i class="fa-solid fa-radar"></i>
+                        {move || if scanning.get() { " Scanning..." } else { " Rescan" }}
+                    </button>
+                </div>
             </div>
 
             // Type filter badges + gap count
@@ -123,15 +221,21 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                     }.into_any(),
                     Some(gd) => {
                         let filter = type_filter.get();
-                        let filtered: Vec<_> = if filter.is_empty() {
-                            gd.gaps.clone()
-                        } else {
-                            gd.gaps.iter().filter(|g| g.kind == filter).cloned().collect()
-                        };
+                        let dismissed_list = dismissed.get();
+                        let show_d = show_dismissed.get();
+                        let filtered: Vec<_> = gd.gaps.iter().filter(|g| {
+                            // Type filter
+                            let type_ok = filter.is_empty() || g.kind == filter;
+                            // Dismissed filter: hide dismissed unless show_dismissed is on
+                            let entity_label = g.entities.first().cloned().unwrap_or_default();
+                            let is_dismissed = dismissed_list.contains(&entity_label);
+                            let dismiss_ok = show_d || !is_dismissed;
+                            type_ok && dismiss_ok
+                        }).cloned().collect();
 
                         let total_filtered = filtered.len();
                         let page = current_page.get();
-                        let total_pages = (total_filtered + PAGE_SIZE - 1) / PAGE_SIZE;
+                        let total_pages = if total_filtered == 0 { 1 } else { (total_filtered + PAGE_SIZE - 1) / PAGE_SIZE };
                         let start = page * PAGE_SIZE;
                         let page_gaps: Vec<_> = filtered.into_iter().skip(start).take(PAGE_SIZE).collect();
 
@@ -151,9 +255,17 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                                         let color = severity_color(sev);
                                         let width = format!("{}%", (sev * 100.0) as u32);
                                         let entity_display = gap.entities.first().cloned().unwrap_or_default();
+                                        let entity_for_dismiss = entity_display.clone();
+                                        let entity_for_enrich = entity_display.clone();
+                                        let entity_for_enrich_display = entity_display.clone();
+                                        let entity_for_search = entity_display.clone();
+                                        let entity_for_search_check = entity_display.clone();
+                                        let entity_for_result = entity_display.clone();
                                         let domain = gap.domain.clone().unwrap_or_default();
+                                        let dismissed_list2 = dismissed.get();
+                                        let is_dismissed = dismissed_list2.contains(&entity_display);
                                         view! {
-                                            <tr>
+                                            <tr style=move || if is_dismissed { "opacity: 0.4;" } else { "" }>
                                                 <td>
                                                     <span class="badge">{gap.kind.clone()}</span>
                                                     {(!domain.is_empty()).then(|| view! {
@@ -174,21 +286,118 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                                                         let extra = gap.entities.len() - 1;
                                                         view! { <span style="font-size: 0.75rem; opacity: 0.6;">{format!(" +{extra} more")}</span> }
                                                     })}
+                                                    // Inline enrich result
+                                                    {move || {
+                                                        let result = enrich_result.get();
+                                                        match result {
+                                                            Some((ref ent, ref msg)) if *ent == entity_for_result => {
+                                                                let is_err = msg.starts_with("Enrich failed");
+                                                                let color = if is_err { "#e74c3c" } else { "#2ecc71" };
+                                                                Some(view! {
+                                                                    <span style=format!("font-size: 0.75rem; display: block; color: {color}; margin-top: 2px;")>
+                                                                        {if is_err {
+                                                                            view! { <i class="fa-solid fa-circle-xmark"></i> }.into_any()
+                                                                        } else {
+                                                                            view! { <i class="fa-solid fa-circle-check"></i> }.into_any()
+                                                                        }}
+                                                                        " "{msg.clone()}
+                                                                    </span>
+                                                                })
+                                                            }
+                                                            _ => None,
+                                                        }
+                                                    }}
                                                 </td>
                                                 <td>
-                                                    <div style="display: flex; gap: 0.25rem; flex-wrap: wrap;">
+                                                    <div style="display: flex; gap: 0.25rem; flex-wrap: wrap; align-items: center;">
+                                                        // Enrich button
                                                         <button class="btn btn-sm" style="font-size: 0.7rem; padding: 2px 6px;"
-                                                            title="Enrich this entity from Wikidata"
+                                                            title="Enrich this entity via ingest pipeline"
+                                                            disabled=move || enriching_entity.get().is_some()
+                                                            on:click={
+                                                                let ent = entity_for_enrich.clone();
+                                                                move |_| { enrich_action.dispatch(ent.clone()); }
+                                                            }
                                                         >
-                                                            <i class="fa-solid fa-database"></i>" Enrich"
+                                                            {move || {
+                                                                let loading = enriching_entity.get();
+                                                                if loading.as_deref() == Some(&entity_for_enrich_display) {
+                                                                    view! { <><i class="fa-solid fa-spinner fa-spin"></i>" Enriching..."</> }.into_any()
+                                                                } else {
+                                                                    view! { <><i class="fa-solid fa-database"></i>" Enrich"</> }.into_any()
+                                                                }
+                                                            }}
                                                         </button>
-                                                        <button class="btn btn-sm" style="font-size: 0.7rem; padding: 2px 6px;"
-                                                            title="Web search and ingest"
-                                                        >
-                                                            <i class="fa-solid fa-globe"></i>" Search"
-                                                        </button>
+                                                        // Search button / inline input
+                                                        {move || {
+                                                            let active = search_entity.get();
+                                                            if active.as_deref() == Some(&entity_for_search_check) {
+                                                                // Show inline search input
+                                                                view! {
+                                                                    <form style="display: inline-flex; gap: 2px; align-items: center;"
+                                                                        on:submit={
+                                                                            move |ev: leptos::ev::SubmitEvent| {
+                                                                                ev.prevent_default();
+                                                                                let q = search_query.get_untracked();
+                                                                                if !q.trim().is_empty() {
+                                                                                    search_action.dispatch(q);
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    >
+                                                                        <input
+                                                                            type="text"
+                                                                            class="input input-sm"
+                                                                            style="font-size: 0.7rem; padding: 2px 4px; width: 140px;"
+                                                                            prop:value=move || search_query.get()
+                                                                            on:input=move |ev| {
+                                                                                set_search_query.set(event_target_value(&ev));
+                                                                            }
+                                                                        />
+                                                                        <button type="submit" class="btn btn-sm" style="font-size: 0.7rem; padding: 2px 6px;"
+                                                                            disabled=move || searching.get()
+                                                                        >
+                                                                            {move || if searching.get() {
+                                                                                view! { <i class="fa-solid fa-spinner fa-spin"></i> }.into_any()
+                                                                            } else {
+                                                                                view! { <i class="fa-solid fa-arrow-right"></i> }.into_any()
+                                                                            }}
+                                                                        </button>
+                                                                        <button type="button" class="btn btn-sm" style="font-size: 0.7rem; padding: 2px 6px; opacity: 0.5;"
+                                                                            on:click=move |_| { set_search_entity.set(None); set_search_query.set(String::new()); }
+                                                                        >
+                                                                            <i class="fa-solid fa-xmark"></i>
+                                                                        </button>
+                                                                    </form>
+                                                                }.into_any()
+                                                            } else {
+                                                                let ent = entity_for_search.clone();
+                                                                view! {
+                                                                    <button class="btn btn-sm" style="font-size: 0.7rem; padding: 2px 6px;"
+                                                                        title="Web search and ingest"
+                                                                        on:click=move |_| {
+                                                                            set_search_query.set(ent.clone());
+                                                                            set_search_entity.set(Some(ent.clone()));
+                                                                        }
+                                                                    >
+                                                                        <i class="fa-solid fa-globe"></i>" Search"
+                                                                    </button>
+                                                                }.into_any()
+                                                            }
+                                                        }}
+                                                        // Dismiss button
                                                         <button class="btn btn-sm" style="font-size: 0.7rem; padding: 2px 6px; opacity: 0.5;"
                                                             title="Dismiss this gap"
+                                                            on:click={
+                                                                let ent = entity_for_dismiss.clone();
+                                                                move |_| {
+                                                                    set_dismissed.update(|list| {
+                                                                        if !list.contains(&ent) {
+                                                                            list.push(ent.clone());
+                                                                        }
+                                                                    });
+                                                                }
+                                                            }
                                                         >
                                                             <i class="fa-solid fa-xmark"></i>
                                                         </button>
