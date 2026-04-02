@@ -101,6 +101,22 @@ pub struct EntityTimelineRequest {
 }
 
 #[derive(Deserialize)]
+pub struct FactProvenanceRequest {
+    pub entity: String,
+}
+
+#[derive(Deserialize)]
+pub struct ContradictionsRequest {
+    pub entity: String,
+}
+
+#[derive(Deserialize)]
+pub struct SituationAtRequest {
+    pub entity: String,
+    pub date: String,
+}
+
+#[derive(Deserialize)]
 pub struct WatchRequest {
     pub entity: String,
 }
@@ -190,7 +206,7 @@ pub struct AffectedEntity {
 pub async fn temporal_query(
     State(state): State<AppState>,
     Json(req): Json<TemporalQueryRequest>,
-) -> ApiResult<Vec<TemporalEdge>> {
+) -> ApiResult<serde_json::Value> {
     let g = state.graph.read().map_err(|_| read_lock_err())?;
 
     let mut all_edges = g.edges_from(&req.entity).map_err(|e| api_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -225,14 +241,20 @@ pub async fn temporal_query(
         });
     }
 
-    Ok(Json(results))
+    Ok(Json(serde_json::json!({
+        "entity": req.entity,
+        "from_date": req.from_date,
+        "to_date": req.to_date,
+        "events": results,
+        "event_count": results.len(),
+    })))
 }
 
 /// POST /chat/timeline -- chronological events for entity
 pub async fn timeline(
     State(state): State<AppState>,
     Json(req): Json<TimelineRequest>,
-) -> ApiResult<Vec<TemporalEdge>> {
+) -> ApiResult<serde_json::Value> {
     let g = state.graph.read().map_err(|_| read_lock_err())?;
     let limit = req.limit.unwrap_or(20);
 
@@ -251,14 +273,18 @@ pub async fn timeline(
         }
     }).collect();
 
-    Ok(Json(results))
+    Ok(Json(serde_json::json!({
+        "entity": req.entity,
+        "events": results,
+        "event_count": results.len(),
+    })))
 }
 
 /// POST /chat/current_state -- only non-expired relations
 pub async fn current_state(
     State(state): State<AppState>,
     Json(req): Json<CurrentStateRequest>,
-) -> ApiResult<Vec<TemporalEdge>> {
+) -> ApiResult<serde_json::Value> {
     let g = state.graph.read().map_err(|_| read_lock_err())?;
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -271,19 +297,27 @@ pub async fn current_state(
     let edges_in = g.edges_to(&req.entity).map_err(|e| api_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     all_edges.extend(edges_in);
 
-    let results: Vec<TemporalEdge> = all_edges.into_iter().filter(|e| {
-        match &e.valid_to {
-            Some(vt) => vt.as_str() >= now.as_str(),
-            None => true,
-        }
-    }).map(|e| {
-        TemporalEdge {
+    let mut current: Vec<TemporalEdge> = Vec::new();
+    let mut expired: Vec<TemporalEdge> = Vec::new();
+    for e in all_edges {
+        let te = TemporalEdge {
             from: e.from, to: e.to, relationship: e.relationship,
             confidence: e.confidence, valid_from: e.valid_from, valid_to: e.valid_to,
+        };
+        match &te.valid_to {
+            Some(vt) if vt.as_str() < now.as_str() => expired.push(te),
+            _ => current.push(te),
         }
-    }).collect();
+    }
 
-    Ok(Json(results))
+    Ok(Json(serde_json::json!({
+        "entity": req.entity,
+        "as_of": now,
+        "current": current,
+        "expired": expired,
+        "current_count": current.len(),
+        "expired_count": expired.len(),
+    })))
 }
 
 /// POST /chat/changes -- what changed since a timestamp

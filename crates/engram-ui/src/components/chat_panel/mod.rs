@@ -276,6 +276,11 @@ pub fn ChatPanel(
                     "compare" => "tc-compare-a",
                     "shortest_path" => "tc-sp-from",
                     "provenance" => "tc-provenance-e",
+                    "date_query" => "tc-dq-entity",
+                    "current_state" => "tc-cs-entity",
+                    "fact_provenance" => "tc-fp-entity",
+                    "contradictions" => "tc-ct-entity",
+                    "situation_at" => "tc-sa-entity",
                     _ => "",
                 };
                 if !id_prefix.is_empty() {
@@ -288,6 +293,8 @@ pub fn ChatPanel(
                         let id2 = match detected.tool {
                             "compare" => "tc-compare-b",
                             "shortest_path" => "tc-sp-to",
+                            "situation_at" => "tc-sa-date",
+                            "date_query" => "tc-dq-from",
                             _ => "",
                         };
                         if !id2.is_empty() {
@@ -843,6 +850,63 @@ pub fn ChatPanel(
                         "timeline" => {
                             let body = serde_json::json!({"entity": p("e"), "limit": 20});
                             api.post_text("/chat/timeline", &body).await.map(|r| ("engram_timeline".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "date_query" => {
+                            let body = serde_json::json!({"entity": p("entity"), "from_date": p("from"), "to_date": p("to")});
+                            api.post_text("/chat/temporal_query", &body).await.map(|r| ("engram_timeline".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "current_state" => {
+                            let body = serde_json::json!({"entity": p("entity")});
+                            api.post_text("/chat/current_state", &body).await.map(|r| ("engram_current_state".into(), r)).map_err(|e| e.to_string())
+                        }
+                        "fact_provenance" => {
+                            let body = serde_json::json!({"entity": p("entity")});
+                            match api.post_text("/chat/fact_provenance", &body).await {
+                                Ok(json_str) => {
+                                    let card_html = cards::render_tool_card("engram_fact_provenance", &json_str);
+                                    dispatch_graph_data("engram_fact_provenance", &json_str);
+                                    set_messages.update(|msgs| {
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: json_str.chars().take(500).collect(),
+                                            display_html: Some(card_html),
+                                        });
+                                    });
+                                    llm_analysis(&api, set_messages,
+                                        "Analyze how information about this entity arrived in the knowledge graph. Describe the information lifecycle: when it first appeared, which sources contributed, whether facts were corroborated. Be concise (2-3 sentences).",
+                                        &format!("Analyze provenance:\n{}", json_str),
+                                    ).await;
+                                    return;
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        }
+                        "contradictions" => {
+                            let body = serde_json::json!({"entity": p("entity")});
+                            match api.post_text("/chat/contradictions", &body).await {
+                                Ok(json_str) => {
+                                    let card_html = cards::render_tool_card("engram_contradictions", &json_str);
+                                    set_messages.update(|msgs| {
+                                        if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                        msgs.push(ChatMessage {
+                                            role: ChatRole::ToolResult,
+                                            content: json_str.chars().take(500).collect(),
+                                            display_html: Some(card_html),
+                                        });
+                                    });
+                                    llm_analysis(&api, set_messages,
+                                        "Analyze the contradictions found for this entity. Which claims are stronger based on confidence? What do the conflicting sources suggest? Recommend how to resolve. Be concise (2-3 sentences).",
+                                        &format!("Analyze contradictions:\n{}", json_str),
+                                    ).await;
+                                    return;
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        }
+                        "situation_at" => {
+                            let body = serde_json::json!({"entity": p("entity"), "date": p("date")});
+                            api.post_text("/chat/situation_at", &body).await.map(|r| ("engram_situation_at".into(), r)).map_err(|e| e.to_string())
                         }
                         "provenance" => {
                             let body = serde_json::json!({"entity": p("e")});

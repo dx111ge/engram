@@ -203,6 +203,9 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/chat/briefing", post(handlers::chat_analysis::briefing))
         .route("/chat/export_subgraph", post(handlers::chat_analysis::export_subgraph))
         .route("/chat/entity_timeline", post(handlers::chat_analysis::entity_timeline))
+        .route("/chat/fact_provenance", post(handlers::chat_analysis::fact_provenance))
+        .route("/chat/contradictions", post(handlers::chat_analysis::contradictions))
+        .route("/chat/situation_at", post(handlers::chat_analysis::situation_at))
         .route("/chat/watch", post(handlers::chat::watch))
         .route("/chat/schedule", post(handlers::chat::schedule))
         // System

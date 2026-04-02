@@ -120,6 +120,42 @@ pub fn detect_intent(text: &str) -> ChatIntent {
         return ChatIntent { tool: "timeline", prefill: after_keyword(trimmed, &["timeline ", "timeline of ", "history of ", "chronology of ", "when did "]), prefill2: String::new() };
     }
 
+    // Date query (temporal range)
+    if starts_any(&lower, &["what happened to ", "what about "]) {
+        let rest = after_keyword(trimmed, &["what happened to ", "what about "]);
+        // Try to split "entity in/during/between date"
+        let (entity, date) = split_entity_date(&rest);
+        if !date.is_empty() {
+            return ChatIntent { tool: "date_query", prefill: entity, prefill2: date };
+        }
+    }
+    if lower.contains(" during ") || lower.contains(" between ") || lower.contains(" in january") || lower.contains(" in february") || lower.contains(" in march") || lower.contains(" in 202") {
+        return ChatIntent { tool: "date_query", prefill: trimmed.to_string(), prefill2: String::new() };
+    }
+
+    // Current state
+    if starts_any(&lower, &["current state of ", "current ", "what is "]) && (lower.contains(" now") || lower.contains("current")) {
+        return ChatIntent { tool: "current_state", prefill: after_keyword(trimmed, &["current state of ", "current "]), prefill2: String::new() };
+    }
+
+    // Fact provenance
+    if starts_any(&lower, &["provenance of ", "sources for ", "where did ", "how did i learn about ", "origin of "]) {
+        return ChatIntent { tool: "fact_provenance", prefill: after_keyword(trimmed, &["provenance of ", "sources for ", "where did ", "how did i learn about ", "origin of "]), prefill2: String::new() };
+    }
+
+    // Contradictions
+    if lower.contains("contradict") || lower.contains("conflict") || lower.contains("disputed") || lower.contains("debunked") {
+        let entity = after_keyword(trimmed, &["contradictions about ", "contradictions for ", "conflicts about ", "what contradicts "]);
+        return ChatIntent { tool: "contradictions", prefill: if entity.is_empty() { trimmed.to_string() } else { entity }, prefill2: String::new() };
+    }
+
+    // Situation at date
+    if starts_any(&lower, &["situation ", "snapshot ", "state on ", "what did i know "]) {
+        let rest = after_keyword(trimmed, &["situation of ", "situation ", "snapshot of ", "snapshot ", "state on ", "what did i know about "]);
+        let (entity, date) = split_entity_date(&rest);
+        return ChatIntent { tool: "situation_at", prefill: entity, prefill2: date };
+    }
+
     // Gaps
     if lower.contains("gaps") || lower.contains("missing knowledge") || lower.contains("blind spots") || lower == "gaps" {
         return ChatIntent { tool: "gaps", prefill: String::new(), prefill2: String::new() };
@@ -248,6 +284,21 @@ fn extract_two_from_connected(text: &str) -> (String, String) {
         return split_two_entities(rest.trim());
     }
     (String::new(), String::new())
+}
+
+/// Split "entity in/on/during date" into (entity, date) parts.
+fn split_entity_date(text: &str) -> (String, String) {
+    let lower = text.to_lowercase();
+    for sep in &[" on ", " in ", " during ", " at ", " between "] {
+        if let Some(pos) = lower.find(sep) {
+            let entity = text[..pos].trim().to_string();
+            let date = text[pos + sep.len()..].trim().to_string();
+            if !entity.is_empty() && !date.is_empty() {
+                return (entity, date);
+            }
+        }
+    }
+    (text.trim().to_string(), String::new())
 }
 
 #[cfg(test)]
