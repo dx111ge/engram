@@ -9,7 +9,8 @@ use crate::components::chat_types::ChatCurrentAssessment;
 pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
     let api = use_context::<ApiClient>().expect("ApiClient context");
     let (assessments, set_assessments) = signal(Vec::<Assessment>::new());
-    let (selected_detail, set_selected_detail) = signal(Option::<AssessmentDetail>::None);
+    let (expanded_label, set_expanded_label) = signal(Option::<String>::None);
+    let (expanded_detail, set_expanded_detail) = signal(Option::<AssessmentDetail>::None);
     let (show_wizard, set_show_wizard) = signal(false);
     let (show_evidence, set_show_evidence) = signal(Option::<String>::None);
 
@@ -31,7 +32,7 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
     });
     load_assessments.dispatch(());
 
-    // Load detail
+    // Load detail for inline expansion
     let chat_assessment = use_context::<ChatCurrentAssessment>();
     let api_detail = api.clone();
     let load_detail = Action::new_local(move |label: &String| {
@@ -41,7 +42,10 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
             if let Some(ctx) = chat_assessment { ctx.0.set(Some(label.clone())); }
             let path = format!("/assessments/{}", js_sys::encode_uri_component(&label));
             match api.get::<AssessmentDetail>(&path).await {
-                Ok(d) => set_selected_detail.set(Some(d)),
+                Ok(d) => {
+                    set_expanded_label.set(Some(label));
+                    set_expanded_detail.set(Some(d));
+                }
                 Err(e) => set_status_msg.set(format!("Detail error: {e}")),
             }
         }
@@ -53,6 +57,7 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
     let evaluate = Action::new_local(move |label: &String| {
         let api = api_eval.clone();
         let reload = load_assessments2.clone();
+        let label2 = label.clone();
         let path = format!("/assessments/{}/evaluate", js_sys::encode_uri_component(label));
         async move {
             let body = serde_json::json!({});
@@ -60,8 +65,33 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                 Ok(r) => {
                     set_status_msg.set(format!("Evaluated: {r}"));
                     reload.dispatch(());
+                    // Refresh expanded detail
+                    let detail_path = format!("/assessments/{}", js_sys::encode_uri_component(&label2));
+                    if let Ok(refreshed) = api.get::<AssessmentDetail>(&detail_path).await {
+                        set_expanded_detail.set(Some(refreshed));
+                    }
                 }
                 Err(e) => set_status_msg.set(format!("Evaluate error: {e}")),
+            }
+        }
+    });
+
+    // Delete assessment
+    let api_delete = api.clone();
+    let load_assessments4 = load_assessments.clone();
+    let delete_assessment = Action::new_local(move |label: &String| {
+        let api = api_delete.clone();
+        let reload = load_assessments4.clone();
+        let path = format!("/assessments/{}", js_sys::encode_uri_component(label));
+        async move {
+            match api.delete(&path).await {
+                Ok(_) => {
+                    set_status_msg.set("Assessment deleted".to_string());
+                    set_expanded_label.set(None);
+                    set_expanded_detail.set(None);
+                    reload.dispatch(());
+                }
+                Err(e) => set_status_msg.set(format!("Delete error: {e}")),
             }
         }
     });
@@ -89,13 +119,11 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                     set_ev_entity.set(String::new());
                     set_ev_weight.set("0.5".to_string());
                     reload.dispatch(());
-                    // Refresh detail if open
-                    if let Some(d) = selected_detail.get_untracked() {
-                        if d.label == label2 {
-                            let path2 = format!("/assessments/{}", js_sys::encode_uri_component(&label2));
-                            if let Ok(refreshed) = api.get::<AssessmentDetail>(&path2).await {
-                                set_selected_detail.set(Some(refreshed));
-                            }
+                    // Refresh expanded detail if it matches
+                    if expanded_label.get_untracked().as_deref() == Some(&label2) {
+                        let path2 = format!("/assessments/{}", js_sys::encode_uri_component(&label2));
+                        if let Ok(refreshed) = api.get::<AssessmentDetail>(&path2).await {
+                            set_expanded_detail.set(Some(refreshed));
                         }
                     }
                 }
@@ -123,7 +151,7 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                 </div>
             </div>
 
-            // Assessment cards
+            // Assessment cards grid
             {move || {
                 let list = assessments.get();
                 if list.is_empty() {
@@ -139,32 +167,215 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                         {list.into_iter().map(|a| {
                             let label = a.label.clone();
                             let label_click = label.clone();
+                            let label_is_expanded = label.clone();
                             let prob = a.probability.unwrap_or(0.0);
                             let prob_pct = (prob * 100.0) as u32;
                             let prob_color = if prob >= 0.7 { "var(--danger, #e74c3c)" } else if prob >= 0.4 { "var(--warning, #f1c40f)" } else { "var(--success, #2ecc71)" };
                             let shift = a.probability_shift.unwrap_or(0.0);
                             let shift_icon = if shift > 0.0 { "fa-solid fa-arrow-trend-up" } else if shift < 0.0 { "fa-solid fa-arrow-trend-down" } else { "fa-solid fa-minus" };
                             let shift_color = if shift > 0.0 { "#e74c3c" } else if shift < 0.0 { "#2ecc71" } else { "#888" };
+                            let lbl_class = label_is_expanded.clone();
+                            let lbl_style = label_is_expanded.clone();
+                            let lbl_click_check = label_is_expanded.clone();
+                            let lbl_chevron = label_is_expanded.clone();
+                            let lbl_body = label_is_expanded.clone();
+
                             view! {
-                                <div class="assessment-card"
-                                    on:click=move |_| { load_detail.dispatch(label_click.clone()); }>
-                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                                        <strong style="font-size: 0.95rem;">{label}</strong>
-                                        {a.category.clone().map(|c| view! { <span class="badge">{c}</span> })}
-                                    </div>
-                                    <div style="margin-bottom: 0.5rem;">
-                                        <div style="display: flex; align-items: center; gap: 0.5rem;">
-                                            <div class="assessment-card-prob-bar">
-                                                <div class="assessment-card-prob-fill" style=format!("width: {}%; background: {};", prob_pct, prob_color)></div>
+                                <div
+                                    class=move || if expanded_label.get() == Some(lbl_class.clone()) { "assessment-card assessment-card-expanded" } else { "assessment-card" }
+                                    style=move || if expanded_label.get() == Some(lbl_style.clone()) { "order: -1; grid-column: 1 / -1;" } else { "" }
+                                >
+                                    // -- Compact header (always shown) --
+                                    <div class="assessment-card-header"
+                                        style="cursor: pointer;"
+                                        on:click={
+                                            let label_click = label_click.clone();
+                                            let lbl_check = lbl_click_check.clone();
+                                            move |_| {
+                                                if expanded_label.get() == Some(lbl_check.clone()) {
+                                                    set_expanded_label.set(None);
+                                                    set_expanded_detail.set(None);
+                                                } else {
+                                                    load_detail.dispatch(label_click.clone());
+                                                }
+                                            }
+                                        }
+                                    >
+                                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                            <strong style="font-size: 0.95rem;">{label.clone()}</strong>
+                                            <div style="display: flex; gap: 0.4rem; align-items: center;">
+                                                {a.status.clone().map(|s| view! { <span class="badge badge-active">{s}</span> })}
+                                                {a.category.clone().map(|c| view! { <span class="badge">{c}</span> })}
                                             </div>
-                                            <span style="font-size: 0.85rem; font-weight: 600;">{format!("{}%", prob_pct)}</span>
-                                            <i class=shift_icon style=format!("color: {}; font-size: 0.8rem;", shift_color)></i>
+                                        </div>
+                                        <div style="margin-bottom: 0.5rem;">
+                                            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                                <div class="assessment-card-prob-bar">
+                                                    <div class="assessment-card-prob-fill" style=format!("width: {}%; background: {};", prob_pct, prob_color)></div>
+                                                </div>
+                                                <span style="font-size: 0.85rem; font-weight: 600;">{format!("{}%", prob_pct)}</span>
+                                                <i class=shift_icon style=format!("color: {}; font-size: 0.8rem;", shift_color)></i>
+                                            </div>
+                                        </div>
+                                        <div style="display: flex; justify-content: space-between; font-size: 0.8rem; opacity: 0.7;">
+                                            <span><i class="fa-solid fa-file-lines"></i>" "{a.evidence_count.unwrap_or(0)}" evidence"</span>
+                                            <i class=move || if expanded_label.get() == Some(lbl_chevron.clone()) { "fa-solid fa-chevron-up" } else { "fa-solid fa-chevron-down" } style="font-size: 0.75rem;"></i>
                                         </div>
                                     </div>
-                                    <div style="display: flex; justify-content: space-between; font-size: 0.8rem; opacity: 0.7;">
-                                        <span><i class="fa-solid fa-file-lines"></i>" "{a.evidence_count.unwrap_or(0)}" evidence"</span>
-                                        <span>{a.status.clone().unwrap_or_default()}</span>
-                                    </div>
+
+                                    // -- Expanded detail (conditionally rendered) --
+                                    {move || {
+                                        if expanded_label.get() != Some(lbl_body.clone()) {
+                                            return view! { <div></div> }.into_any();
+                                        }
+                                        match expanded_detail.get() {
+                                            None => view! {
+                                                <div style="padding: 1rem; text-align: center; opacity: 0.6;">
+                                                    <i class="fa-solid fa-spinner fa-spin"></i>" Loading..."
+                                                </div>
+                                            }.into_any(),
+                                            Some(d) => {
+                                                let label_eval = d.label.clone();
+                                                let label_ev = d.label.clone();
+                                                let label_del = d.label.clone();
+                                                let label_del_confirm = d.label.clone();
+                                                view! {
+                                                    <div class="assessment-expanded-body">
+                                                        // Overview section
+                                                        <div style="margin-bottom: 1rem;">
+                                                            // Probability bar (large)
+                                                            {d.probability.map(|p| {
+                                                                let pct = (p * 100.0) as u32;
+                                                                let color = if p >= 0.7 { "#e74c3c" } else if p >= 0.4 { "#f1c40f" } else { "#2ecc71" };
+                                                                view! {
+                                                                    <div style="margin-bottom: 0.75rem;">
+                                                                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                                                            <div style="flex: 1; height: 10px; background: #333; border-radius: 5px; overflow: hidden;">
+                                                                                <div style=format!("width: {}%; height: 100%; background: {}; border-radius: 5px; transition: width 0.3s;", pct, color)></div>
+                                                                            </div>
+                                                                            <span style="font-weight: 700; font-size: 1.1rem;">{format!("{}%", pct)}</span>
+                                                                        </div>
+                                                                    </div>
+                                                                }
+                                                            })}
+
+                                                            // Description
+                                                            {d.description.clone().map(|desc| view! { <p style="margin-bottom: 0.75rem; opacity: 0.85;">{desc}</p> })}
+
+                                                            // Timeframe
+                                                            {d.timeframe.clone().map(|t| view! {
+                                                                <div style="margin-bottom: 0.75rem; font-size: 0.9rem;">
+                                                                    <i class="fa-solid fa-calendar"></i>" "{t}
+                                                                </div>
+                                                            })}
+                                                        </div>
+
+                                                        // Watches
+                                                        {(!d.watches.is_empty()).then(|| view! {
+                                                            <div style="margin-bottom: 1rem;">
+                                                                <strong style="font-size: 0.85rem; text-transform: uppercase; opacity: 0.6;">"Watches"</strong>
+                                                                <div style="margin-top: 0.35rem; display: flex; flex-wrap: wrap; gap: 0.3rem;">
+                                                                    {d.watches.iter().map(|w| view! {
+                                                                        <span class="badge">{w.clone()}</span>
+                                                                    }).collect::<Vec<_>>()}
+                                                                </div>
+                                                            </div>
+                                                        })}
+
+                                                        // Evidence table
+                                                        {(!d.evidence.is_empty()).then(|| view! {
+                                                            <div style="margin-bottom: 1rem;">
+                                                                <h4 style="margin-bottom: 0.5rem; font-size: 0.9rem;">
+                                                                    <i class="fa-solid fa-file-lines"></i>" Evidence"
+                                                                </h4>
+                                                                <table class="data-table evidence-table">
+                                                                    <thead>
+                                                                        <tr><th>"Entity"</th><th>"Direction"</th><th>"Weight"</th><th>"Source"</th></tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                        {d.evidence.iter().map(|ev| {
+                                                                            let dir = ev.direction.clone().unwrap_or_default();
+                                                                            let dir_icon = if dir == "supporting" { "fa-solid fa-arrow-up" } else { "fa-solid fa-arrow-down" };
+                                                                            let dir_color = if dir == "supporting" { "#2ecc71" } else { "#e74c3c" };
+                                                                            view! {
+                                                                                <tr>
+                                                                                    <td>{ev.entity.clone().unwrap_or_default()}</td>
+                                                                                    <td>
+                                                                                        <i class=dir_icon style=format!("color: {}; margin-right: 0.3rem;", dir_color)></i>
+                                                                                        {dir}
+                                                                                    </td>
+                                                                                    <td>{ev.weight.map(|w| format!("{:.2}", w)).unwrap_or_default()}</td>
+                                                                                    <td>{ev.source.clone().unwrap_or_default()}</td>
+                                                                                </tr>
+                                                                            }
+                                                                        }).collect::<Vec<_>>()}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        })}
+
+                                                        // History table
+                                                        {(!d.history.is_empty()).then(|| view! {
+                                                            <div style="margin-bottom: 1rem;">
+                                                                <h4 style="margin-bottom: 0.5rem; font-size: 0.9rem;">
+                                                                    <i class="fa-solid fa-clock-rotate-left"></i>" History"
+                                                                </h4>
+                                                                <table class="data-table evidence-table">
+                                                                    <thead>
+                                                                        <tr><th>"Timestamp"</th><th>"Probability"</th><th>"Reason"</th></tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                        {d.history.iter().map(|h| view! {
+                                                                            <tr>
+                                                                                <td>{h.timestamp.clone().unwrap_or_default()}</td>
+                                                                                <td>{h.probability.map(|p| format!("{:.0}%", p * 100.0)).unwrap_or_default()}</td>
+                                                                                <td>{h.reason.clone().unwrap_or_default()}</td>
+                                                                            </tr>
+                                                                        }).collect::<Vec<_>>()}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        })}
+
+                                                        // Action bar
+                                                        <div class="button-group" style="margin-top: 0.75rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                                                            <button class="btn btn-primary btn-sm"
+                                                                on:click=move |_| { evaluate.dispatch(label_eval.clone()); }>
+                                                                <i class="fa-solid fa-rotate"></i>" Evaluate"
+                                                            </button>
+                                                            <button class="btn btn-secondary btn-sm"
+                                                                on:click=move |_| { set_show_evidence.set(Some(label_ev.clone())); }>
+                                                                <i class="fa-solid fa-plus"></i>" Add Evidence"
+                                                            </button>
+                                                            <button class="btn btn-sm" style="background: var(--danger, #e74c3c); color: #fff; border: none;"
+                                                                on:click={
+                                                                    let label_del = label_del.clone();
+                                                                    let label_del_confirm = label_del_confirm.clone();
+                                                                    move |_| {
+                                                                        let msg = format!("Delete assessment {}?", label_del_confirm);
+                                                                        let confirmed = web_sys::window()
+                                                                            .and_then(|w| w.confirm_with_message(&msg).ok())
+                                                                            .unwrap_or(false);
+                                                                        if confirmed {
+                                                                            delete_assessment.dispatch(label_del.clone());
+                                                                        }
+                                                                    }
+                                                                }>
+                                                                <i class="fa-solid fa-trash"></i>" Delete"
+                                                            </button>
+                                                            <button class="btn btn-secondary btn-sm"
+                                                                on:click=move |_| {
+                                                                    set_expanded_label.set(None);
+                                                                    set_expanded_detail.set(None);
+                                                                }>
+                                                                <i class="fa-solid fa-xmark"></i>" Close"
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                }.into_any()
+                                            }
+                                        }
+                                    }}
                                 </div>
                             }
                         }).collect::<Vec<_>>()}
@@ -173,126 +384,7 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
             }}
         </div>
 
-        // ── Detail modal ──
-        <div class=move || if selected_detail.get().is_some() { "modal-overlay active" } else { "modal-overlay" }
-            on:click=move |_| set_selected_detail.set(None)>
-            <div class="modal assessment-detail-modal" on:click=|e| e.stop_propagation()>
-                {move || selected_detail.get().map(|d| {
-                    let label_eval = d.label.clone();
-                    let label_ev = d.label.clone();
-                    view! {
-                        <div class="modal-header">
-                            <h3>
-                                <i class="fa-solid fa-scale-balanced"></i>" "{d.label.clone()}
-                                {d.category.clone().map(|c| view! { <span class="badge" style="margin-left: 0.5rem;">{c}</span> })}
-                                {d.status.clone().map(|s| view! { <span class="badge badge-active" style="margin-left: 0.5rem;">{s}</span> })}
-                            </h3>
-                            <button class="btn-icon modal-close" on:click=move |_| set_selected_detail.set(None)>
-                                <i class="fa-solid fa-xmark"></i>
-                            </button>
-                        </div>
-                        <div class="modal-body">
-                            // Probability bar
-                            {d.probability.map(|p| {
-                                let pct = (p * 100.0) as u32;
-                                let color = if p >= 0.7 { "#e74c3c" } else if p >= 0.4 { "#f1c40f" } else { "#2ecc71" };
-                                view! {
-                                    <div style="margin-bottom: 1rem;">
-                                        <div style="display: flex; align-items: center; gap: 0.5rem;">
-                                            <div style="flex: 1; height: 8px; background: #333; border-radius: 4px; overflow: hidden;">
-                                                <div style=format!("width: {}%; height: 100%; background: {}; border-radius: 4px; transition: width 0.3s;", pct, color)></div>
-                                            </div>
-                                            <span style="font-weight: 700;">{format!("{}%", pct)}</span>
-                                        </div>
-                                    </div>
-                                }
-                            })}
-
-                            // Description
-                            {d.description.clone().map(|desc| view! { <p style="margin-bottom: 0.75rem;">{desc}</p> })}
-
-                            // Timeframe
-                            {d.timeframe.clone().map(|t| view! {
-                                <div style="margin-bottom: 0.75rem;">
-                                    <i class="fa-solid fa-calendar"></i>" "{t}
-                                </div>
-                            })}
-
-                            // Watches
-                            {(!d.watches.is_empty()).then(|| view! {
-                                <div style="margin-bottom: 0.75rem;">
-                                    <strong>"Watches: "</strong>
-                                    {d.watches.iter().map(|w| view! {
-                                        <span class="badge" style="margin: 2px;">{w.clone()}</span>
-                                    }).collect::<Vec<_>>()}
-                                </div>
-                            })}
-
-                            // Evidence table
-                            {(!d.evidence.is_empty()).then(|| view! {
-                                <h4 style="margin-top: 0.75rem; margin-bottom: 0.5rem;">
-                                    <i class="fa-solid fa-file-lines"></i>" Evidence"
-                                </h4>
-                                <table class="data-table evidence-table">
-                                    <thead>
-                                        <tr><th>"Entity"</th><th>"Direction"</th><th>"Weight"</th><th>"Source"</th></tr>
-                                    </thead>
-                                    <tbody>
-                                        {d.evidence.iter().map(|ev| view! {
-                                            <tr>
-                                                <td>{ev.entity.clone().unwrap_or_default()}</td>
-                                                <td>{ev.direction.clone().unwrap_or_default()}</td>
-                                                <td>{ev.weight.map(|w| format!("{:.2}", w)).unwrap_or_default()}</td>
-                                                <td>{ev.source.clone().unwrap_or_default()}</td>
-                                            </tr>
-                                        }).collect::<Vec<_>>()}
-                                    </tbody>
-                                </table>
-                            })}
-
-                            // History table
-                            {(!d.history.is_empty()).then(|| view! {
-                                <h4 style="margin-top: 0.75rem; margin-bottom: 0.5rem;">
-                                    <i class="fa-solid fa-clock-rotate-left"></i>" History"
-                                </h4>
-                                <table class="data-table evidence-table">
-                                    <thead>
-                                        <tr><th>"Timestamp"</th><th>"Probability"</th><th>"Reason"</th></tr>
-                                    </thead>
-                                    <tbody>
-                                        {d.history.iter().map(|h| view! {
-                                            <tr>
-                                                <td>{h.timestamp.clone().unwrap_or_default()}</td>
-                                                <td>{h.probability.map(|p| format!("{:.0}%", p * 100.0)).unwrap_or_default()}</td>
-                                                <td>{h.reason.clone().unwrap_or_default()}</td>
-                                            </tr>
-                                        }).collect::<Vec<_>>()}
-                                    </tbody>
-                                </table>
-                            })}
-
-                            // Action buttons
-                            <div class="button-group" style="margin-top: 1rem;">
-                                <button class="btn btn-primary btn-sm"
-                                    on:click=move |_| { evaluate.dispatch(label_eval.clone()); }>
-                                    <i class="fa-solid fa-rotate"></i>" Evaluate"
-                                </button>
-                                <button class="btn btn-secondary btn-sm"
-                                    on:click=move |_| { set_show_evidence.set(Some(label_ev.clone())); }>
-                                    <i class="fa-solid fa-plus"></i>" Add Evidence"
-                                </button>
-                                <button class="btn btn-secondary btn-sm"
-                                    on:click=move |_| set_selected_detail.set(None)>
-                                    "Close"
-                                </button>
-                            </div>
-                        </div>
-                    }
-                })}
-            </div>
-        </div>
-
-        // ── Evidence modal ──
+        // -- Evidence modal (kept as modal -- sub-form) --
         <div class=move || if show_evidence.get().is_some() { "modal-overlay active" } else { "modal-overlay" }
             on:click=move |_| set_show_evidence.set(None)>
             <div class="modal" style="max-width: 420px;" on:click=|e| e.stop_propagation()>
@@ -344,7 +436,7 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
             </div>
         </div>
 
-        // ── Assessment wizard ──
+        // -- Assessment wizard (kept as modal -- creation flow) --
         <AssessmentWizard
             open=show_wizard
             on_close=Callback::new(move |_| set_show_wizard.set(false))

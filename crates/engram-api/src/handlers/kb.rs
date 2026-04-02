@@ -347,9 +347,6 @@ pub async fn reason_gaps(
     let min_severity: f32 = query.get("min_severity")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.0);
-    let limit: usize = query.get("limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(100);
 
     let graph = state.graph.read().map_err(|_| read_lock_err())?;
     let config = engram_reason::DetectionConfig::default();
@@ -363,7 +360,6 @@ pub async fn reason_gaps(
 
     let filtered: Vec<_> = gaps.into_iter()
         .filter(|g| g.severity >= min_severity)
-        .take(limit)
         .collect();
 
     Ok(Json(serde_json::json!({
