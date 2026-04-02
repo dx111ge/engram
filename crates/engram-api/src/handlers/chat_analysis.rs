@@ -159,62 +159,186 @@ pub async fn isolated(
 }
 
 /// POST /chat/what_if -- confidence cascade simulation
+/// POST /chat/what_if -- 2-hop confidence cascade simulation
 pub async fn what_if(
     State(state): State<AppState>,
     Json(req): Json<WhatIfRequest>,
-) -> ApiResult<WhatIfResponse> {
+) -> ApiResult<serde_json::Value> {
     let g = state.graph.read().map_err(|_| read_lock_err())?;
     let new_conf = req.new_confidence.unwrap_or(0.0) as f32;
+    let max_depth = req.depth.unwrap_or(2).min(3);
 
     let current = g.node_confidence(&req.entity)
         .map_err(|e| api_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or(0.0);
 
-    let edges_out = g.edges_from(&req.entity).map_err(|e| api_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let edges_in = g.edges_to(&req.entity).map_err(|e| api_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let conf_delta = new_conf - current;
 
-    let diff = new_conf - current;
-    let impact_desc = if diff.abs() < 0.1 { "minimal" }
-        else if diff < -0.3 { "significant decrease" }
-        else if diff > 0.3 { "significant increase" }
-        else if diff < 0.0 { "moderate decrease" }
-        else { "moderate increase" };
+    // BFS cascade: propagate confidence change through 2 hops
+    let mut affected: Vec<serde_json::Value> = Vec::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(req.entity.clone());
 
-    let mut affected = Vec::new();
+    // Queue: (label, depth, propagated_delta)
+    let mut queue: VecDeque<(String, u32, f32)> = VecDeque::new();
+
+    // Seed: direct neighbors at hop 1
+    let edges_out = g.edges_from(&req.entity).unwrap_or_default();
+    let edges_in = g.edges_to(&req.entity).unwrap_or_default();
+
     for edge in edges_out.iter().chain(edges_in.iter()) {
         let neighbor = if edge.from == req.entity { &edge.to } else { &edge.from };
-        let neighbor_conf = g.node_confidence(neighbor)
-            .map_err(|e| api_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .unwrap_or(0.0);
-        affected.push(AffectedEntity {
-            label: neighbor.clone(),
-            relationship: edge.relationship.clone(),
-            current_confidence: neighbor_conf,
-            impact: format!("Indirect {impact_desc} via {} edge", edge.relationship),
-        });
+        if visited.insert(neighbor.clone()) {
+            // Propagated delta = original delta * edge confidence * decay
+            let propagated = conf_delta * edge.confidence * 0.5;
+            let neighbor_conf = g.node_confidence(neighbor).ok().flatten().unwrap_or(0.0);
+            let simulated = (neighbor_conf + propagated).clamp(0.05, 0.95);
+
+            affected.push(serde_json::json!({
+                "label": neighbor,
+                "relationship": edge.relationship,
+                "current_confidence": neighbor_conf,
+                "simulated_confidence": simulated,
+                "delta": simulated - neighbor_conf,
+                "hop": 1,
+                "node_type": g.get_node_type(neighbor),
+            }));
+
+            if max_depth > 1 {
+                queue.push_back((neighbor.clone(), 1, propagated));
+            }
+        }
     }
 
-    Ok(Json(WhatIfResponse {
-        entity: req.entity,
-        current_confidence: current,
-        simulated_confidence: new_conf,
-        affected,
-    }))
+    // Hop 2+: cascade through neighbors of neighbors
+    while let Some((label, depth, parent_delta)) = queue.pop_front() {
+        if depth >= max_depth { continue; }
+        let hop_edges_out = g.edges_from(&label).unwrap_or_default();
+        let hop_edges_in = g.edges_to(&label).unwrap_or_default();
+
+        for edge in hop_edges_out.iter().chain(hop_edges_in.iter()) {
+            let neighbor = if edge.from == label { &edge.to } else { &edge.from };
+            if visited.insert(neighbor.clone()) {
+                let propagated = parent_delta * edge.confidence * 0.5;
+                if propagated.abs() < 0.01 { continue; } // Skip negligible impacts
+
+                let neighbor_conf = g.node_confidence(neighbor).ok().flatten().unwrap_or(0.0);
+                let simulated = (neighbor_conf + propagated).clamp(0.05, 0.95);
+
+                affected.push(serde_json::json!({
+                    "label": neighbor,
+                    "relationship": edge.relationship,
+                    "current_confidence": neighbor_conf,
+                    "simulated_confidence": simulated,
+                    "delta": simulated - neighbor_conf,
+                    "hop": depth + 1,
+                    "node_type": g.get_node_type(neighbor),
+                }));
+
+                if depth + 1 < max_depth {
+                    queue.push_back((neighbor.clone(), depth + 1, propagated));
+                }
+            }
+        }
+    }
+
+    // Sort by absolute delta (biggest impact first), limit
+    affected.sort_by(|a, b| {
+        let da = a.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0).abs();
+        let db = b.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0).abs();
+        db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    affected.truncate(30);
+
+    Ok(Json(serde_json::json!({
+        "entity": req.entity,
+        "current_confidence": current,
+        "simulated_confidence": new_conf,
+        "confidence_delta": conf_delta,
+        "affected": affected,
+        "affected_count": affected.len(),
+        "max_depth": max_depth,
+    })))
 }
 
-/// POST /chat/influence_path -- how A affects B
+/// POST /chat/influence_path -- find ALL paths between two entities (multi-path)
 pub async fn influence_path(
     State(state): State<AppState>,
     Json(req): Json<InfluencePathRequest>,
-) -> ApiResult<PathResponse> {
-    shortest_path(
-        State(state),
-        Json(ShortestPathRequest {
-            from: req.from,
-            to: req.to,
-            max_depth: req.max_depth.or(Some(5)),
-        }),
-    ).await
+) -> ApiResult<serde_json::Value> {
+    let g = state.graph.read().map_err(|_| read_lock_err())?;
+    let max_depth = req.max_depth.unwrap_or(4).min(5);
+
+    let from_id = match g.find_node_id(&req.from).map_err(|e| api_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))? {
+        Some(id) => id,
+        None => return Ok(Json(serde_json::json!({ "from": req.from, "to": req.to, "found": false, "paths": [] }))),
+    };
+    let to_id = match g.find_node_id(&req.to).map_err(|e| api_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))? {
+        Some(id) => id,
+        None => return Ok(Json(serde_json::json!({ "from": req.from, "to": req.to, "found": false, "paths": [] }))),
+    };
+
+    // DFS to find all paths up to max_depth
+    let result = g.traverse_directed(&req.from, max_depth, 0.0, "both")
+        .map_err(|e| api_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if !result.nodes.contains(&to_id) {
+        return Ok(Json(serde_json::json!({ "from": req.from, "to": req.to, "found": false, "paths": [] })));
+    }
+
+    // BFS collecting ALL paths (not just shortest)
+    let mut all_paths: Vec<Vec<(String, String)>> = Vec::new(); // Vec of (entity, relationship) pairs
+    let mut queue: VecDeque<(u64, Vec<(String, String)>, HashSet<u64>)> = VecDeque::new();
+
+    let mut start_visited = HashSet::new();
+    start_visited.insert(from_id);
+    queue.push_back((from_id, vec![(req.from.clone(), String::new())], start_visited));
+
+    while let Some((current, path, visited)) = queue.pop_front() {
+        if path.len() > max_depth as usize + 1 { continue; }
+        if all_paths.len() >= 5 { break; } // Cap at 5 paths
+
+        for &(src, dst, edge_slot) in &result.edges {
+            let next = if src == current { dst } else if dst == current { src } else { continue };
+            if visited.contains(&next) { continue; }
+
+            let edge_view = match g.read_edge_view(edge_slot) {
+                Ok(ev) => ev,
+                Err(_) => continue,
+            };
+            let next_label = match g.label_for_id(next) {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+
+            let mut new_path = path.clone();
+            new_path.push((next_label.clone(), edge_view.relationship.clone()));
+
+            if next == to_id {
+                all_paths.push(new_path);
+            } else {
+                let mut new_visited = visited.clone();
+                new_visited.insert(next);
+                queue.push_back((next, new_path, new_visited));
+            }
+        }
+    }
+
+    // Format paths for response
+    let paths: Vec<serde_json::Value> = all_paths.iter().map(|path| {
+        let steps: Vec<serde_json::Value> = path.iter().map(|(entity, rel)| {
+            serde_json::json!({ "entity": entity, "relationship": rel })
+        }).collect();
+        serde_json::json!({ "hops": path.len() - 1, "steps": steps })
+    }).collect();
+
+    Ok(Json(serde_json::json!({
+        "from": req.from,
+        "to": req.to,
+        "found": !all_paths.is_empty(),
+        "path_count": all_paths.len(),
+        "paths": paths,
+    })))
 }
 
 // ── Helpers ──

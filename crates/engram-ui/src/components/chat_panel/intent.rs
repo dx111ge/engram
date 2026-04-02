@@ -234,8 +234,13 @@ pub fn detect_intent(text: &str) -> ChatIntent {
         return ChatIntent { tool: "assess_detail", prefill: after_keyword(trimmed, &["assessment detail ", "show assessment about ", "assessment about "]), prefill2: String::new() };
     }
 
-    // Gaps
-    if lower.contains("gaps") || lower.contains("missing knowledge") || lower.contains("blind spots") || lower == "gaps" {
+    // Black area detection / knowledge gaps scan
+    if lower.contains("black area") || lower.contains("blind spot") || lower.contains("knowledge gap") || lower.contains("scan for gap") || lower == "black areas" {
+        return ChatIntent { tool: "black_areas", prefill: String::new(), prefill2: String::new() };
+    }
+
+    // Gaps (simple entity-level)
+    if lower.contains("gaps") || lower.contains("missing knowledge") || lower == "gaps" {
         return ChatIntent { tool: "gaps", prefill: String::new(), prefill2: String::new() };
     }
 

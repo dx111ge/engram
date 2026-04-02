@@ -55,32 +55,206 @@ pub(super) fn assessment_card(data: &serde_json::Value) -> String {
 
 pub(super) fn whatif_card(data: &serde_json::Value) -> String {
     let entity = data.get("entity").and_then(|v| v.as_str()).unwrap_or("?");
-    let new_conf = data.get("new_confidence").and_then(|v| v.as_f64());
+    let current = data.get("current_confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let simulated = data.get("simulated_confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let conf_delta = data.get("confidence_delta").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let affected = data.get("affected").and_then(|v| v.as_array());
+    let affected_count = data.get("affected_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let max_depth = data.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(2);
+
+    let delta_color = if conf_delta > 0.0 { "#66bb6a" } else if conf_delta < 0.0 { "#ef5350" } else { "var(--text-muted)" };
 
     let mut html = format!(
         "<div class=\"chat-card\">\
-            <div class=\"chat-card-header\"><i class=\"fa-solid fa-code-branch\"></i> What-If: {}</div>\
-            <div class=\"chat-card-body\">",
-        entity_link(entity),
+            <div class=\"chat-card-header\"><i class=\"fa-solid fa-flask\"></i> What-If: {} <span style=\"font-size:0.75rem;color:var(--text-muted)\">({} hops, {} affected)</span></div>\
+            <div class=\"chat-card-body\">\
+                <div style=\"display:flex;gap:16px;margin-bottom:8px;font-size:0.85rem\">\
+                    <div>Current: {}</div>\
+                    <div><i class=\"fa-solid fa-arrow-right\" style=\"font-size:0.6rem\"></i></div>\
+                    <div>Simulated: {}</div>\
+                    <div style=\"color:{}\">{:+.0}%</div>\
+                </div>",
+        entity_link(entity), max_depth, affected_count,
+        confidence_bar(current), confidence_bar(simulated),
+        delta_color, conf_delta * 100.0,
     );
 
-    if let Some(conf) = new_conf {
-        html.push_str(&format!("<div class=\"chat-prop-row\"><span class=\"chat-prop-key\">New confidence</span>{}</div>", confidence_bar(conf)));
+    if let Some(affected) = affected {
+        // Group by hop
+        let mut hop1: Vec<&serde_json::Value> = Vec::new();
+        let mut hop2: Vec<&serde_json::Value> = Vec::new();
+        for a in affected {
+            match a.get("hop").and_then(|v| v.as_u64()).unwrap_or(1) {
+                1 => hop1.push(a),
+                _ => hop2.push(a),
+            }
+        }
+
+        if !hop1.is_empty() {
+            html.push_str(&format!("<div style=\"margin:6px 0 2px\"><strong style=\"color:var(--accent);font-size:0.8rem\">Hop 1 ({} entities)</strong></div>", hop1.len()));
+            for (i, a) in hop1.iter().enumerate() {
+                if i >= 10 { html.push_str("<div style=\"color:var(--text-muted);font-size:0.75rem\">...</div>"); break; }
+                let label = a.get("label").and_then(|v| v.as_str()).unwrap_or("?");
+                let delta = a.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let rel = a.get("relationship").and_then(|v| v.as_str()).unwrap_or("");
+                let dc = if delta > 0.0 { "#66bb6a" } else if delta < 0.0 { "#ef5350" } else { "var(--text-muted)" };
+                html.push_str(&format!(
+                    "<div style=\"font-size:0.8rem;padding:1px 0;display:flex;justify-content:space-between\">\
+                        <span>{} <span style=\"color:var(--text-muted);font-size:0.7rem\">[{}]</span></span>\
+                        <span style=\"color:{}\">{:+.1}%</span>\
+                    </div>",
+                    entity_link(label), html_escape(rel), dc, delta * 100.0,
+                ));
+            }
+        }
+
+        if !hop2.is_empty() {
+            html.push_str(&format!("<div style=\"margin:6px 0 2px\"><strong style=\"color:var(--text-muted);font-size:0.8rem\">Hop 2+ ({} entities)</strong></div>", hop2.len()));
+            for (i, a) in hop2.iter().enumerate() {
+                if i >= 8 { html.push_str("<div style=\"color:var(--text-muted);font-size:0.75rem\">...</div>"); break; }
+                let label = a.get("label").and_then(|v| v.as_str()).unwrap_or("?");
+                let delta = a.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let dc = if delta > 0.0 { "#66bb6a" } else if delta < 0.0 { "#ef5350" } else { "var(--text-muted)" };
+                html.push_str(&format!(
+                    "<div style=\"font-size:0.75rem;padding:1px 0;display:flex;justify-content:space-between;opacity:0.8\">\
+                        <span>{}</span><span style=\"color:{}\">{:+.1}%</span>\
+                    </div>",
+                    entity_link(label), dc, delta * 100.0,
+                ));
+            }
+        }
     }
 
-    if let Some(affected) = affected {
-        html.push_str(&format!("<div class=\"chat-prop-row\"><span class=\"chat-prop-key\">Affected</span><span>{} entities</span></div>", affected.len()));
-        for (i, a) in affected.iter().enumerate() {
-            if i >= 8 { break; }
-            let label = a.get("label").and_then(|v| v.as_str()).unwrap_or("?");
-            let delta = a.get("delta").and_then(|v| v.as_f64());
-            let delta_str = delta.map(|d| format!("{:+.0}%", d * 100.0)).unwrap_or_default();
+    html.push_str("</div></div>");
+    html
+}
+
+pub(super) fn influence_multi_card(data: &serde_json::Value) -> String {
+    let from = data.get("from").and_then(|v| v.as_str()).unwrap_or("?");
+    let to = data.get("to").and_then(|v| v.as_str()).unwrap_or("?");
+    let found = data.get("found").and_then(|v| v.as_bool()).unwrap_or(false);
+    let path_count = data.get("path_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let paths = data.get("paths").and_then(|v| v.as_array());
+
+    if !found {
+        return format!(
+            "<div class=\"chat-card chat-card-empty\"><i class=\"fa-solid fa-diagram-successor\"></i> No influence paths found between {} and {}</div>",
+            entity_link(from), entity_link(to),
+        );
+    }
+
+    let mut html = format!(
+        "<div class=\"chat-card\">\
+            <div class=\"chat-card-header\"><i class=\"fa-solid fa-diagram-successor\"></i> Influence: {} <i class=\"fa-solid fa-arrow-right\" style=\"font-size:0.6rem\"></i> {} <span style=\"font-size:0.75rem;color:var(--text-muted)\">({} path{})</span></div>\
+            <div class=\"chat-card-body\">",
+        entity_link(from), entity_link(to), path_count, if path_count != 1 { "s" } else { "" },
+    );
+
+    if let Some(paths) = paths {
+        for (i, path) in paths.iter().enumerate() {
+            if i >= 5 { break; }
+            let hops = path.get("hops").and_then(|v| v.as_u64()).unwrap_or(0);
+            let steps = path.get("steps").and_then(|v| v.as_array());
+
             html.push_str(&format!(
-                "<div class=\"chat-entity-row\">{} <span class=\"chat-text-muted\">{}</span></div>",
-                entity_link(label), delta_str,
+                "<div style=\"margin:4px 0;padding:6px;border:1px solid rgba(79,195,247,0.2);border-radius:4px\">\
+                    <div style=\"font-size:0.7rem;color:var(--text-muted);margin-bottom:4px\">Path {} ({} hops)</div>\
+                    <div style=\"display:flex;flex-wrap:wrap;align-items:center;gap:4px;font-size:0.8rem\">",
+                i + 1, hops,
             ));
+
+            if let Some(steps) = steps {
+                for (j, step) in steps.iter().enumerate() {
+                    let entity = step.get("entity").and_then(|v| v.as_str()).unwrap_or("?");
+                    let rel = step.get("relationship").and_then(|v| v.as_str()).unwrap_or("");
+                    if j > 0 && !rel.is_empty() {
+                        html.push_str(&format!(
+                            "<span style=\"color:var(--accent);font-size:0.65rem\">[{}]</span> <i class=\"fa-solid fa-arrow-right\" style=\"font-size:0.5rem;color:var(--text-muted)\"></i> ",
+                            html_escape(rel),
+                        ));
+                    }
+                    html.push_str(&entity_link(entity));
+                }
+            }
+
+            html.push_str("</div></div>");
         }
+    }
+
+    html.push_str("</div></div>");
+    html
+}
+
+pub(super) fn black_areas_card(data: &serde_json::Value) -> String {
+    let gaps = data.get("gaps").or_else(|| data.as_array().map(|_| data)).and_then(|v| v.as_array());
+
+    if gaps.is_none() || gaps.unwrap().is_empty() {
+        return "<div class=\"chat-card\"><div class=\"chat-card-header\"><i class=\"fa-solid fa-circle-check\" style=\"color:#66bb6a\"></i> No Knowledge Gaps</div>\
+            <div class=\"chat-card-body\" style=\"font-size:0.85rem;color:#66bb6a\">Your knowledge graph has no detected blind spots.</div></div>".to_string();
+    }
+    let gaps = gaps.unwrap();
+
+    let mut html = format!(
+        "<div class=\"chat-card\">\
+            <div class=\"chat-card-header\"><i class=\"fa-solid fa-binoculars\"></i> Knowledge Gaps ({} detected)</div>\
+            <div class=\"chat-card-body\">",
+        gaps.len(),
+    );
+
+    for (i, gap) in gaps.iter().enumerate() {
+        if i >= 15 { html.push_str("<div style=\"color:var(--text-muted);font-size:0.75rem\">...</div>"); break; }
+        let kind = gap.get("kind").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let severity = gap.get("severity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let entities = gap.get("entities").and_then(|v| v.as_array());
+        let domain = gap.get("domain").and_then(|v| v.as_str());
+        let suggestions = gap.get("suggested_queries").and_then(|v| v.as_array());
+
+        let (icon, color) = match kind {
+            "frontier_node" => ("fa-solid fa-circle-dot", "#ffa726"),
+            "structural_hole" => ("fa-solid fa-link-slash", "#ef5350"),
+            "asymmetric_cluster" => ("fa-solid fa-scale-unbalanced", "#ce93d8"),
+            "temporal_gap" => ("fa-solid fa-clock", "#4fc3f7"),
+            "confidence_desert" => ("fa-solid fa-temperature-low", "#90a4ae"),
+            "coordinated_cluster" => ("fa-solid fa-users-viewfinder", "#ff7043"),
+            _ => ("fa-solid fa-question", "var(--text-muted)"),
+        };
+
+        let severity_pct = (severity * 100.0).round() as u32;
+        let kind_label = kind.replace('_', " ");
+
+        html.push_str(&format!(
+            "<div style=\"border-left:3px solid {};padding:6px 10px;margin-bottom:6px\">\
+                <div style=\"display:flex;justify-content:space-between;align-items:center\">\
+                    <span style=\"font-size:0.8rem;font-weight:600\"><i class=\"{}\" style=\"color:{}\"></i> {}</span>\
+                    <span style=\"font-size:0.7rem;color:{}\">{severity_pct}% severity</span>\
+                </div>",
+            color, icon, color, kind_label, color,
+        ));
+
+        if let Some(domain) = domain {
+            html.push_str(&format!("<div style=\"font-size:0.7rem;color:var(--text-muted)\">Domain: {}</div>", html_escape(domain)));
+        }
+
+        if let Some(entities) = entities {
+            let labels: Vec<String> = entities.iter().take(5)
+                .filter_map(|e| e.as_str())
+                .map(|l| entity_link(l))
+                .collect();
+            html.push_str(&format!("<div style=\"font-size:0.8rem;margin-top:2px\">{}</div>", labels.join(", ")));
+        }
+
+        if let Some(suggestions) = suggestions {
+            for s in suggestions.iter().take(2) {
+                if let Some(q) = s.as_str() {
+                    html.push_str(&format!(
+                        "<div style=\"font-size:0.7rem;color:var(--accent);margin-top:2px\"><i class=\"fa-solid fa-lightbulb\" style=\"font-size:0.6rem\"></i> {}</div>",
+                        html_escape(q),
+                    ));
+                }
+            }
+        }
+
+        html.push_str("</div>");
     }
 
     html.push_str("</div></div>");

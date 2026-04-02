@@ -274,6 +274,25 @@ static CARDS: &[ToolCard] = &[
         button_label: "Show Stats",
         fields: &[],
     },
+    // Reasoning tools
+    ToolCard { tool: "what_if", title: "What-If Simulation", icon: "fa-solid fa-flask", is_write: false, confirm: false,
+        button_label: "Simulate",
+        fields: &[
+            Field { id: "tc-wif-entity", label: "Entity", placeholder: "Entity to change...", field_type: FieldType::Text, required: true },
+            Field { id: "tc-wif-conf", label: "New Confidence", placeholder: "", field_type: FieldType::Number { default: "0.20", min: "0.00", max: "1.00", step: "0.05" }, required: true },
+        ],
+    },
+    ToolCard { tool: "influence", title: "Influence Paths", icon: "fa-solid fa-diagram-successor", is_write: false, confirm: false,
+        button_label: "Find Influence",
+        fields: &[
+            Field { id: "tc-inf-from", label: "From", placeholder: "Source entity...", field_type: FieldType::Text, required: true },
+            Field { id: "tc-inf-to", label: "To", placeholder: "Target entity...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "black_areas", title: "Knowledge Gaps", icon: "fa-solid fa-binoculars", is_write: false, confirm: false,
+        button_label: "Scan for Gaps",
+        fields: &[],
+    },
     // Assessment tools
     ToolCard { tool: "assess_create", title: "Create Assessment", icon: "fa-solid fa-scale-balanced", is_write: true, confirm: true,
         button_label: "Create",

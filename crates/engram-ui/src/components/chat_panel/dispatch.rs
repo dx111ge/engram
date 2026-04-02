@@ -566,6 +566,77 @@ pub fn setup_card_dispatch(
                         let body = serde_json::json!({"entity": entity});
                         api.post_text("/chat/entity_gaps", &body).await.map(|r| ("engram_entity_gaps".into(), r)).map_err(|e| e.to_string())
                     }
+                    // Reasoning tools
+                    "what_if" => {
+                        let entity = p("entity");
+                        let conf = params.get("conf").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.20);
+                        let body = serde_json::json!({"entity": entity, "new_confidence": conf, "depth": 2});
+                        match api.post_text("/chat/what_if", &body).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_what_if", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                llm_analysis(&api, set_messages,
+                                    "Analyze this what-if simulation. Explain the strategic implications of the confidence cascade. Which entities are most affected and why? What does this mean for the broader knowledge landscape? Be concise (2-3 sentences).",
+                                    &format!("What-if simulation results:\n{}", &json_str[..json_str.len().min(3000)]),
+                                ).await;
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                    "influence" => {
+                        let from = p("from");
+                        let to = p("to");
+                        let body = serde_json::json!({"from": from, "to": to, "max_depth": 4});
+                        match api.post_text("/chat/influence_path", &body).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_influence_path", &json_str);
+                                dispatch_graph_data("engram_influence_path", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                llm_analysis(&api, set_messages,
+                                    "Analyze these influence paths between two entities. Explain the different influence channels/mechanisms. Which path is most significant and why? Be concise (2-3 sentences).",
+                                    &format!("Influence paths:\n{}", &json_str[..json_str.len().min(3000)]),
+                                ).await;
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                    "black_areas" => {
+                        match api.get_text("/reason/gaps").await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_black_areas", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                llm_analysis(&api, set_messages,
+                                    "Analyze these knowledge gaps and blind spots. Which gaps are most critical? What investigations would fill them? Prioritize by severity. Be concise (2-3 sentences).",
+                                    &format!("Knowledge gaps detected:\n{}", &json_str[..json_str.len().min(3000)]),
+                                ).await;
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
                     // Reporting tools
                     "briefing" => {
                         let topic = p("topic");

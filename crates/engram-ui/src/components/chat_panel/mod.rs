@@ -190,6 +190,8 @@ pub fn ChatPanel(
                     "network_analysis" => "tc-net-entity",
                     "entity_360" => "tc-360-entity",
                     "entity_gaps" => "tc-gaps-entity",
+                    "what_if" => "tc-wif-entity",
+                    "influence" => "tc-inf-from",
                     "briefing" => "tc-brief-topic",
                     "export" => "tc-export-entity",
                     "dossier" => "tc-dossier-entity",
@@ -211,6 +213,7 @@ pub fn ChatPanel(
                         let id2 = match detected.tool {
                             "compare" => "tc-compare-b",
                             "shortest_path" => "tc-sp-to",
+                            "influence" => "tc-inf-to",
                             "situation_at" => "tc-sa-date",
                             "date_query" => "tc-dq-from",
                             "assess_compare" => "tc-acmp-b",
