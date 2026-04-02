@@ -73,6 +73,11 @@ pub struct AssessmentRecord {
     #[serde(default = "default_resolution")]
     pub resolution: String,
 
+    /// Number of auto-detected evidence items pending human review.
+    /// Incremented by GraphPropagation triggers, reset on manual evaluate.
+    #[serde(default)]
+    pub pending_count: u32,
+
     // Legacy fields (backward compat with old .brain.assessments files)
     /// Deprecated: use `evidence` instead. Kept for migration.
     #[serde(default, skip_serializing)]

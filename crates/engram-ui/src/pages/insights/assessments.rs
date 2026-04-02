@@ -19,6 +19,10 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
     let (ev_direction, set_ev_direction) = signal("supporting".to_string());
     let (ev_weight, set_ev_weight) = signal("0.5".to_string());
 
+    // Watch suggestions signals
+    let (watch_suggestions, set_watch_suggestions) = signal(Vec::<serde_json::Value>::new());
+    let (watch_loading, set_watch_loading) = signal(false);
+
     // ── Filter / Sort signals ──
     let (search_text, set_search_text) = signal(String::new());
     let (filter_category, set_filter_category) = signal("All".to_string());
@@ -184,6 +188,58 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                     }
                 }
                 Err(e) => set_status_msg.set(format!("Update error: {e}")),
+            }
+        }
+    });
+
+    // ── Load watch suggestions for an assessment ──
+    let api_suggest = api.clone();
+    let load_watch_suggestions = Action::new_local(move |label: &String| {
+        let api = api_suggest.clone();
+        let path = format!("/assessments/{}/suggest-watches", js_sys::encode_uri_component(label));
+        set_watch_loading.set(true);
+        set_watch_suggestions.set(vec![]);
+        async move {
+            let body = serde_json::json!({});
+            match api.post_text(&path, &body).await {
+                Ok(text) => {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(arr) = parsed.get("suggestions").and_then(|v| v.as_array()) {
+                            set_watch_suggestions.set(arr.clone());
+                        }
+                    }
+                }
+                Err(e) => set_status_msg.set(format!("Suggest watches error: {e}")),
+            }
+            set_watch_loading.set(false);
+        }
+    });
+
+    // ── Add a suggested watch to an assessment ──
+    let api_add_watch = api.clone();
+    let load_assessments_watch = load_assessments.clone();
+    let add_watch = Action::new_local(move |args: &(String, String)| {
+        let api = api_add_watch.clone();
+        let reload = load_assessments_watch.clone();
+        let (label, entity) = args.clone();
+        let path = format!("/assessments/{}/watch", js_sys::encode_uri_component(&label));
+        let body = serde_json::json!({ "entity_label": entity });
+        async move {
+            match api.post_text(&path, &body).await {
+                Ok(_) => {
+                    set_status_msg.set(format!("Watch added: {}", entity));
+                    // Remove from suggestions list
+                    set_watch_suggestions.update(|list| {
+                        list.retain(|s| s.get("label").and_then(|v| v.as_str()) != Some(&entity));
+                    });
+                    reload.dispatch(());
+                    // Refresh detail
+                    let detail_path = format!("/assessments/{}", js_sys::encode_uri_component(&label));
+                    if let Ok(refreshed) = api.get::<AssessmentDetail>(&detail_path).await {
+                        set_expanded_detail.set(Some(refreshed));
+                    }
+                }
+                Err(e) => set_status_msg.set(format!("Add watch error: {e}")),
             }
         }
     });
@@ -369,6 +425,8 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                             let resolution = a.resolution.clone().or_else(|| a.status.clone()).unwrap_or_default();
                             let res_color = resolution_color(&resolution);
                             let card_tags = a.tags.clone();
+                            let pending_count = a.pending_count;
+                            let is_stale = a.stale;
 
                             view! {
                                 <div
@@ -397,6 +455,18 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                                             <div style="display: flex; gap: 0.4rem; align-items: center;">
                                                 <span class="badge" style=format!("background: {}; color: #fff;", res_color)>{resolution}</span>
                                                 {a.category.clone().map(|c| view! { <span class="badge">{c}</span> })}
+                                                {(pending_count > 0).then(|| view! {
+                                                    <span class="badge" style="background: #f1c40f; color: #333; font-size: 0.7rem; padding: 0.1rem 0.35rem;">
+                                                        <i class="fa-solid fa-bell" style="margin-right: 0.2rem; font-size: 0.65rem;"></i>
+                                                        {format!("{} new", pending_count)}
+                                                    </span>
+                                                })}
+                                                {is_stale.then(|| view! {
+                                                    <span class="badge" style="background: #e67e22; color: #fff; font-size: 0.7rem; padding: 0.1rem 0.35rem;">
+                                                        <i class="fa-solid fa-clock" style="margin-right: 0.2rem; font-size: 0.65rem;"></i>
+                                                        "Review needed"
+                                                    </span>
+                                                })}
                                             </div>
                                         </div>
                                         <div style="margin-bottom: 0.5rem;">
@@ -438,6 +508,7 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                                                 let label_del_confirm = d.label.clone();
                                                 let label_save = d.label.clone();
                                                 let label_status = d.label.clone();
+                                                let label_suggest = d.label.clone();
                                                 let d_for_edit = d.clone();
                                                 let is_editing = editing.get();
 
@@ -645,15 +716,89 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                                                             }.into_any()
                                                         }}
 
-                                                        // Watches
-                                                        {(!d.watches.is_empty()).then(|| view! {
-                                                            <div style="margin-bottom: 1rem;">
+                                                        // Watches + Suggest new watches
+                                                        <div style="margin-bottom: 1rem;">
+                                                            <div style="display: flex; justify-content: space-between; align-items: center;">
                                                                 <strong style="font-size: 0.85rem; text-transform: uppercase; opacity: 0.6;">"Watches"</strong>
+                                                                <button class="btn btn-secondary btn-sm" style="font-size: 0.75rem; padding: 0.15rem 0.5rem;"
+                                                                    on:click={
+                                                                        let label_suggest = label_suggest.clone();
+                                                                        move |_| { load_watch_suggestions.dispatch(label_suggest.clone()); }
+                                                                    }>
+                                                                    <i class="fa-solid fa-lightbulb" style="margin-right: 0.2rem;"></i>"Suggest watches"
+                                                                </button>
+                                                            </div>
+                                                            {(!d.watches.is_empty()).then(|| view! {
                                                                 <div style="margin-top: 0.35rem; display: flex; flex-wrap: wrap; gap: 0.3rem;">
                                                                     {d.watches.iter().map(|w| view! {
                                                                         <span class="badge">{w.clone()}</span>
                                                                     }).collect::<Vec<_>>()}
                                                                 </div>
+                                                            })}
+                                                            // Watch suggestions panel
+                                                            {move || {
+                                                                let loading = watch_loading.get();
+                                                                let suggestions = watch_suggestions.get();
+                                                                if loading {
+                                                                    return view! {
+                                                                        <div style="margin-top: 0.5rem; font-size: 0.85rem; opacity: 0.7;">
+                                                                            <i class="fa-solid fa-spinner fa-spin"></i>" Finding relevant entities..."
+                                                                        </div>
+                                                                    }.into_any();
+                                                                }
+                                                                if suggestions.is_empty() {
+                                                                    return view! { <div></div> }.into_any();
+                                                                }
+                                                                let current_label = expanded_label.get().unwrap_or_default();
+                                                                view! {
+                                                                    <div style="margin-top: 0.5rem; padding: 0.5rem; background: var(--surface-alt, #1a1a2e); border-radius: 6px; border: 1px solid var(--border, #333);">
+                                                                        <div style="font-size: 0.8rem; opacity: 0.7; margin-bottom: 0.4rem;">
+                                                                            <i class="fa-solid fa-lightbulb" style="color: #f1c40f; margin-right: 0.3rem;"></i>
+                                                                            "Suggested entities to watch:"
+                                                                        </div>
+                                                                        <div style="display: flex; flex-wrap: wrap; gap: 0.3rem;">
+                                                                            {suggestions.into_iter().map(move |s| {
+                                                                                let lbl = s.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                                                                let nt = s.get("node_type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                                                                let ec = s.get("edge_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                                                                let lbl_display = lbl.clone();
+                                                                                let lbl_add = lbl.clone();
+                                                                                let cl = current_label.clone();
+                                                                                view! {
+                                                                                    <button class="badge" style="cursor: pointer; border: 1px solid var(--border, #444); background: var(--surface, #252535); padding: 0.2rem 0.5rem; font-size: 0.75rem;"
+                                                                                        title=format!("{} ({} edges)", nt, ec)
+                                                                                        on:click=move |_| {
+                                                                                            add_watch.dispatch((cl.clone(), lbl_add.clone()));
+                                                                                        }>
+                                                                                        <i class="fa-solid fa-plus" style="margin-right: 0.2rem; font-size: 0.65rem; color: #2ecc71;"></i>
+                                                                                        {lbl_display}
+                                                                                    </button>
+                                                                                }
+                                                                            }).collect::<Vec<_>>()}
+                                                                        </div>
+                                                                    </div>
+                                                                }.into_any()
+                                                            }}
+                                                        </div>
+
+                                                        // Pending evidence notice
+                                                        {(d.pending_count > 0).then(|| {
+                                                            let count = d.pending_count;
+                                                            view! {
+                                                                <div style="margin-bottom: 1rem; padding: 0.5rem 0.75rem; background: rgba(241, 196, 15, 0.1); border: 1px solid rgba(241, 196, 15, 0.3); border-radius: 6px; font-size: 0.85rem;">
+                                                                    <i class="fa-solid fa-bell" style="color: #f1c40f; margin-right: 0.3rem;"></i>
+                                                                    <strong>{format!("{} pending auto-detected evidence", count)}</strong>
+                                                                    " -- click Evaluate to review and incorporate."
+                                                                </div>
+                                                            }
+                                                        })}
+
+                                                        // Stale alert in expanded view
+                                                        {d.stale.then(|| view! {
+                                                            <div style="margin-bottom: 1rem; padding: 0.5rem 0.75rem; background: rgba(230, 126, 34, 0.1); border: 1px solid rgba(230, 126, 34, 0.3); border-radius: 6px; font-size: 0.85rem;">
+                                                                <i class="fa-solid fa-clock" style="color: #e67e22; margin-right: 0.3rem;"></i>
+                                                                <strong>"Review needed"</strong>
+                                                                " -- this assessment has not been evaluated in over 7 days."
                                                             </div>
                                                         })}
 

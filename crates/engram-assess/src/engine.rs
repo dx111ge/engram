@@ -204,6 +204,11 @@ pub fn add_evidence(
     let now = now_secs();
     let old_prob = calculate_probability(&record.evidence);
 
+    // Track pending auto-evidence for stale alerts
+    if matches!(trigger, ScoreTrigger::GraphPropagation { .. }) {
+        record.pending_count = record.pending_count.saturating_add(1);
+    }
+
     record.evidence.push(EvidenceEntry {
         node_label: node_label.to_string(),
         confidence,
@@ -230,7 +235,7 @@ pub fn add_evidence(
 }
 
 /// Full re-evaluation: recalculate probability from structured evidence.
-/// Returns the new ScorePoint.
+/// Resets pending_count (user has reviewed). Returns the new ScorePoint.
 pub fn evaluate(record: &mut AssessmentRecord) -> ScorePoint {
     let old_prob = record.history.last()
         .map(|p| p.probability)
@@ -240,6 +245,9 @@ pub fn evaluate(record: &mut AssessmentRecord) -> ScorePoint {
     let shift = new_prob - old_prob;
 
     let now = now_secs();
+
+    // Reset pending auto-evidence counter -- user has reviewed
+    record.pending_count = 0;
 
     let point = ScorePoint {
         timestamp: now,
@@ -340,6 +348,7 @@ mod tests {
             success_criteria: None,
             tags: vec![],
             resolution: "active".to_string(),
+            pending_count: 0,
             evidence_for: vec![],
             evidence_against: vec![],
         }

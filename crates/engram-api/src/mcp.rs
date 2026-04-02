@@ -800,6 +800,7 @@ fn execute_tool(state: &AppState, name: &str, args: &Value) -> Result<Value, Str
                 success_criteria: None,
                 tags: vec![],
                 resolution: "active".to_string(),
+                pending_count: 0,
                 evidence_for: vec![],
                 evidence_against: vec![],
             };

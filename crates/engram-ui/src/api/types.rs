@@ -352,6 +352,12 @@ pub struct Assessment {
     pub resolution: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Number of auto-detected evidence items pending human review.
+    #[serde(default)]
+    pub pending_count: u32,
+    /// Whether the assessment has not been evaluated in 7+ days.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -404,6 +410,12 @@ pub struct AssessmentDetail {
     pub tags: Vec<String>,
     #[serde(default)]
     pub last_evaluated: Option<i64>,
+    /// Number of auto-detected evidence items pending human review.
+    #[serde(default)]
+    pub pending_count: u32,
+    /// Whether the assessment has not been evaluated in 7+ days.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

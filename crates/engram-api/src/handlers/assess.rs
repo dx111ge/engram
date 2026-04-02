@@ -66,6 +66,7 @@ pub async fn create_assessment(
             success_criteria: req.success_criteria.clone(),
             tags: req.tags.clone(),
             resolution: "active".to_string(),
+            pending_count: 0,
             evidence_for: vec![],
             evidence_against: vec![],
         };
@@ -127,6 +128,14 @@ pub async fn list_assessments(
             .filter(|e| e.relationship == "watches")
             .count();
 
+        // Stale detection: not evaluated in 7+ days
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let seven_days: i64 = 7 * 24 * 3600;
+        let stale = last_evaluated == 0 || (now_secs - last_evaluated) > seven_days;
+
         assessments.push(serde_json::json!({
             "label": record.label,
             "title": props.get("title").cloned().unwrap_or_else(|| record.label.clone()),
@@ -139,6 +148,10 @@ pub async fn list_assessments(
             "evidence_count": record.evidence_for.len() + record.evidence_against.len(),
             "watch_count": watch_count,
             "last_shift": last_shift,
+            "pending_count": record.pending_count,
+            "stale": stale,
+            "resolution": record.resolution,
+            "tags": record.tags,
         }));
     }
 
@@ -182,6 +195,16 @@ pub async fn get_assessment(
         serde_json::json!({ "node_label": format!("evidence_{}", i), "confidence": c })
     }).collect();
 
+    let last_evaluated: i64 = props.get("last_evaluated")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let seven_days: i64 = 7 * 24 * 3600;
+    let stale = last_evaluated == 0 || (now_secs - last_evaluated) > seven_days;
+
     Ok(Json(serde_json::json!({
         "label": record.label,
         "title": props.get("title").cloned().unwrap_or_else(|| record.label.clone()),
@@ -190,11 +213,16 @@ pub async fn get_assessment(
         "description": props.get("description").cloned().unwrap_or_default(),
         "timeframe": props.get("timeframe").cloned().unwrap_or_default(),
         "current_probability": engram_assess::engine::recalculate_probability(record),
-        "last_evaluated": props.get("last_evaluated").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+        "last_evaluated": last_evaluated,
         "history": record.history,
         "evidence_for": evidence_for,
         "evidence_against": evidence_against,
         "watches": watches,
+        "pending_count": record.pending_count,
+        "stale": stale,
+        "resolution": record.resolution,
+        "tags": record.tags,
+        "success_criteria": record.success_criteria,
     })))
 }
 
@@ -668,5 +696,115 @@ pub async fn suggest_watches(
 
 #[cfg(not(feature = "assess"))]
 pub async fn suggest_watches() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
+
+// POST /assessments/:label/suggest-watches -- Suggest new watches for an existing assessment
+#[cfg(feature = "assess")]
+pub async fn suggest_watches_for_assessment(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let label = urlencoding::decode(&label).unwrap_or_default().to_string();
+
+    let g = state.graph.read().map_err(|_| read_lock_err())?;
+
+    // Get existing watches so we can exclude them
+    let existing_watches: std::collections::HashSet<String> = g.edges_from(&label)
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| e.relationship == "watches")
+        .map(|e| e.to.clone())
+        .collect();
+
+    // Get hypothesis text from graph properties
+    let props = g.get_properties(&label).ok().flatten().unwrap_or_default();
+    let hypothesis = props.get("title").cloned().unwrap_or_default();
+    let description = props.get("description").cloned().unwrap_or_default();
+    let search_text = format!("{} {}", hypothesis, description);
+
+    if search_text.trim().is_empty() {
+        return Ok(Json(serde_json::json!({ "suggestions": [], "error": "No hypothesis text available" })));
+    }
+
+    // Same search logic as global suggest_watches but excluding already-watched entities
+    let words: Vec<&str> = search_text.split_whitespace()
+        .filter(|w| w.len() > 2)
+        .filter(|w| !matches!(w.to_lowercase().as_str(),
+            "the" | "and" | "will" | "that" | "this" | "with" | "for" | "from" | "are" | "was"
+            | "were" | "been" | "have" | "has" | "had" | "not" | "but" | "what" | "how"
+            | "can" | "could" | "would" | "should" | "may" | "might" | "shall" | "does"
+            | "did" | "its" | "his" | "her" | "our" | "their" | "about" | "into" | "over"
+            | "than" | "then" | "when" | "where" | "which" | "who" | "whom" | "why"
+            | "all" | "any" | "each" | "every" | "more" | "most" | "other" | "some" | "such"
+            | "very" | "also" | "just" | "only" | "still" | "already" | "between" | "through"
+        ))
+        .collect();
+
+    let mut found_entities: std::collections::HashMap<String, (String, f32, u32)> = std::collections::HashMap::new();
+
+    for word in &words {
+        if let Ok(hits) = g.search_text(word, 5) {
+            for hit in hits {
+                if existing_watches.contains(&hit.label) || hit.label == label {
+                    continue;
+                }
+                let nt = g.get_node_type(&hit.label).unwrap_or_else(|| "entity".to_string());
+                if matches!(nt.as_str(), "Fact" | "fact" | "Document" | "document" | "Source" | "source" | "assessment") {
+                    continue;
+                }
+                let edges_out = g.edges_from(&hit.label).map(|e| e.len()).unwrap_or(0);
+                let edges_in = g.edges_to(&hit.label).map(|e| e.len()).unwrap_or(0);
+                let ec = (edges_out + edges_in) as u32;
+                found_entities.entry(hit.label.clone())
+                    .or_insert((nt, hit.confidence, ec));
+            }
+        }
+    }
+
+    // Also try full-phrase search
+    if let Ok(hits) = g.search_text(&search_text, 10) {
+        for hit in hits {
+            if existing_watches.contains(&hit.label) || hit.label == label {
+                continue;
+            }
+            let nt = g.get_node_type(&hit.label).unwrap_or_else(|| "entity".to_string());
+            if matches!(nt.as_str(), "Fact" | "fact" | "Document" | "document" | "Source" | "source" | "assessment") {
+                continue;
+            }
+            let edges_out = g.edges_from(&hit.label).map(|e| e.len()).unwrap_or(0);
+            let edges_in = g.edges_to(&hit.label).map(|e| e.len()).unwrap_or(0);
+            let ec = (edges_out + edges_in) as u32;
+            found_entities.entry(hit.label.clone())
+                .or_insert((nt, hit.confidence, ec));
+        }
+    }
+
+    let mut suggestions: Vec<serde_json::Value> = found_entities.into_iter()
+        .map(|(lbl, (nt, conf, ec))| {
+            serde_json::json!({
+                "label": lbl,
+                "node_type": nt,
+                "confidence": conf,
+                "edge_count": ec,
+            })
+        })
+        .collect();
+    suggestions.sort_by(|a, b| {
+        let ea = a.get("edge_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let eb = b.get("edge_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        eb.cmp(&ea)
+    });
+    suggestions.truncate(20);
+
+    Ok(Json(serde_json::json!({
+        "label": label,
+        "existing_watches": existing_watches.into_iter().collect::<Vec<_>>(),
+        "suggestions": suggestions,
+    })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn suggest_watches_for_assessment() -> impl axum::response::IntoResponse {
     feature_not_enabled("assess")
 }
