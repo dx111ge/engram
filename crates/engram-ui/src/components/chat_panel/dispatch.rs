@@ -630,6 +630,137 @@ pub fn setup_card_dispatch(
                         let body = serde_json::json!({});
                         api.post_text("/chat/graph_stats", &body).await.map(|r| ("engram_graph_stats".into(), r)).map_err(|e| e.to_string())
                     }
+                    // Assessment tools
+                    "assess_create" => {
+                        let body = serde_json::json!({
+                            "title": p("title"),
+                            "description": p("description"),
+                            "initial_probability": params.get("probability").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.50),
+                            "success_criteria": vec![p("criteria")].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>(),
+                            "watches": Vec::<String>::new(),
+                            "tags": Vec::<String>::new(),
+                        });
+                        match api.post_text("/assessments", &body).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_assess_create", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                llm_analysis(&api, set_messages,
+                                    "An assessment/hypothesis has been created. Briefly describe what this assessment tracks, what the initial probability suggests, and recommend what evidence to look for next. Be concise (2-3 sentences).",
+                                    &format!("Assessment created:\n{}", json_str),
+                                ).await;
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                    "assess_evidence" => {
+                        let assessment = p("assessment");
+                        let encoded = js_sys::encode_uri_component(&assessment);
+                        let body = serde_json::json!({
+                            "node_label": p("text"),
+                            "direction": p("direction"),
+                        });
+                        match api.post_text(&format!("/assessments/{}/evidence", encoded.as_string().unwrap_or_default()), &body).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_assess_evidence", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                llm_analysis(&api, set_messages,
+                                    "Evidence has been added to an assessment. Explain how this evidence shifts the probability, whether the direction is significant, and what this means for the hypothesis. Be concise (2-3 sentences).",
+                                    &format!("Evidence added:\n{}", json_str),
+                                ).await;
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                    "assess_evaluate" => {
+                        let assessment = p("assessment");
+                        let encoded = js_sys::encode_uri_component(&assessment);
+                        match api.post_text(&format!("/assessments/{}/evaluate", encoded.as_string().unwrap_or_default()), &serde_json::json!({})).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_assess_evaluate", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                llm_analysis(&api, set_messages,
+                                    "An assessment has been re-evaluated. Analyze the probability shift, whether it moved toward confirmation or rejection, and what the current probability implies. Be concise (2-3 sentences).",
+                                    &format!("Assessment evaluated:\n{}", json_str),
+                                ).await;
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                    "assess_list" => {
+                        api.get_text("/assessments").await.map(|r| ("engram_assess_list".into(), r)).map_err(|e| e.to_string())
+                    }
+                    "assess_detail" => {
+                        let assessment = p("assessment");
+                        let encoded = js_sys::encode_uri_component(&assessment);
+                        match api.get_text(&format!("/assessments/{}", encoded.as_string().unwrap_or_default())).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_assess_detail", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                llm_analysis(&api, set_messages,
+                                    "Analyze this assessment in detail. Describe the balance of evidence for and against, the probability trend from history, what the watched entities suggest, and recommend next steps. Be concise (3-4 sentences).",
+                                    &format!("Assessment detail:\n{}", json_str),
+                                ).await;
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                    "assess_compare" => {
+                        let a = p("a");
+                        let b = p("b");
+                        let enc_a = js_sys::encode_uri_component(&a);
+                        let enc_b = js_sys::encode_uri_component(&b);
+                        match api.get_text(&format!("/assessments/compare/{}/{}", enc_a.as_string().unwrap_or_default(), enc_b.as_string().unwrap_or_default())).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_assess_compare", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                llm_analysis(&api, set_messages,
+                                    "Compare these two assessments/hypotheses. Which has stronger evidence? Which is more likely? Are they mutually exclusive or could both be true? Recommend which to investigate further. Be concise (3-4 sentences).",
+                                    &format!("Assessment comparison:\n{}", json_str),
+                                ).await;
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
                     _ => Err(format!("Unknown tool: {}", tool)),
                 };
 

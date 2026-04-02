@@ -274,6 +274,47 @@ static CARDS: &[ToolCard] = &[
         button_label: "Show Stats",
         fields: &[],
     },
+    // Assessment tools
+    ToolCard { tool: "assess_create", title: "Create Assessment", icon: "fa-solid fa-scale-balanced", is_write: true, confirm: true,
+        button_label: "Create",
+        fields: &[
+            Field { id: "tc-ac-title", label: "Title", placeholder: "Assessment title...", field_type: FieldType::Text, required: true },
+            Field { id: "tc-ac-description", label: "Description", placeholder: "What are you assessing?", field_type: FieldType::Text, required: false },
+            Field { id: "tc-ac-probability", label: "Initial Probability", placeholder: "", field_type: FieldType::Number { default: "0.50", min: "0.05", max: "0.95", step: "0.05" }, required: false },
+            Field { id: "tc-ac-criteria", label: "Success Criteria", placeholder: "How to verify this assessment...", field_type: FieldType::Text, required: false },
+        ],
+    },
+    ToolCard { tool: "assess_evidence", title: "Add Evidence", icon: "fa-solid fa-plus-circle", is_write: true, confirm: true,
+        button_label: "Add Evidence",
+        fields: &[
+            Field { id: "tc-ae-assessment", label: "Assessment", placeholder: "Assessment label...", field_type: FieldType::Text, required: true },
+            Field { id: "tc-ae-text", label: "Evidence", placeholder: "Evidence entity or text...", field_type: FieldType::Text, required: true },
+            Field { id: "tc-ae-direction", label: "Direction", placeholder: "", field_type: FieldType::Select(&[("supports", "Supports"), ("contradicts", "Contradicts")]), required: true },
+        ],
+    },
+    ToolCard { tool: "assess_evaluate", title: "Evaluate Assessment", icon: "fa-solid fa-calculator", is_write: false, confirm: false,
+        button_label: "Evaluate",
+        fields: &[
+            Field { id: "tc-aev-assessment", label: "Assessment", placeholder: "Assessment label...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "assess_list", title: "List Assessments", icon: "fa-solid fa-list-check", is_write: false, confirm: false,
+        button_label: "Show All",
+        fields: &[],
+    },
+    ToolCard { tool: "assess_detail", title: "Assessment Detail", icon: "fa-solid fa-magnifying-glass-chart", is_write: false, confirm: false,
+        button_label: "Show Detail",
+        fields: &[
+            Field { id: "tc-ad-assessment", label: "Assessment", placeholder: "Assessment label...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "assess_compare", title: "Compare Assessments", icon: "fa-solid fa-code-compare", is_write: false, confirm: false,
+        button_label: "Compare",
+        fields: &[
+            Field { id: "tc-acmp-a", label: "Assessment A", placeholder: "First assessment label...", field_type: FieldType::Text, required: true },
+            Field { id: "tc-acmp-b", label: "Assessment B", placeholder: "Second assessment label...", field_type: FieldType::Text, required: true },
+        ],
+    },
 ];
 
 /// Generate a tool parameter card. Returns None if tool has no card definition.
@@ -299,6 +340,10 @@ pub fn autocomplete_fields(tool_name: &str) -> Vec<(&'static str, &'static str)>
         "shortest_path" => &["tc-sp-from", "tc-sp-to"],
         "timeline" => &["tc-timeline-e"],
         "provenance" => &["tc-provenance-e"],
+        "assess_evidence" => &["tc-ae-assessment"],
+        "assess_evaluate" => &["tc-aev-assessment"],
+        "assess_detail" => &["tc-ad-assessment"],
+        "assess_compare" => &["tc-acmp-a", "tc-acmp-b"],
         _ => &[],
     };
     let mut result: Vec<(&str, &str)> = entity_fields.iter().map(|id| (*id, "/autocomplete")).collect();

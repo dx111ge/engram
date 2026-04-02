@@ -194,6 +194,11 @@ pub fn ChatPanel(
                     "export" => "tc-export-entity",
                     "dossier" => "tc-dossier-entity",
                     "topic_map" => "tc-topicmap-topic",
+                    "assess_create" => "tc-ac-title",
+                    "assess_evidence" => "tc-ae-assessment",
+                    "assess_evaluate" => "tc-aev-assessment",
+                    "assess_detail" => "tc-ad-assessment",
+                    "assess_compare" => "tc-acmp-a",
                     _ => "",
                 };
                 if !id_prefix.is_empty() {
@@ -208,6 +213,7 @@ pub fn ChatPanel(
                             "shortest_path" => "tc-sp-to",
                             "situation_at" => "tc-sa-date",
                             "date_query" => "tc-dq-from",
+                            "assess_compare" => "tc-acmp-b",
                             _ => "",
                         };
                         if !id2.is_empty() {

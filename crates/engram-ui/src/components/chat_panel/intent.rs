@@ -44,11 +44,17 @@ pub fn detect_intent(text: &str) -> ChatIntent {
             "gaps" | "gap" => "gaps",
             "isolated" => "isolated",
             "ingest" | "import" => "ingest",
+            "assess_create" | "hypothesis" | "predict" => "assess_create",
+            "assess_evidence" | "evidence" => "assess_evidence",
+            "assess_evaluate" => "assess_evaluate",
+            "assess_list" | "assessments" => "assess_list",
+            "assess_detail" => "assess_detail",
+            "assess_compare" => "assess_compare",
             "help" => "help",
             _ => "search",  // unknown slash commands fall back to search
         };
         // For two-entity tools, split on " to " / " and " / " vs "
-        let (prefill, prefill2) = if matches!(tool, "relate" | "compare" | "shortest_path" | "prove") {
+        let (prefill, prefill2) = if matches!(tool, "relate" | "compare" | "shortest_path" | "prove" | "assess_compare") {
             split_two_entities(&rest)
         } else {
             (rest, String::new())
@@ -204,6 +210,28 @@ pub fn detect_intent(text: &str) -> ChatIntent {
         let rest = after_keyword(trimmed, &["situation of ", "situation ", "snapshot of ", "snapshot ", "state on ", "what did i know about "]);
         let (entity, date) = split_entity_date(&rest);
         return ChatIntent { tool: "situation_at", prefill: entity, prefill2: date };
+    }
+
+    // Assessment tools
+    if starts_any(&lower, &["compare assessments ", "which hypothesis "]) {
+        let rest = after_keyword(trimmed, &["compare assessments ", "which hypothesis "]);
+        let (a, b) = split_two_entities(&rest);
+        return ChatIntent { tool: "assess_compare", prefill: a, prefill2: b };
+    }
+    if starts_any(&lower, &["create assessment:", "create assessment ", "hypothesis:", "hypothesis ", "predict:", "predict ", "assess "]) {
+        return ChatIntent { tool: "assess_create", prefill: after_keyword(trimmed, &["create assessment: ", "create assessment:", "create assessment ", "hypothesis: ", "hypothesis:", "hypothesis ", "predict: ", "predict:", "predict ", "assess "]), prefill2: String::new() };
+    }
+    if starts_any(&lower, &["add evidence ", "evidence for ", "support assessment "]) {
+        return ChatIntent { tool: "assess_evidence", prefill: after_keyword(trimmed, &["add evidence for ", "add evidence ", "evidence for ", "support assessment "]), prefill2: String::new() };
+    }
+    if starts_any(&lower, &["evaluate assessment ", "how likely "]) {
+        return ChatIntent { tool: "assess_evaluate", prefill: after_keyword(trimmed, &["evaluate assessment ", "how likely is ", "how likely "]), prefill2: String::new() };
+    }
+    if lower == "show assessments" || lower == "my hypotheses" || lower == "assessment list" || lower == "list assessments" {
+        return ChatIntent { tool: "assess_list", prefill: String::new(), prefill2: String::new() };
+    }
+    if starts_any(&lower, &["assessment detail ", "show assessment about ", "assessment about "]) {
+        return ChatIntent { tool: "assess_detail", prefill: after_keyword(trimmed, &["assessment detail ", "show assessment about ", "assessment about "]), prefill2: String::new() };
     }
 
     // Gaps

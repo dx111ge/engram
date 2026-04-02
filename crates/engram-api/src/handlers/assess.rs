@@ -520,3 +520,61 @@ pub async fn remove_assessment_watch(
 pub async fn remove_assessment_watch() -> impl axum::response::IntoResponse {
     feature_not_enabled("assess")
 }
+
+// GET /assessments/compare/{label_a}/{label_b} -- Side-by-side comparison
+#[cfg(feature = "assess")]
+pub async fn compare_assessments(
+    State(state): State<AppState>,
+    Path((label_a, label_b)): Path<(String, String)>,
+) -> ApiResult<serde_json::Value> {
+    let label_a = urlencoding::decode(&label_a).unwrap_or_default().to_string();
+    let label_b = urlencoding::decode(&label_b).unwrap_or_default().to_string();
+
+    let g = state.graph.read().map_err(|_| read_lock_err())?;
+    let store = state.assessments.read().map_err(|_| {
+        api_err(StatusCode::INTERNAL_SERVER_ERROR, "assessment store lock poisoned")
+    })?;
+
+    let record_a = store.get(&label_a)
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("assessment not found: {label_a}")))?;
+    let record_b = store.get(&label_b)
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("assessment not found: {label_b}")))?;
+
+    let props_a = g.get_properties(&label_a).ok().flatten().unwrap_or_default();
+    let props_b = g.get_properties(&label_b).ok().flatten().unwrap_or_default();
+
+    let watches_a: Vec<String> = g.edges_from(&label_a).unwrap_or_default().iter()
+        .filter(|e| e.relationship == "watches").map(|e| e.to.clone()).collect();
+    let watches_b: Vec<String> = g.edges_from(&label_b).unwrap_or_default().iter()
+        .filter(|e| e.relationship == "watches").map(|e| e.to.clone()).collect();
+
+    let shared_watches: Vec<String> = watches_a.iter()
+        .filter(|w| watches_b.contains(w)).cloned().collect();
+
+    let build_side = |record: &engram_assess::AssessmentRecord, props: &std::collections::HashMap<String, String>, watches: &[String]| {
+        serde_json::json!({
+            "label": record.label,
+            "title": props.get("title").cloned().unwrap_or_else(|| record.label.clone()),
+            "category": props.get("category").cloned().unwrap_or_default(),
+            "status": props.get("status").cloned().unwrap_or_else(|| "active".to_string()),
+            "description": props.get("description").cloned().unwrap_or_default(),
+            "current_probability": engram_assess::engine::recalculate_probability(record),
+            "evidence_for_count": record.evidence_for.len(),
+            "evidence_against_count": record.evidence_against.len(),
+            "history_length": record.history.len(),
+            "last_shift": record.history.last().map(|p| p.shift).unwrap_or(0.0),
+            "watches": watches,
+        })
+    };
+
+    Ok(Json(serde_json::json!({
+        "assessment_a": build_side(record_a, &props_a, &watches_a),
+        "assessment_b": build_side(record_b, &props_b, &watches_b),
+        "shared_watches": shared_watches,
+    })))
+}
+
+#[cfg(not(feature = "assess"))]
+pub async fn compare_assessments() -> impl axum::response::IntoResponse {
+    feature_not_enabled("assess")
+}
