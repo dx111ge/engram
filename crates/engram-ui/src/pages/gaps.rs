@@ -19,7 +19,7 @@ pub fn GapsPage() -> impl IntoView {
             set_loading.set(true);
             match api.get::<GapsResponse>("/reason/gaps").await {
                 Ok(resp) => {
-                    set_total.set(resp.report.total_gaps);
+                    set_total.set(resp.report.gaps_detected);
                     set_gaps.set(resp.gaps);
                 }
                 Err(_) => {

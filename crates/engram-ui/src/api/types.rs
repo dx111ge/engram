@@ -319,6 +319,11 @@ pub struct SecretListItem {
 // ── Assessments ──
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct AssessmentsResponse {
+    pub assessments: Vec<Assessment>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct Assessment {
     pub label: String,
     #[serde(default)]
@@ -506,8 +511,11 @@ pub struct BlackArea {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ScanReport {
-    pub total_gaps: usize,
-    pub breakdown: serde_json::Value,
+    #[serde(alias = "total_gaps")]
+    pub gaps_detected: usize,
+    pub total_nodes_scanned: Option<u32>,
+    #[serde(alias = "breakdown")]
+    pub by_kind: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Deserialize)]

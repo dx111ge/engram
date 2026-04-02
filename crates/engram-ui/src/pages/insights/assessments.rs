@@ -23,8 +23,8 @@ pub fn AssessmentsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
     let load_assessments = Action::new_local(move |_: &()| {
         let api = api_load.clone();
         async move {
-            match api.get::<Vec<Assessment>>("/assessments").await {
-                Ok(list) => set_assessments.set(list),
+            match api.get::<crate::api::types::AssessmentsResponse>("/assessments").await {
+                Ok(resp) => set_assessments.set(resp.assessments),
                 Err(e) => set_status_msg.set(format!("Assessments error: {e}")),
             }
         }

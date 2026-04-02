@@ -33,7 +33,7 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
             let body = serde_json::json!({});
             match api.post::<_, GapsResponse>("/reason/scan", &body).await {
                 Ok(r) => {
-                    set_status_msg.set(format!("Scan complete: {} gaps found", r.report.total_gaps));
+                    set_status_msg.set(format!("Scan complete: {} gaps found", r.report.gaps_detected));
                     set_gaps_data.set(Some(r));
                 }
                 Err(e) => set_status_msg.set(format!("Scan error: {e}")),
@@ -89,7 +89,7 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
 
             // Gap count
             {move || gaps_data.get().map(|gd| {
-                let total = gd.report.total_gaps;
+                let total = gd.report.gaps_detected;
                 if total > 0 {
                     view! {
                         <div style="text-align: right; font-size: 0.85rem; opacity: 0.7; margin-bottom: 0.5rem;">
