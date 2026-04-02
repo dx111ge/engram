@@ -88,6 +88,11 @@ pub fn OnboardingWizard(
     // SSE enrichment progress feedback
     let (enrichment_status, set_enrichment_status) = signal(String::new());
     let (enrichment_complete, set_enrichment_complete) = signal(false);
+    // Rich progress tracking
+    let (enrichment_phase, set_enrichment_phase) = signal(String::new()); // current phase name
+    let (enrichment_elapsed, set_enrichment_elapsed) = signal(0u32);      // elapsed seconds from backend
+    let (enrichment_error, set_enrichment_error) = signal(Option::<String>::None); // error message if failed
+    let (enrichment_phases_done, set_enrichment_phases_done) = signal(Vec::<String>::new()); // completed phase names
     // Entity list: Vec<(label, type, confidence, skipped)>
     let (seed_entities, set_seed_entities) = signal(Vec::<(String, String, f32, bool)>::new());
     // New entity input
@@ -504,24 +509,69 @@ pub fn OnboardingWizard(
                         // Start SSE listener for enrichment progress
                         set_enrichment_status.set("Starting enrichment...".to_string());
                         set_enrichment_complete.set(false);
+                        set_enrichment_error.set(None);
+                        set_enrichment_phase.set(String::new());
+                        set_enrichment_elapsed.set(0);
+                        set_enrichment_phases_done.set(Vec::new());
                         let sse_api = use_context::<ApiClient>();
                         let sse_url = match sse_api {
                             Some(ref client) => format!("{}/ingest/seed/stream?session_id={}", client.base_url, sid_for_sse),
                             None => format!("/ingest/seed/stream?session_id={}", sid_for_sse),
                         };
                         if let Ok(es) = web_sys::EventSource::new(&sse_url) {
+                            // seed_progress -- generic phase-level updates (main progress driver)
+                            {
+                                let set_status = set_enrichment_status;
+                                let set_phase = set_enrichment_phase;
+                                let read_phase = enrichment_phase;
+                                let set_elapsed = set_enrichment_elapsed;
+                                let set_error = set_enrichment_error;
+                                let set_phases = set_enrichment_phases_done;
+                                let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |evt: web_sys::MessageEvent| {
+                                    if let Some(data) = evt.data().as_string() {
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
+                                            let phase = json.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+                                            let message = json.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                                            let elapsed = json.get("elapsed_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+                                            set_elapsed.set(elapsed as u32);
+                                            if phase == "error" {
+                                                set_error.set(Some(message.to_string()));
+                                                set_status.set(message.to_string());
+                                            } else {
+                                                // Track phase transitions
+                                                let prev = read_phase.get_untracked();
+                                                if !prev.is_empty() && prev != phase {
+                                                    set_phases.update(|v| {
+                                                        if !v.contains(&prev) {
+                                                            v.push(prev);
+                                                        }
+                                                    });
+                                                }
+                                                set_phase.set(phase.to_string());
+                                                set_status.set(message.to_string());
+                                            }
+                                        }
+                                    }
+                                }) as Box<dyn FnMut(web_sys::MessageEvent)>);
+                                let _ = es.add_event_listener_with_callback(
+                                    "seed_progress",
+                                    cb.as_ref().unchecked_ref(),
+                                );
+                                cb.forget();
+                            }
                             // seed_article_progress
                             {
                                 let set_status = set_enrichment_status;
+                                let set_phase = set_enrichment_phase;
                                 let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |evt: web_sys::MessageEvent| {
                                     if let Some(data) = evt.data().as_string() {
                                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
                                             let current = json.get("current").and_then(|v| v.as_u64()).unwrap_or(0);
                                             let total = json.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
                                             let url = json.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                                            // Extract domain from URL for display
                                             let domain = url.split("//").nth(1).unwrap_or(url)
                                                 .split('/').next().unwrap_or(url);
+                                            set_phase.set("web_search".to_string());
                                             set_status.set(format!(
                                                 "Fetching article {}/{}: {}...", current, total, domain
                                             ));
@@ -537,13 +587,14 @@ pub fn OnboardingWizard(
                             // seed_fact_progress
                             {
                                 let set_status = set_enrichment_status;
+                                let set_phase = set_enrichment_phase;
                                 let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |evt: web_sys::MessageEvent| {
                                     if let Some(data) = evt.data().as_string() {
                                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
                                             let current = json.get("current").and_then(|v| v.as_u64()).unwrap_or(0);
                                             let total = json.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
-                                            let _doc = json.get("doc_title").and_then(|v| v.as_str()).unwrap_or("");
                                             let facts = json.get("facts_found").and_then(|v| v.as_u64()).unwrap_or(0);
+                                            set_phase.set("fact_extraction".to_string());
                                             set_status.set(format!(
                                                 "Extracting facts from article {}/{} ({} found so far)...", current, total, facts
                                             ));
@@ -562,11 +613,18 @@ pub fn OnboardingWizard(
                                 let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |evt: web_sys::MessageEvent| {
                                     if let Some(data) = evt.data().as_string() {
                                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
-                                            let phase = json.get("phase").and_then(|v| v.as_str()).unwrap_or("phase");
+                                            let phase = json.get("phase").and_then(|v| v.as_u64()).unwrap_or(0);
                                             let entities = json.get("entities_processed").and_then(|v| v.as_u64()).unwrap_or(0);
                                             let relations = json.get("relations_found").and_then(|v| v.as_u64()).unwrap_or(0);
+                                            let phase_name = match phase {
+                                                1 => "Entity linking",
+                                                2 => "Co-occurrence discovery",
+                                                3 => "SPARQL relations",
+                                                99 => "Enrichment",
+                                                _ => "Phase",
+                                            };
                                             set_status.set(format!(
-                                                "{} complete: {} entities, {} relations", phase, entities, relations
+                                                "{} complete: {} entities, {} relations", phase_name, entities, relations
                                             ));
                                         }
                                     }
@@ -581,23 +639,42 @@ pub fn OnboardingWizard(
                             {
                                 let set_status = set_enrichment_status;
                                 let set_done = set_enrichment_complete;
+                                let set_phase = set_enrichment_phase;
                                 let es_close = es.clone();
                                 let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |evt: web_sys::MessageEvent| {
                                     if let Some(data) = evt.data().as_string() {
                                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
-                                            let facts = json.get("facts_stored").and_then(|v| v.as_u64()).unwrap_or(0);
                                             let rels = json.get("relations_created").and_then(|v| v.as_u64()).unwrap_or(0);
                                             set_status.set(format!(
-                                                "Enrichment complete: {} facts, {} relations. Ready to review.",
-                                                facts, rels
+                                                "Enrichment complete: {} relations found. Ready to review.", rels
                                             ));
                                         }
                                     }
+                                    set_phase.set("complete".to_string());
                                     set_done.set(true);
                                     es_close.close();
                                 }) as Box<dyn FnMut(web_sys::MessageEvent)>);
                                 let _ = es.add_event_listener_with_callback(
                                     "seed_complete",
+                                    cb.as_ref().unchecked_ref(),
+                                );
+                                cb.forget();
+                            }
+                            // Handle SSE errors (connection lost, server error)
+                            {
+                                let set_error = set_enrichment_error;
+                                let set_status = set_enrichment_status;
+                                let read_complete = enrichment_complete;
+                                let cb = wasm_bindgen::closure::Closure::wrap(Box::new(move |_evt: web_sys::Event| {
+                                    // Only show error if we haven't completed successfully
+                                    if read_complete.get_untracked() {
+                                        return;
+                                    }
+                                    set_error.set(Some("Connection to server lost. Check server logs.".to_string()));
+                                    set_status.set("Connection lost. Enrichment may still be running on server.".to_string());
+                                }) as Box<dyn FnMut(web_sys::Event)>);
+                                let _ = es.add_event_listener_with_callback(
+                                    "error",
                                     cb.as_ref().unchecked_ref(),
                                 );
                                 cb.forget();
@@ -886,6 +963,8 @@ pub fn OnboardingWizard(
                             seed_known_rel_types, set_seed_known_rel_types,
                             seed_review_submitting, set_seed_review_submitting,
                             enrichment_status, enrichment_complete,
+                            enrichment_phase, enrichment_elapsed,
+                            enrichment_error, enrichment_phases_done,
                         ),
                         STEP_READY => steps_config::render_step_ready(
                             embed_choice, ner_choice, llm_choice, quant_choice,

@@ -173,7 +173,7 @@ impl RelationExtractor for KbRelationExtractor {
         let mut discovered_pairs: Vec<DiscoveredPair> = Vec::new();
         let mut total_stats = KbStats::default();
         let entity_labels: Vec<String> = input.entities.iter().map(|e| e.text.clone()).collect();
-        let session_id: Arc<str> = Arc::from("pipeline");
+        let session_id: Arc<str> = Arc::from(self.session_id.as_deref().unwrap_or("pipeline"));
 
         // --- Step 0: Detect area of interest ---
         let area_of_interest = input.area_of_interest.clone().unwrap_or_else(|| {
@@ -184,6 +184,16 @@ impl RelationExtractor for KbRelationExtractor {
         self.emit(engram_core::events::GraphEvent::SeedAoiDetected {
             session_id: session_id.clone(),
             area_of_interest: Arc::from(area_of_interest.as_str()),
+        });
+
+        // Emit initial progress: entity linking starting
+        self.emit(engram_core::events::GraphEvent::SeedProgress {
+            session_id: session_id.clone(),
+            phase: Arc::from("entity_linking"),
+            message: Arc::from(format!("Linking {} entities to Wikipedia/Wikidata...", entity_labels.len()).as_str()),
+            current: 0,
+            total: entity_labels.len() as u32,
+            elapsed_secs: start.elapsed().as_secs() as u32,
         });
 
         let mut article_text = String::new();
@@ -216,6 +226,17 @@ impl RelationExtractor for KbRelationExtractor {
                 }
 
                 budget -= 1;
+
+                // Per-entity progress
+                self.emit(engram_core::events::GraphEvent::SeedProgress {
+                    session_id: session_id.clone(),
+                    phase: Arc::from("entity_linking"),
+                    message: Arc::from(format!("Linking entity: {}...", entity.text).as_str()),
+                    current: (stats.entities_linked + stats.entities_not_found + 1) as u32,
+                    total: entity_labels.len() as u32,
+                    elapsed_secs: start.elapsed().as_secs() as u32,
+                });
+
                 match self.entity_link(endpoint, &entity.text, &entity.entity_type, &input.language) {
                     Some((ref kb_id, ref canonical)) => {
                         entity_kb_ids.insert(idx, kb_id.clone());
@@ -263,6 +284,14 @@ impl RelationExtractor for KbRelationExtractor {
             // --- Step 2: Area-of-interest article co-occurrence (DISCOVERY ONLY) ---
             // Co-occurrence finds entity PAIRS but does NOT assign relation types.
             // Classification is deferred to SPARQL (Step 3) and GLiNER2 (Step 5).
+            self.emit(engram_core::events::GraphEvent::SeedProgress {
+                session_id: session_id.clone(),
+                phase: Arc::from("co_occurrence"),
+                message: Arc::from(format!("Discovering connections in \"{}\"...", area_of_interest).as_str()),
+                current: 0,
+                total: 0,
+                elapsed_secs: start.elapsed().as_secs() as u32,
+            });
             let mut cooccurrence_count = 0u32;
 
             if let Some(article) = self.fetch_area_of_interest_article(&area_of_interest, &input.language) {
@@ -319,6 +348,14 @@ impl RelationExtractor for KbRelationExtractor {
             }
 
             // --- Step 2c: Web search fallback for still-unconnected entities ---
+            self.emit(engram_core::events::GraphEvent::SeedProgress {
+                session_id: session_id.clone(),
+                phase: Arc::from("web_search"),
+                message: Arc::from("Searching web for additional connections..."),
+                current: 0,
+                total: 0,
+                elapsed_secs: start.elapsed().as_secs() as u32,
+            });
             if self.web_search_provider.is_some() {
                 let mut connected_so_far: std::collections::HashSet<usize> = std::collections::HashSet::new();
                 for p in &discovered_pairs {
@@ -388,6 +425,14 @@ impl RelationExtractor for KbRelationExtractor {
             });
 
             // --- Step 3: Batch SPARQL + property expansion + shortest path ---
+            self.emit(engram_core::events::GraphEvent::SeedProgress {
+                session_id: session_id.clone(),
+                phase: Arc::from("sparql"),
+                message: Arc::from(format!("Querying Wikidata for {} linked entities...", entity_kb_ids.len()).as_str()),
+                current: 0,
+                total: entity_kb_ids.len() as u32,
+                elapsed_secs: start.elapsed().as_secs() as u32,
+            });
             let qids: Vec<(&str, usize)> = entity_kb_ids.iter()
                 .map(|(idx, qid)| (qid.as_str(), *idx))
                 .collect();
@@ -712,6 +757,14 @@ impl RelationExtractor for KbRelationExtractor {
         // --- Step 5: Classify unresolved co-occurrence pairs ---
         // Compare discovered pairs against SPARQL-typed relations.
         // Pairs with SPARQL types are done; remaining go to GLiNER2.
+        self.emit(engram_core::events::GraphEvent::SeedProgress {
+            session_id: session_id.clone(),
+            phase: Arc::from("gliner2"),
+            message: Arc::from("Classifying relations with GLiNER2..."),
+            current: 0,
+            total: discovered_pairs.len() as u32,
+            elapsed_secs: start.elapsed().as_secs() as u32,
+        });
         {
             let sparql_pairs: std::collections::HashSet<(usize, usize)> = all_relations.iter()
                 .map(|r| (r.head_idx.min(r.tail_idx), r.head_idx.max(r.tail_idx)))
@@ -847,6 +900,15 @@ impl RelationExtractor for KbRelationExtractor {
         total_stats.lookup_ms = start.elapsed().as_millis() as u64;
         let elapsed = total_stats.lookup_ms;
         *self.last_stats.lock().unwrap() = Some(total_stats);
+
+        self.emit(engram_core::events::GraphEvent::SeedProgress {
+            session_id: session_id.clone(),
+            phase: Arc::from("complete"),
+            message: Arc::from(format!("Enrichment complete: {} relations found in {}s", all_relations.len(), elapsed / 1000).as_str()),
+            current: all_relations.len() as u32,
+            total: all_relations.len() as u32,
+            elapsed_secs: (elapsed / 1000) as u32,
+        });
 
         tracing::info!(relations = all_relations.len(), ms = elapsed, "KB extract_relations complete");
         all_relations

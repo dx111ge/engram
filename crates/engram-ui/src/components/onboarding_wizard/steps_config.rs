@@ -332,6 +332,10 @@ pub(crate) fn render_step_seed(
     set_seed_review_submitting: WriteSignal<bool>,
     enrichment_status: ReadSignal<String>,
     enrichment_complete: ReadSignal<bool>,
+    enrichment_phase: ReadSignal<String>,
+    enrichment_elapsed: ReadSignal<u32>,
+    enrichment_error: ReadSignal<Option<String>>,
+    enrichment_phases_done: ReadSignal<Vec<String>>,
 ) -> AnyView {
     view! {
         <div class="wizard-step">
@@ -499,44 +503,117 @@ pub(crate) fn render_step_seed(
                 }
             })}
 
-            // Enrichment progress (SSE-driven)
+            // Enrichment progress tracker (SSE-driven, multi-phase)
             {move || {
                 let status = enrichment_status.get();
                 let complete = enrichment_complete.get();
-                let phase = seed_phase.get();
-                if phase >= 1 && !status.is_empty() {
-                    let (icon, icon_class) = if complete {
-                        ("fa-solid fa-circle-check", "color: #66bb6a;")
-                    } else if status.contains("Fetching") {
-                        ("fa-solid fa-download", "color: #4fc3f7;")
-                    } else if status.contains("Extracting") || status.contains("complete") {
-                        ("fa-solid fa-brain", "color: #ce93d8;")
-                    } else {
-                        ("fa-solid fa-spinner fa-spin", "color: #ffa726;")
-                    };
-                    let border_color = if complete { "#66bb6a" } else { "#4fc3f7" };
-                    let box_style = format!("border-left: 3px solid {}; padding: 8px 12px;", border_color);
-                    view! {
-                        <div class="wizard-info-box mt-1" style=box_style>
-                            <p style="margin: 0; display: flex; align-items: center; gap: 8px;">
-                                <i class=icon style=icon_class></i>
-                                <span>{status}</span>
-                            </p>
-                        </div>
-                    }.into_any()
-                } else if phase >= 1 && analyzing.get() {
-                    // Fallback: no SSE events yet but enrichment is running
-                    view! {
-                        <div class="wizard-info-box mt-1" style="border-left: 3px solid #ffa726; padding: 8px 12px;">
-                            <p style="margin: 0; display: flex; align-items: center; gap: 8px;">
-                                <i class="fa-solid fa-spinner fa-spin" style="color: #ffa726;"></i>
-                                <span>"Enriching entities via Wikipedia + SPARQL..."</span>
-                            </p>
-                        </div>
-                    }.into_any()
-                } else {
-                    view! { <div></div> }.into_any()
+                let ui_phase = seed_phase.get();
+                let current_phase = enrichment_phase.get();
+                let elapsed = enrichment_elapsed.get();
+                let error = enrichment_error.get();
+                let done_phases = enrichment_phases_done.get();
+
+                if ui_phase < 1 || (status.is_empty() && !analyzing.get()) {
+                    return view! { <div></div> }.into_any();
                 }
+
+                // Phase definitions for the progress pipeline
+                let phases = [
+                    ("entity_linking", "Entity Linking", "fa-solid fa-link"),
+                    ("co_occurrence", "Co-occurrence", "fa-solid fa-diagram-project"),
+                    ("web_search", "Web Search", "fa-solid fa-globe"),
+                    ("sparql", "SPARQL Relations", "fa-solid fa-database"),
+                    ("gliner2", "GLiNER2 Classification", "fa-solid fa-brain"),
+                    ("fact_extraction", "Fact Extraction", "fa-solid fa-lightbulb"),
+                ];
+
+                let elapsed_str = if elapsed >= 60 {
+                    format!("{}m {}s", elapsed / 60, elapsed % 60)
+                } else if elapsed > 0 {
+                    format!("{}s", elapsed)
+                } else {
+                    String::new()
+                };
+
+                let (border_color, header_icon, header_color) = if error.is_some() {
+                    ("#ef5350", "fa-solid fa-circle-xmark", "color: #ef5350;")
+                } else if complete {
+                    ("#66bb6a", "fa-solid fa-circle-check", "color: #66bb6a;")
+                } else {
+                    ("#4fc3f7", "fa-solid fa-spinner fa-spin", "color: #4fc3f7;")
+                };
+
+                let box_style = format!(
+                    "border-left: 3px solid {}; padding: 10px 14px; margin-top: 0.5rem;",
+                    border_color
+                );
+
+                view! {
+                    <div class="wizard-info-box" style=box_style>
+                        // Header: status + elapsed time
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <i class=header_icon style=header_color></i>
+                                <span style="font-weight: 600;">{
+                                    if error.is_some() { "Enrichment Failed".to_string() }
+                                    else if complete { "Enrichment Complete".to_string() }
+                                    else { "Enriching Knowledge Graph...".to_string() }
+                                }</span>
+                            </div>
+                            {(!elapsed_str.is_empty()).then(|| view! {
+                                <span style="font-size: 0.8rem; color: #90a4ae;">
+                                    <i class="fa-regular fa-clock" style="margin-right: 4px;"></i>
+                                    {elapsed_str}
+                                </span>
+                            })}
+                        </div>
+
+                        // Phase pipeline indicators
+                        <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px;">
+                            {phases.iter().map(|(id, label, icon)| {
+                                let is_done = done_phases.contains(&id.to_string()) || (complete && !error.is_some());
+                                let is_active = current_phase == *id && !complete && error.is_none();
+                                let (dot_color, text_opacity) = if is_done {
+                                    ("#66bb6a", "1.0")
+                                } else if is_active {
+                                    ("#4fc3f7", "1.0")
+                                } else {
+                                    ("#455a64", "0.5")
+                                };
+                                let phase_icon = if is_done {
+                                    "fa-solid fa-circle-check"
+                                } else if is_active {
+                                    "fa-solid fa-circle-dot"
+                                } else {
+                                    *icon
+                                };
+                                let badge_style = format!(
+                                    "display: inline-flex; align-items: center; gap: 4px; \
+                                     padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; \
+                                     background: {}20; color: {}; opacity: {};",
+                                    dot_color, dot_color, text_opacity
+                                );
+                                view! {
+                                    <span style=badge_style>
+                                        <i class=phase_icon style="font-size: 0.65rem;"></i>
+                                        {*label}
+                                    </span>
+                                }
+                            }).collect::<Vec<_>>()}
+                        </div>
+
+                        // Current status message
+                        <p style="margin: 0; font-size: 0.85rem; color: #b0bec5;">{status}</p>
+
+                        // Error detail
+                        {error.map(|err| view! {
+                            <p style="margin: 4px 0 0 0; font-size: 0.8rem; color: #ef5350;">
+                                <i class="fa-solid fa-triangle-exclamation" style="margin-right: 4px;"></i>
+                                {err}
+                            </p>
+                        })}
+                    </div>
+                }.into_any()
             }}
 
             // Phase 1 -> Phase 2 transition: "Review" button

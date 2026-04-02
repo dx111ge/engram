@@ -361,7 +361,7 @@ pub async fn seed_confirm_aoi(
         match result {
             Ok(()) => {
                 // Mark session as complete
-                let review_count = if let Ok(mut sessions) = sessions_arc.write() {
+                let (review_count, entity_count) = if let Ok(mut sessions) = sessions_arc.write() {
                     if let Some(session) = sessions.get_mut(&sid) {
                         session.status = "complete".to_string();
                         tracing::info!(
@@ -369,15 +369,21 @@ pub async fn seed_confirm_aoi(
                             review_items = session.review_items.len(),
                             "seed enrichment complete"
                         );
-                        session.review_items.len() as u32
-                    } else { 0 }
-                } else { 0 };
+                        (session.review_items.len() as u32, session.entities.len() as u32)
+                    } else { (0, 0) }
+                } else { (0, 0) };
                 // Emit enrichment-done event so SSE frontend transitions
                 completion_bus.publish(engram_core::events::GraphEvent::SeedPhaseComplete {
                     session_id: std::sync::Arc::from(sid.as_str()),
-                    phase: 99, // special: enrichment done (not a numbered phase)
-                    entities_processed: 0,
+                    phase: 99,
+                    entities_processed: entity_count,
                     relations_found: review_count,
+                });
+                // Emit SeedComplete so frontend's seed_complete listener fires
+                completion_bus.publish(engram_core::events::GraphEvent::SeedComplete {
+                    session_id: std::sync::Arc::from(sid.as_str()),
+                    facts_stored: 0, // facts stored later during confirm-relations
+                    relations_created: review_count,
                 });
             }
             Err(e) => {
@@ -393,9 +399,18 @@ pub async fn seed_confirm_aoi(
                 if let Ok(mut sessions) = sessions_arc.write() {
                     if let Some(session) = sessions.get_mut(&sid) {
                         session.status = "error".to_string();
-                        session.status_error = Some(msg);
+                        session.status_error = Some(msg.clone());
                     }
                 }
+                // Emit error event so frontend can show the failure
+                completion_bus.publish(engram_core::events::GraphEvent::SeedProgress {
+                    session_id: std::sync::Arc::from(sid.as_str()),
+                    phase: std::sync::Arc::from("error"),
+                    message: std::sync::Arc::from(format!("Enrichment failed: {}", msg).as_str()),
+                    current: 0,
+                    total: 0,
+                    elapsed_secs: 0,
+                });
             }
         }
     });
@@ -732,6 +747,13 @@ pub async fn seed_stream(
                             if sid.as_ref() != session_id { return None; }
                             ("seed_complete", serde_json::json!({
                                 "facts_stored": facts_stored, "relations_created": relations_created
+                            }))
+                        }
+                        engram_core::events::GraphEvent::SeedProgress { session_id: sid, phase, message, current, total, elapsed_secs } => {
+                            if sid.as_ref() != session_id { return None; }
+                            ("seed_progress", serde_json::json!({
+                                "phase": phase.as_ref(), "message": message.as_ref(),
+                                "current": current, "total": total, "elapsed_secs": elapsed_secs
                             }))
                         }
                         _ => return None, // non-seed events

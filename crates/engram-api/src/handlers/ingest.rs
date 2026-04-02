@@ -951,5 +951,6 @@ fn event_type_name(event: &engram_core::events::GraphEvent) -> &'static str {
         GraphEvent::SeedArticleProgress { .. } => "seed_article_progress",
         GraphEvent::SeedFactProgress { .. } => "seed_fact_progress",
         GraphEvent::SeedComplete { .. } => "seed_complete",
+        GraphEvent::SeedProgress { .. } => "seed_progress",
     }
 }

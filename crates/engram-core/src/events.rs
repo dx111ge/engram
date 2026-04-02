@@ -165,6 +165,15 @@ pub enum GraphEvent {
         facts_stored: u32,
         relations_created: u32,
     },
+    /// Generic enrichment phase progress (covers gaps between specific events).
+    SeedProgress {
+        session_id: Arc<str>,
+        phase: Arc<str>,        // "entity_linking", "sparql", "web_search", "fact_extraction", "gliner2", "complete", "error"
+        message: Arc<str>,      // human-readable status
+        current: u32,           // progress counter within phase
+        total: u32,             // total items in phase
+        elapsed_secs: u32,      // seconds since enrichment started
+    },
 }
 
 /// Direction of a confidence threshold crossing.
