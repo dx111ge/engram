@@ -91,18 +91,24 @@ const ANALYSIS_TOOLS: [HelpTool; 4] = [
     HelpTool { name: "isolated", description: "Find entities with no/few connections", example: "Show me isolated entities", is_write: false },
 ];
 
-const TEMPORAL_TOOLS: [HelpTool; 3] = [
+const TEMPORAL_TOOLS: [HelpTool; 6] = [
     HelpTool { name: "timeline", description: "Show entity changes over time", example: "Timeline of Ukraine conflict", is_write: false },
-    HelpTool { name: "date_query", description: "Query knowledge at a specific date", example: "What did I know about sanctions in January?", is_write: false },
-    HelpTool { name: "current", description: "Show current state vs historical", example: "Current confidence for all entities about Iran", is_write: false },
+    HelpTool { name: "date_query", description: "Query knowledge at a specific date", example: "What happened to Ukraine in March?", is_write: false },
+    HelpTool { name: "current_state", description: "Show current vs expired relations", example: "Current state of NATO", is_write: false },
+    HelpTool { name: "fact_provenance", description: "Track how information arrived and spread", example: "Provenance of Putin", is_write: false },
+    HelpTool { name: "contradictions", description: "Find conflicting information", example: "Contradictions about Russia", is_write: false },
+    HelpTool { name: "situation_at", description: "Reconstruct knowledge at a specific date", example: "Situation of Ukraine on 2026-03-15", is_write: false },
 ];
 
-const INVESTIGATION_TOOLS: [HelpTool; 5] = [
+const INVESTIGATION_TOOLS: [HelpTool; 8] = [
     HelpTool { name: "ingest", description: "Extract entities from text", example: "Ingest this article about...", is_write: true },
-    HelpTool { name: "analyze", description: "Deep analysis of entity neighborhood", example: "Analyze the network around Lavrov", is_write: false },
-    HelpTool { name: "investigate", description: "Full investigation with web search", example: "Investigate Wagner Group deeply", is_write: true },
-    HelpTool { name: "changes", description: "Show recent graph changes", example: "What changed in the last 24 hours?", is_write: false },
+    HelpTool { name: "analyze", description: "NER analysis of text content", example: "Analyze this article about NATO expansion", is_write: false },
+    HelpTool { name: "investigate", description: "Web search + preview before ingest", example: "Investigate Wagner Group", is_write: true },
+    HelpTool { name: "changes", description: "Show recent graph changes", example: "What changed recently?", is_write: false },
     HelpTool { name: "watch", description: "Mark entity for monitoring", example: "Watch Prigozhin for changes", is_write: true },
+    HelpTool { name: "network_analysis", description: "N-hop connectivity map", example: "Network around Putin", is_write: false },
+    HelpTool { name: "entity_360", description: "Everything about an entity", example: "Everything about NATO", is_write: false },
+    HelpTool { name: "entity_gaps", description: "Missing relationships for entity", example: "What's missing about Macron", is_write: false },
 ];
 
 const ASSESSMENT_TOOLS: [HelpTool; 6] = [
@@ -114,9 +120,10 @@ const ASSESSMENT_TOOLS: [HelpTool; 6] = [
     HelpTool { name: "assess_compare", description: "Compare competing hypotheses", example: "Compare assessments about leadership change", is_write: false },
 ];
 
-const REASONING_TOOLS: [HelpTool; 2] = [
-    HelpTool { name: "what_if", description: "Simulate confidence changes and cascading effects", example: "What if Putin's health confidence drops to 20%?", is_write: false },
-    HelpTool { name: "influence", description: "Find influence paths between entities", example: "How does China influence the Iran deal?", is_write: false },
+const REASONING_TOOLS: [HelpTool; 3] = [
+    HelpTool { name: "what_if", description: "2-hop confidence cascade simulation", example: "What if Putin's confidence drops to 20%?", is_write: false },
+    HelpTool { name: "influence", description: "Find all influence paths between entities", example: "How does China influence the Iran deal?", is_write: false },
+    HelpTool { name: "black_areas", description: "Detect knowledge blind spots and gaps", example: "Scan for blind spots", is_write: false },
 ];
 
 const ACTION_TOOLS: [HelpTool; 4] = [
@@ -126,10 +133,13 @@ const ACTION_TOOLS: [HelpTool; 4] = [
     HelpTool { name: "schedule", description: "View or create scheduled tasks", example: "What's scheduled for today?", is_write: false },
 ];
 
-const REPORTING_TOOLS: [HelpTool; 3] = [
-    HelpTool { name: "briefing", description: "Generate intelligence briefing", example: "Brief me on the current state of...", is_write: false },
-    HelpTool { name: "export", description: "Export entities or subgraph", example: "Export all entities about Ukraine", is_write: false },
-    HelpTool { name: "entity_timeline", description: "Show full history of an entity", example: "Show the complete timeline for Wagner Group", is_write: false },
+const REPORTING_TOOLS: [HelpTool; 6] = [
+    HelpTool { name: "briefing", description: "LLM-powered briefing (adapts to your persona)", example: "Brief me on the Russia Ukraine war", is_write: false },
+    HelpTool { name: "export", description: "Export subgraph as JSON", example: "Export all about Putin", is_write: false },
+    HelpTool { name: "dossier", description: "Comprehensive entity report", example: "Dossier on NATO", is_write: false },
+    HelpTool { name: "topic_map", description: "Map everything known about a topic", example: "What do I know about military hardware", is_write: false },
+    HelpTool { name: "graph_stats", description: "Knowledge base health overview", example: "Graph stats", is_write: false },
+    HelpTool { name: "entity_timeline", description: "Full chronological history", example: "Timeline of Wagner Group", is_write: false },
 ];
 
 // ── HTML generators ──
@@ -138,12 +148,12 @@ fn help_overview_html() -> String {
     let categories = [
         ("Knowledge", "fa-solid fa-database", "10", "Query, search, explain, store, relate...", "/help knowledge"),
         ("Analysis", "fa-solid fa-chart-line", "4", "Compare, shortest path, most connected, isolated", "/help analysis"),
-        ("Temporal", "fa-solid fa-clock", "3", "Timeline, date queries, current state", "/help temporal"),
-        ("Investigation", "fa-solid fa-magnifying-glass", "5", "Ingest, analyze, investigate, changes, watch", "/help investigation"),
-        ("Assessment", "fa-solid fa-scale-balanced", "6", "Hypotheses, evidence, evaluate", "/help assessment"),
-        ("Reasoning", "fa-solid fa-code-branch", "2", "What-if, influence paths", "/help reasoning"),
+        ("Temporal", "fa-solid fa-clock", "6", "Timeline, provenance, contradictions, situation", "/help temporal"),
+        ("Investigation", "fa-solid fa-magnifying-glass", "8", "Ingest, analyze, investigate, network, 360, gaps", "/help investigation"),
+        ("Assessment", "fa-solid fa-scale-balanced", "6", "Hypotheses, evidence, evaluate, compare", "/help assessment"),
+        ("Reasoning", "fa-solid fa-code-branch", "3", "What-if, influence, black areas", "/help reasoning"),
         ("Actions", "fa-solid fa-gears", "4", "Rules, inference, scheduling", "/help actions"),
-        ("Reporting", "fa-solid fa-file-lines", "3", "Briefings, export, entity timeline", "/help reporting"),
+        ("Reporting", "fa-solid fa-file-lines", "6", "Briefing, dossier, export, topic map, stats", "/help reporting"),
     ];
 
     let mut html = "<div class=\"chat-help-grid\">".to_string();
