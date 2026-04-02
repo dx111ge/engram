@@ -458,50 +458,86 @@ pub async fn contradictions(
     }
 
     // Detect property conflicts: same relationship type to different targets from same entity
-    let mut rel_targets: HashMap<String, Vec<(String, f32, Option<String>)>> = HashMap::new();
+    // Only flag as conflict when time periods OVERLAP. Non-overlapping = temporal succession.
+    let mut rel_targets: HashMap<String, Vec<(String, f32, Option<String>, Option<String>)>> = HashMap::new();
     for edge in &edges_out {
         if edge.from == req.entity {
             rel_targets.entry(edge.relationship.clone())
                 .or_default()
-                .push((edge.to.clone(), edge.confidence, edge.valid_from.clone()));
+                .push((edge.to.clone(), edge.confidence, edge.valid_from.clone(), edge.valid_to.clone()));
         }
     }
 
     let mut conflicts = Vec::new();
+    let mut successions = Vec::new();
     for (rel_type, targets) in &rel_targets {
-        // Relationship types that should be unique (single-value)
+        // Relationship types that should be unique at any point in time
         let is_unique_rel = matches!(rel_type.as_str(),
             "head_of_state" | "capital_of" | "president_of" | "ceo_of" | "headquartered_in"
             | "born_in" | "died_in" | "citizen_of" | "spouse_of"
         );
 
         if is_unique_rel && targets.len() > 1 {
-            // Sort by confidence descending
             let mut sorted = targets.clone();
-            sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.sort_by(|a, b| {
+                let da = a.2.as_deref().unwrap_or("0000");
+                let db = b.2.as_deref().unwrap_or("0000");
+                da.cmp(db)
+            });
 
             for i in 0..sorted.len() {
                 for j in (i+1)..sorted.len() {
-                    conflicts.push(serde_json::json!({
-                        "type": "property_conflict",
-                        "relationship": rel_type,
-                        "claim_a": {
-                            "target": sorted[i].0,
-                            "confidence": sorted[i].1,
-                            "valid_from": sorted[i].2,
-                        },
-                        "claim_b": {
-                            "target": sorted[j].0,
-                            "confidence": sorted[j].1,
-                            "valid_from": sorted[j].2,
-                        },
-                        "status": "unresolved",
-                    }));
+                    if sorted[i].0 == sorted[j].0 { continue; } // same target, not a conflict
+
+                    // Check temporal overlap: conflict only if periods overlap
+                    let a_end = sorted[i].3.as_deref().unwrap_or("9999-12-31");
+                    let b_start = sorted[j].2.as_deref().unwrap_or("0000-01-01");
+                    let temporally_separate = a_end < b_start;
+
+                    if temporally_separate {
+                        // Temporal succession, not a conflict
+                        successions.push(serde_json::json!({
+                            "type": "temporal_succession",
+                            "relationship": rel_type,
+                            "earlier": {
+                                "target": sorted[i].0,
+                                "confidence": sorted[i].1,
+                                "valid_from": sorted[i].2,
+                                "valid_to": sorted[i].3,
+                            },
+                            "later": {
+                                "target": sorted[j].0,
+                                "confidence": sorted[j].1,
+                                "valid_from": sorted[j].2,
+                                "valid_to": sorted[j].3,
+                            },
+                        }));
+                    } else {
+                        // Overlapping or no temporal data = real conflict
+                        conflicts.push(serde_json::json!({
+                            "type": "property_conflict",
+                            "relationship": rel_type,
+                            "claim_a": {
+                                "target": sorted[i].0,
+                                "confidence": sorted[i].1,
+                                "valid_from": sorted[i].2,
+                                "valid_to": sorted[i].3,
+                            },
+                            "claim_b": {
+                                "target": sorted[j].0,
+                                "confidence": sorted[j].1,
+                                "valid_from": sorted[j].2,
+                                "valid_to": sorted[j].3,
+                            },
+                            "status": "unresolved",
+                        }));
+                    }
                 }
             }
         }
     }
     conflicts.truncate(10);
+    successions.truncate(10);
 
     // Find low confidence facts (potential inaccuracies)
     let mut low_confidence: Vec<serde_json::Value> = edges_out.iter()
@@ -539,6 +575,8 @@ pub async fn contradictions(
         "entity": req.entity,
         "conflicts": conflicts,
         "conflict_count": conflicts.len(),
+        "successions": successions,
+        "succession_count": successions.len(),
         "low_confidence_facts": low_confidence,
         "debunked_facts": debunked,
     })))

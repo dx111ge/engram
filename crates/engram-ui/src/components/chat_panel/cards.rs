@@ -873,8 +873,12 @@ fn contradiction_card(data: &serde_json::Value) -> String {
     let low_conf = data.get("low_confidence_facts").and_then(|v| v.as_array());
     let debunked = data.get("debunked_facts").and_then(|v| v.as_array());
 
+    let successions = data.get("successions").and_then(|v| v.as_array());
+
     let conflict_count = data.get("conflict_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let succession_count = data.get("succession_count").and_then(|v| v.as_u64()).unwrap_or(0);
     let has_issues = conflict_count > 0
+        || succession_count > 0
         || low_conf.map_or(false, |a| !a.is_empty())
         || debunked.map_or(false, |a| !a.is_empty());
 
@@ -914,6 +918,36 @@ fn contradiction_card(data: &serde_json::Value) -> String {
                 </div>",
                 html_escape(rel), entity_link(a_target), a_conf * 100.0, entity_link(b_target), b_conf * 100.0,
             ));
+        }
+    }
+
+    // Temporal successions (not conflicts -- different time periods)
+    if let Some(succs) = successions {
+        if !succs.is_empty() {
+            html.push_str(&format!(
+                "<div style=\"margin:8px 0 4px\"><strong style=\"color:#4fc3f7\"><i class=\"fa-solid fa-clock-rotate-left\"></i> Temporal Successions ({})</strong></div>",
+                succs.len(),
+            ));
+            for (i, s) in succs.iter().enumerate() {
+                if i >= 5 { break; }
+                let rel = s.get("relationship").and_then(|v| v.as_str()).unwrap_or("?");
+                let earlier_target = s.get("earlier").and_then(|v| v.get("target")).and_then(|v| v.as_str()).unwrap_or("?");
+                let earlier_from = s.get("earlier").and_then(|v| v.get("valid_from")).and_then(|v| v.as_str()).unwrap_or("?");
+                let earlier_to = s.get("earlier").and_then(|v| v.get("valid_to")).and_then(|v| v.as_str()).unwrap_or("?");
+                let later_target = s.get("later").and_then(|v| v.get("target")).and_then(|v| v.as_str()).unwrap_or("?");
+                let later_from = s.get("later").and_then(|v| v.get("valid_from")).and_then(|v| v.as_str()).unwrap_or("now");
+                html.push_str(&format!(
+                    "<div style=\"border:1px solid rgba(79,195,247,0.3);border-radius:6px;padding:8px;margin-bottom:6px;font-size:0.8rem\">\
+                        <div style=\"color:#4fc3f7;font-size:0.75rem;margin-bottom:4px\"><i class=\"fa-solid fa-clock-rotate-left\"></i> {}: changed over time</div>\
+                        <div>{} <span style=\"color:var(--text-muted)\">({} to {})</span></div>\
+                        <div style=\"color:var(--text-muted);font-size:0.7rem;margin:2px 0\"><i class=\"fa-solid fa-arrow-down\"></i> then</div>\
+                        <div>{} <span style=\"color:var(--text-muted)\">(from {})</span></div>\
+                    </div>",
+                    html_escape(rel),
+                    entity_link(earlier_target), earlier_from, earlier_to,
+                    entity_link(later_target), later_from,
+                ));
+            }
         }
     }
 
