@@ -50,6 +50,10 @@ pub fn detect_intent(text: &str) -> ChatIntent {
             "assess_list" | "assessments" => "assess_list",
             "assess_detail" => "assess_detail",
             "assess_compare" => "assess_compare",
+            "rule_create" | "rule" => "rule_create",
+            "rule_list" | "rules" => "rule_list",
+            "rule_fire" | "fire_rules" => "rule_fire",
+            "schedule" => "schedule",
             "help" => "help",
             _ => "search",  // unknown slash commands fall back to search
         };
@@ -287,6 +291,24 @@ pub fn detect_intent(text: &str) -> ChatIntent {
     // Ingest
     if starts_any(&lower, &["ingest ", "import "]) {
         return ChatIntent { tool: "ingest", prefill: after_keyword(trimmed, &["ingest ", "import "]), prefill2: String::new() };
+    }
+
+    // ── Action tools: rules & schedules ──
+    if starts_any(&lower, &["create rule ", "create rule:", "rule:", "rule: "]) || (lower.contains("if ") && lower.contains(" then ")) || starts_any(&lower, &["when "]) && lower.contains(" then ") {
+        let rest = after_keyword(trimmed, &["create rule: ", "create rule:", "create rule ", "rule: ", "rule:", "rule "]);
+        let rest = if rest == trimmed.to_string() { trimmed.to_string() } else { rest };
+        return ChatIntent { tool: "rule_create", prefill: rest, prefill2: String::new() };
+    }
+    if lower == "show rules" || lower == "my rules" || lower == "list rules" || lower == "rules" {
+        return ChatIntent { tool: "rule_list", prefill: String::new(), prefill2: String::new() };
+    }
+    if starts_any(&lower, &["fire rules", "run rules", "trigger rules"]) || lower == "fire rules" {
+        return ChatIntent { tool: "rule_fire", prefill: String::new(), prefill2: String::new() };
+    }
+    if starts_any(&lower, &["schedule ", "create schedule ", "create schedule:", "schedule:"]) || lower == "what's scheduled" || lower == "whats scheduled" || lower == "schedules" {
+        let rest = after_keyword(trimmed, &["create schedule: ", "create schedule:", "create schedule ", "schedule: ", "schedule:", "schedule "]);
+        let rest = if rest == trimmed.to_string() && (lower == "what's scheduled" || lower == "whats scheduled" || lower == "schedules") { String::new() } else { rest };
+        return ChatIntent { tool: "schedule", prefill: rest, prefill2: String::new() };
     }
 
     // ── Write operations (show confirmation cards) ──

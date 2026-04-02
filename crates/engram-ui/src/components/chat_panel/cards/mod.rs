@@ -5,6 +5,7 @@ mod temporal;
 mod investigation;
 mod reporting;
 mod assessment;
+mod actions;
 
 use super::markdown::html_escape;
 
@@ -53,6 +54,10 @@ pub fn render_tool_card(tool_name: &str, raw_json: &str) -> String {
         "engram_graph_stats" => reporting::graph_stats_card(&parsed),
         "engram_provenance" => reporting::provenance_card(&parsed),
         "engram_documents" => reporting::documents_card(&parsed),
+        "engram_rule_create" => actions::rule_create_card(&parsed),
+        "engram_rule_list" => actions::rule_list_card(&parsed),
+        "engram_rule_fire" => actions::rule_fire_card(&parsed),
+        "engram_schedule" => actions::schedule_card(&parsed),
         _ => fallback_card(tool_name, raw_json),
     }
 }

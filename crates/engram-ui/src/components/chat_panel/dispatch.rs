@@ -832,6 +832,73 @@ pub fn setup_card_dispatch(
                             Err(e) => Err(e.to_string()),
                         }
                     }
+                    // Action tools
+                    "rule_create" => {
+                        let description = p("description");
+                        let body = serde_json::json!({"description": description});
+                        match api.post_text("/actions/rules", &body).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_rule_create", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                llm_analysis(&api, set_messages,
+                                    "A new action rule has been created. Briefly describe what condition this rule monitors and what action it takes when triggered. Be concise (1-2 sentences).",
+                                    &format!("Rule created:\n{}", json_str),
+                                ).await;
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                    "rule_list" => {
+                        api.get_text("/actions/rules").await.map(|r| ("engram_rule_list".into(), r)).map_err(|e| e.to_string())
+                    }
+                    "rule_fire" => {
+                        let body = serde_json::json!({});
+                        match api.post_text("/actions/dry-run", &body).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_rule_fire", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                    "schedule" => {
+                        let body = serde_json::json!({
+                            "name": p("name"),
+                            "interval": p("interval"),
+                            "source": p("source"),
+                        });
+                        match api.post_text("/chat/schedule", &body).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_schedule", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
                     _ => Err(format!("Unknown tool: {}", tool)),
                 };
 

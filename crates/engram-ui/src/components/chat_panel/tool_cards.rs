@@ -334,6 +334,29 @@ static CARDS: &[ToolCard] = &[
             Field { id: "tc-acmp-b", label: "Assessment B", placeholder: "Second assessment label...", field_type: FieldType::Text, required: true },
         ],
     },
+    // Action tools
+    ToolCard { tool: "rule_create", title: "Create Rule", icon: "fa-solid fa-gavel", is_write: true, confirm: true,
+        button_label: "Create Rule",
+        fields: &[
+            Field { id: "tc-rc-description", label: "Rule description", placeholder: "e.g. when confidence drops below 0.3 then flag for review...", field_type: FieldType::Text, required: true },
+        ],
+    },
+    ToolCard { tool: "rule_list", title: "List Rules", icon: "fa-solid fa-list-check", is_write: false, confirm: false,
+        button_label: "Show Rules",
+        fields: &[],
+    },
+    ToolCard { tool: "rule_fire", title: "Fire Rules (Dry Run)", icon: "fa-solid fa-bolt", is_write: false, confirm: false,
+        button_label: "Run Dry-Run",
+        fields: &[],
+    },
+    ToolCard { tool: "schedule", title: "Schedule", icon: "fa-solid fa-calendar-check", is_write: true, confirm: true,
+        button_label: "Create Schedule",
+        fields: &[
+            Field { id: "tc-sched-name", label: "Name", placeholder: "Schedule name...", field_type: FieldType::Text, required: true },
+            Field { id: "tc-sched-interval", label: "Interval", placeholder: "e.g. 6h, daily, 30m", field_type: FieldType::Text, required: true },
+            Field { id: "tc-sched-source", label: "Source", placeholder: "e.g. reuters.com", field_type: FieldType::Text, required: false },
+        ],
+    },
 ];
 
 /// Generate a tool parameter card. Returns None if tool has no card definition.

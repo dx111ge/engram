@@ -201,6 +201,8 @@ pub fn ChatPanel(
                     "assess_evaluate" => "tc-aev-assessment",
                     "assess_detail" => "tc-ad-assessment",
                     "assess_compare" => "tc-acmp-a",
+                    "rule_create" => "tc-rc-description",
+                    "schedule" => "tc-sched-name",
                     _ => "",
                 };
                 if !id_prefix.is_empty() {
