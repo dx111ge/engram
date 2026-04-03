@@ -18,12 +18,18 @@ pub struct DebateSession {
     pub created_at: std::time::Instant,
     pub notify: Arc<Notify>,
     pub pending_injection: Option<String>,
+    /// Starter plate: factual briefing assembled before Round 1.
+    pub briefing: Option<Briefing>,
+    /// All gap queries already researched (for dedup across rounds).
+    pub researched_gaps: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DebateStatus {
     GeneratingPanel,
+    /// Starter plate: gathering facts before debate starts.
+    Researching,
     AwaitingStart,
     Running,
     AwaitingInput,
@@ -31,6 +37,55 @@ pub enum DebateStatus {
     Synthesizing,
     Complete,
     Error,
+}
+
+// ── Briefing (starter plate) ────────────────────────────────────────────
+
+/// Factual briefing assembled before Round 1 via topic decomposition + multi-source research.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Briefing {
+    /// The original topic decomposed into factual sub-questions.
+    pub questions: Vec<String>,
+    /// Facts gathered from all sources, organized by question.
+    pub facts: Vec<BriefingFact>,
+    /// Pipeline stats: how much was ingested.
+    pub facts_stored: u32,
+    pub relations_created: u32,
+    /// Summary text for agents (included in their system prompt).
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BriefingFact {
+    pub question: String,
+    pub source: String,
+    pub content: String,
+    pub confidence: f32,
+}
+
+// ── Moderator checks ────────────────────────────────────────────────────
+
+/// A fact-check by the moderator agent against engram confidence scores.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ModeratorCheck {
+    pub agent_id: String,
+    pub claim: String,
+    pub verdict: ModeratorVerdict,
+    pub engram_confidence: Option<f32>,
+    pub explanation: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModeratorVerdict {
+    /// Claim matches high-confidence data in engram.
+    Supported,
+    /// Claim contradicts data in engram.
+    Contradicted,
+    /// Claim has no supporting evidence in engram (not necessarily wrong).
+    Unsupported,
+    /// Claim uses low-confidence data as if it's certain.
+    LowConfidence,
 }
 
 // ── Agents ───────────────────────────────────────────────────────────────
@@ -49,9 +104,20 @@ pub struct DebateAgent {
     pub color: String,
 }
 
+/// Research style: how the agent approaches additional research beyond the briefing.
+/// All agents have full access to the briefing + graph + web. This controls their *approach*.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceAccess {
+    /// Deep research: thorough graph traversal + web search before responding.
+    Comprehensive,
+    /// Relies mostly on the briefing with minimal additional search.
+    BriefingFocused,
+    /// Specifically searches for evidence AGAINST the consensus.
+    Contrarian,
+    /// Focuses on low-confidence and disputed data to find weak signals.
+    WeakSignals,
+    // Legacy variants (kept for backwards compat with existing sessions)
     GraphOnly,
     GraphAndWeb,
     GraphLowConfidence,
@@ -61,9 +127,13 @@ pub enum SourceAccess {
 impl std::fmt::Display for SourceAccess {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Comprehensive => write!(f, "Deep research (graph + web)"),
+            Self::BriefingFocused => write!(f, "Briefing-focused"),
+            Self::Contrarian => write!(f, "Contrarian research"),
+            Self::WeakSignals => write!(f, "Weak signals & low-confidence"),
             Self::GraphOnly => write!(f, "Engram graph only"),
             Self::GraphAndWeb => write!(f, "Engram graph + web search"),
-            Self::GraphLowConfidence => write!(f, "Engram graph (including low-confidence)"),
+            Self::GraphLowConfidence => write!(f, "Engram graph (low-confidence)"),
             Self::WebOnly => write!(f, "External web sources only"),
         }
     }
@@ -111,6 +181,9 @@ pub struct DebateRound {
     pub user_injection: Option<String>,
     #[serde(default)]
     pub gap_research: Vec<GapResearch>,
+    /// Moderator fact-checks for this round's claims.
+    #[serde(default)]
+    pub moderator_checks: Vec<ModeratorCheck>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

@@ -19,10 +19,10 @@ const COGNITIVE_STYLES: &[CognitiveStyle] = &[
 ];
 
 const SOURCE_OPTIONS: &[SourceAccess] = &[
-    SourceAccess::GraphOnly,
-    SourceAccess::GraphAndWeb,
-    SourceAccess::GraphLowConfidence,
-    SourceAccess::WebOnly,
+    SourceAccess::Comprehensive,
+    SourceAccess::Comprehensive,
+    SourceAccess::BriefingFocused,
+    SourceAccess::Contrarian,
 ];
 
 const COLORS: &[&str] = &[
@@ -370,14 +370,21 @@ fn build_agent_system_prompt(
     agents: &[DebateAgent],
     user_injection: Option<&str>,
     gap_research: &[GapResearch],
+    briefing_summary: &str,
 ) -> String {
     let mut prompt = format!(
         "You are {}, {}.\n\n",
         agent.name, agent.persona_description
     );
 
+    // Include the briefing (factual foundation for all agents)
+    if !briefing_summary.is_empty() {
+        prompt.push_str(&format!("{}\n\n", briefing_summary));
+        prompt.push_str("The above briefing contains verified facts. Use them as the foundation for your analysis.\n\n");
+    }
+
     // Rigor instructions
-    prompt.push_str(&format!("Your analysis characteristics:\n"));
+    prompt.push_str("Your analysis characteristics:\n");
     prompt.push_str(&format!("- Rigor level: {:.0}% ({})\n",
         agent.rigor_level * 100.0,
         if agent.rigor_level < 0.3 { "you follow hunches, rumors, and unverified claims freely" }
@@ -581,6 +588,7 @@ pub async fn execute_agent_turn(
     all_agents: &[DebateAgent],
     user_injection: Option<&str>,
     gap_research: &[GapResearch],
+    briefing_summary: &str,
     tx: &tokio::sync::broadcast::Sender<String>,
 ) -> Result<DebateTurn, String> {
     let mut all_tool_invocations = Vec::new();
@@ -595,8 +603,8 @@ pub async fn execute_agent_turn(
         // Also search for individual key entities in the topic
     ];
 
-    // Graph search (all agents except WebOnly)
-    if agent.source_access != SourceAccess::WebOnly {
+    // Graph search (all agents have full access now; briefing is the primary source)
+    {
         for term in &search_terms {
             let _ = tx.send(format!("event: tool_call\ndata: {}\n\n", serde_json::json!({
                 "agent_id": agent.id, "tool_name": "engram_search", "args": {"query": term}
@@ -612,7 +620,7 @@ pub async fn execute_agent_turn(
                         let label = r.get("label").and_then(|l| l.as_str()).unwrap_or("");
                         let conf = r.get("confidence").and_then(|c| c.as_f64()).unwrap_or(0.5) as f32;
                         let score = r.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0);
-                        if !label.is_empty() && (agent.source_access != SourceAccess::GraphLowConfidence || conf < 0.5) {
+                        if !label.is_empty() {
                             research_summary.push_str(&format!("  - {} (confidence: {:.2}, relevance: {:.2})\n", label, conf, score));
                             all_evidence.push(TurnEvidence {
                                 entity: label.to_string(),
@@ -670,8 +678,8 @@ pub async fn execute_agent_turn(
         }
     }
 
-    // Web search (GraphAndWeb and WebOnly agents)
-    if matches!(agent.source_access, SourceAccess::GraphAndWeb | SourceAccess::WebOnly) {
+    // Web search (all agents get web access now)
+    {
         let _ = tx.send(format!("event: tool_call\ndata: {}\n\n", serde_json::json!({
             "agent_id": agent.id, "tool_name": "web_search", "args": {"query": topic}
         })));
@@ -715,7 +723,7 @@ pub async fn execute_agent_turn(
 
     // ── Phase 2: LLM position formation (no function calling) ──
 
-    let system_prompt = build_agent_system_prompt(agent, topic, round, previous_turns, all_agents, user_injection, gap_research);
+    let system_prompt = build_agent_system_prompt(agent, topic, round, previous_turns, all_agents, user_injection, gap_research, briefing_summary);
 
     let user_content = if research_summary.is_empty() {
         format!(

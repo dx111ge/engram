@@ -99,6 +99,8 @@ pub async fn debate_start(
         created_at: std::time::Instant::now(),
         notify: Arc::new(Notify::new()),
         pending_injection: None,
+        briefing: None,
+        researched_gaps: Vec::new(),
     };
 
     // Store session
@@ -134,6 +136,7 @@ pub async fn debate_get(
         "current_round": session.current_round,
         "max_rounds": session.max_rounds,
         "synthesis": session.synthesis,
+        "briefing": session.briefing,
     })))
 }
 
@@ -183,8 +186,8 @@ pub async fn debate_run(
 
         match session.status {
             DebateStatus::AwaitingStart => {
-                // First start: spawn a new loop
-                session.status = DebateStatus::Running;
+                // First start: set to Researching, then spawn loop that does briefing + debate
+                session.status = DebateStatus::Researching;
                 true
             }
             DebateStatus::AwaitingInput => {
@@ -233,9 +236,43 @@ async fn run_debate_loop(state: AppState, session_id: String) {
         (session.agents.clone(), session.max_rounds, session.current_round, session.topic.clone(), tx)
     };
 
-    // Store the broadcast sender for SSE subscribers
+    // ── Starter Plate: build briefing before Round 1 ──
     {
-        // We'll use a different approach: store events on the session directly
+        let needs_briefing = {
+            let sessions = match state.debate_sessions.read() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            sessions.get(&session_id).map(|s| s.briefing.is_none()).unwrap_or(false)
+        };
+
+        if needs_briefing {
+            let _ = tx.send(format!("event: status_change\ndata: {}\n\n",
+                serde_json::json!({"status": "Researching", "message": "Building factual briefing..."})));
+
+            let briefing = research::build_starter_plate(&state, &topic).await;
+
+            // Store briefing + set status to Running
+            {
+                let mut sessions = match state.debate_sessions.write() {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                if let Some(s) = sessions.get_mut(&session_id) {
+                    // Add briefing questions to researched_gaps for dedup
+                    for q in &briefing.questions {
+                        if !s.researched_gaps.contains(q) {
+                            s.researched_gaps.push(q.clone());
+                        }
+                    }
+                    s.briefing = Some(briefing);
+                    s.status = DebateStatus::Running;
+                }
+            }
+
+            let _ = tx.send(format!("event: status_change\ndata: {}\n\n",
+                serde_json::json!({"status": "Running", "message": "Briefing complete. Starting debate."})));
+        }
     }
 
     for round_idx in current_round..max_rounds {
@@ -275,26 +312,27 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             let _ = tx.send(format!("event: turn_start\ndata: {}\n\n",
                 serde_json::json!({"agent_id": agent.id, "agent_name": agent.name, "round": round_idx + 1})));
 
-            // Get previous turns + gap research from previous round
-            let (prev_turns, prev_gap_research) = {
+            // Get previous turns, gap research, and briefing
+            let (prev_turns, prev_gap_research, briefing_summary) = {
                 let sessions = match state.debate_sessions.read() {
                     Ok(s) => s,
                     Err(_) => return,
                 };
                 if let Some(s) = sessions.get(&session_id) {
+                    let briefing_text = s.briefing.as_ref().map(|b| b.summary.clone()).unwrap_or_default();
                     if let Some(prev_round) = s.rounds.last() {
-                        (prev_round.turns.clone(), prev_round.gap_research.clone())
+                        (prev_round.turns.clone(), prev_round.gap_research.clone(), briefing_text)
                     } else {
-                        (Vec::new(), Vec::new())
+                        (Vec::new(), Vec::new(), briefing_text)
                     }
                 } else {
-                    (Vec::new(), Vec::new())
+                    (Vec::new(), Vec::new(), String::new())
                 }
             };
 
             match agents::execute_agent_turn(
                 &state, agent, &topic, round_idx, &prev_turns, &agents,
-                user_injection.as_deref(), &prev_gap_research, &tx,
+                user_injection.as_deref(), &prev_gap_research, &briefing_summary, &tx,
             ).await {
                 Ok(turn) => {
                     let _ = tx.send(format!("event: turn_complete\ndata: {}\n\n",
@@ -318,21 +356,33 @@ async fn run_debate_loop(state: AppState, session_id: String) {
         }
 
         // Build the round
+        // Get already-researched gaps for dedup
+        let already_researched = {
+            let sessions = match state.debate_sessions.read() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            sessions.get(&session_id).map(|s| s.researched_gaps.clone()).unwrap_or_default()
+        };
+
         let mut round = DebateRound {
             round_number: round_idx,
             turns: round_turns,
             user_injection: user_injection.clone(),
             gap_research: Vec::new(),
+            moderator_checks: Vec::new(),
         };
 
+        // ── Moderator fact-check ──
+        let checks = research::moderate_round(&state, &round, &agents, &topic).await;
+        round.moderator_checks = checks;
+
         // ── Gap-closing research between rounds ──
-        // Only run if there's a next round (no point after the last round)
         if round_idx + 1 < max_rounds {
             let _ = tx.send(format!("event: gap_research_start\ndata: {}\n\n",
                 serde_json::json!({"round": round_idx + 1})));
 
-            // Detect gaps from this round's turns
-            let gap_queries = research::detect_gaps(&state, &round, &agents, &topic).await;
+            let gap_queries = research::detect_gaps(&state, &round, &agents, &topic, &already_researched).await;
 
             if !gap_queries.is_empty() {
                 let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
@@ -362,6 +412,12 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                 Err(_) => return,
             };
             if let Some(s) = sessions.get_mut(&session_id) {
+                // Store gap queries for dedup in future rounds
+                for gr in &round.gap_research {
+                    if !s.researched_gaps.contains(&gr.gap_query) {
+                        s.researched_gaps.push(gr.gap_query.clone());
+                    }
+                }
                 s.rounds.push(round);
                 s.current_round = round_idx + 1;
             }
