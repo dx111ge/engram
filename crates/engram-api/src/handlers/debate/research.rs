@@ -125,6 +125,7 @@ pub async fn close_gaps(
 }
 
 /// Run the full ingest pipeline (NER + RE + entity resolution) on text content.
+/// Uses spawn_blocking because the pipeline internally creates blocking I/O.
 /// Returns true if anything was stored.
 #[cfg(feature = "ingest")]
 async fn run_ingest_pipeline(
@@ -137,7 +138,6 @@ async fn run_ingest_pipeline(
 ) -> bool {
     use engram_ingest::types::{RawItem, Content};
 
-    // Build the pipeline from AppState config (same as seed/ingest handlers)
     let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled) = {
         let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
         (
@@ -150,58 +150,74 @@ async fn run_ingest_pipeline(
         )
     };
 
-    let config = engram_ingest::PipelineConfig::default();
-    let mut pipeline = super::super::ingest::build_pipeline(
-        state.graph.clone(),
-        config,
-        kb_endpoints,
-        ner_model,
-        rel_model,
-        relation_templates,
-        rel_threshold,
-        coreference_enabled,
-        state.cached_ner.clone(),
-        state.cached_rel.clone(),
-    );
-    pipeline.set_doc_store(state.doc_store.clone());
-
-    // Set LLM for fact extraction if configured
-    {
+    let llm_config = {
         let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
-        if let (Some(ep), Some(m)) = (cfg.llm_endpoint.as_ref(), cfg.llm_model.as_ref()) {
+        (cfg.llm_endpoint.clone(), cfg.llm_model.clone())
+    };
+
+    // Clone everything needed for the blocking thread
+    let graph = state.graph.clone();
+    let doc_store = state.doc_store.clone();
+    let cached_ner = state.cached_ner.clone();
+    let cached_rel = state.cached_rel.clone();
+    let content_owned = content.to_string();
+    let query_owned = gap_query.to_string();
+    let dirty = state.dirty.clone();
+
+    // Run pipeline on a blocking thread to avoid tokio runtime panic
+    let result = tokio::task::spawn_blocking(move || {
+        let config = engram_ingest::PipelineConfig::default();
+        let mut pipeline = super::super::ingest::build_pipeline(
+            graph, config, kb_endpoints, ner_model, rel_model,
+            relation_templates, rel_threshold, coreference_enabled,
+            cached_ner, cached_rel,
+        );
+        pipeline.set_doc_store(doc_store);
+        if let (Some(ep), Some(m)) = (llm_config.0.as_ref(), llm_config.1.as_ref()) {
             pipeline.set_llm(ep.clone(), m.clone());
         }
-    }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
 
-    let items = vec![RawItem {
-        content: Content::Text(content.to_string()),
-        source_url: None,
-        source_name: format!("debate-gap: {}", gap_query),
-        fetched_at: now,
-        metadata: Default::default(),
-    }];
+        let items = vec![RawItem {
+            content: Content::Text(content_owned),
+            source_url: None,
+            source_name: format!("debate-gap: {}", query_owned),
+            fetched_at: now,
+            metadata: Default::default(),
+        }];
 
-    match pipeline.execute(items) {
-        Ok(result) => {
-            *facts_stored = result.facts_stored;
-            *relations_created = result.relations_created;
-            if result.facts_stored > 0 || result.relations_created > 0 {
-                state.mark_dirty();
-                // Try to list what was stored
-                entities_stored.push(format!("{} facts, {} relations from '{}'",
-                    result.facts_stored, result.relations_created, gap_query));
+        match pipeline.execute(items) {
+            Ok(r) => {
+                if r.facts_stored > 0 || r.relations_created > 0 {
+                    dirty.store(true, std::sync::atomic::Ordering::Release);
+                }
+                Ok((r.facts_stored, r.relations_created, query_owned))
+            }
+            Err(e) => Err(format!("{}", e)),
+        }
+    }).await;
+
+    match result {
+        Ok(Ok((fs, rc, q))) => {
+            *facts_stored = fs;
+            *relations_created = rc;
+            if fs > 0 || rc > 0 {
+                entities_stored.push(format!("{} facts, {} relations from '{}'", fs, rc, q));
                 true
             } else {
                 false
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::warn!("debate gap ingest failed for '{}': {}", gap_query, e);
+            false
+        }
+        Err(e) => {
+            tracing::warn!("debate gap ingest task panicked for '{}': {}", gap_query, e);
             false
         }
     }
