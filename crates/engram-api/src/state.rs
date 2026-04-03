@@ -397,6 +397,8 @@ pub struct AppState {
     pub seed_sessions: Arc<RwLock<HashMap<String, SeedSession>>>,
     /// Active ingest review sessions (review=true mode).
     pub ingest_sessions: Arc<RwLock<HashMap<String, IngestSession>>>,
+    /// Active multi-agent debate sessions (in-memory, 2h TTL).
+    pub debate_sessions: Arc<RwLock<HashMap<String, crate::handlers::debate::DebateSession>>>,
 }
 
 impl AppState {
@@ -451,6 +453,7 @@ impl AppState {
             )),
             seed_sessions: Arc::new(RwLock::new(HashMap::new())),
             ingest_sessions: Arc::new(RwLock::new(HashMap::new())),
+            debate_sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

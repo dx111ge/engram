@@ -928,3 +928,145 @@ pub struct DeleteResponse {
     #[serde(default)]
     pub entity: Option<String>,
 }
+
+// ── Debate panel ──
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateAgent {
+    pub id: String,
+    pub name: String,
+    pub persona_description: String,
+    pub rigor_level: f32,
+    pub source_access: String,
+    pub evidence_threshold: f32,
+    pub cognitive_style: String,
+    pub bias: DebateAgentBias,
+    pub icon: String,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateAgentBias {
+    pub label: String,
+    pub description: String,
+    pub is_neutral: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateStartResponse {
+    pub session_id: String,
+    pub topic: String,
+    pub status: String,
+    pub agents: Vec<DebateAgent>,
+    pub max_rounds: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateSessionResponse {
+    pub session_id: String,
+    pub topic: String,
+    pub status: String,
+    pub agents: Vec<DebateAgent>,
+    pub rounds: Vec<DebateRound>,
+    pub current_round: usize,
+    pub max_rounds: usize,
+    pub synthesis: Option<DebateSynthesis>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateRound {
+    pub round_number: usize,
+    pub turns: Vec<DebateTurn>,
+    pub user_injection: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateTurn {
+    pub agent_id: String,
+    pub position: String,
+    pub evidence: Vec<DebateTurnEvidence>,
+    pub confidence: f32,
+    pub tools_used: Vec<DebateToolInvocation>,
+    pub agrees_with: Vec<String>,
+    pub disagrees_with: Vec<String>,
+    #[serde(default)]
+    pub position_shift: String,
+    #[serde(default)]
+    pub concessions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateTurnEvidence {
+    pub entity: String,
+    pub confidence: f32,
+    pub source: String,
+    pub supporting: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateToolInvocation {
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+    pub result_summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateSynthesis {
+    #[serde(default)]
+    pub evidence_conclusion: String,
+    #[serde(default)]
+    pub conclusion_confidence: f32,
+    #[serde(default)]
+    pub evidence_gaps: Vec<String>,
+    #[serde(default)]
+    pub key_evidence: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub influence_map: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub unexpected_alignments: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub cherry_picks: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub hidden_agendas: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub beneficiary_map: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub parallel_interests: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub blind_spots: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub evolution: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub areas_of_agreement: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub areas_of_disagreement: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub key_tensions: Vec<String>,
+    #[serde(default)]
+    pub recommended_investigations: Vec<String>,
+    #[serde(default)]
+    pub agent_positions: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateRunResponse {
+    pub session_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateInjectResponse {
+    pub session_id: String,
+    #[serde(default)]
+    pub injected: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateSynthesizeResponse {
+    pub session_id: String,
+    pub status: String,
+    pub synthesis: DebateSynthesis,
+}

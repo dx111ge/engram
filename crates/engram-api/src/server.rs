@@ -125,6 +125,16 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/assessments/compare/{label_a}/{label_b}", get(handlers::compare_assessments))
         .route("/assessments/suggest-watches", post(handlers::suggest_watches))
         .route("/assessments/{label}/suggest-watches", post(handlers::suggest_watches_for_assessment))
+        // Multi-agent debate panel
+        .route("/debate/start", post(handlers::debate::debate_start))
+        .route("/debate/{id}", get(handlers::debate::debate_get))
+        .route("/debate/{id}", delete(handlers::debate::debate_delete))
+        .route("/debate/{id}/agents", patch(handlers::debate::debate_edit_agents))
+        .route("/debate/{id}/run", post(handlers::debate::debate_run))
+        .route("/debate/{id}/inject", post(handlers::debate::debate_inject))
+        .route("/debate/{id}/stop", post(handlers::debate::debate_stop))
+        .route("/debate/{id}/synthesize", post(handlers::debate::debate_synthesize))
+        .route("/debate/{id}/stream", get(handlers::debate::debate_stream))
         // Facts (list, confirm/debunk with trust propagation)
         .route("/facts", post(handlers::fact::list_facts))
         .route("/facts/{label}/confirm", post(handlers::fact_confirm))
@@ -366,6 +376,10 @@ pub async fn serve_with_frontend(state: AppState, addr: &str, frontend_dir: Opti
                 // Clean up expired ingest review sessions (30 min TTL)
                 if let Ok(mut sessions) = checkpoint_state.ingest_sessions.write() {
                     sessions.retain(|_, s| s.created_at.elapsed().as_secs() < 1800);
+                }
+                // Clean up expired debate sessions (2 hour TTL)
+                if let Ok(mut sessions) = checkpoint_state.debate_sessions.write() {
+                    sessions.retain(|_, s| s.created_at.elapsed().as_secs() < 7200);
                 }
             }
         }

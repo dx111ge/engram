@@ -15,3 +15,4 @@ pub mod security;
 pub mod node;
 pub mod insights;
 pub mod facts;
+pub mod debate;
