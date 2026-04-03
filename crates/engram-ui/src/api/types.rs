@@ -956,21 +956,43 @@ pub struct DebateAgentBias {
 pub struct DebateStartResponse {
     pub session_id: String,
     pub topic: String,
+    #[serde(default)]
+    pub mode: String,
     pub status: String,
     pub agents: Vec<DebateAgent>,
     pub max_rounds: u8,
+    #[serde(default)]
+    pub mode_input: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DebateSessionResponse {
     pub session_id: String,
     pub topic: String,
+    #[serde(default)]
+    pub mode: String,
     pub status: String,
     pub agents: Vec<DebateAgent>,
     pub rounds: Vec<DebateRound>,
     pub current_round: usize,
     pub max_rounds: usize,
     pub synthesis: Option<DebateSynthesis>,
+    #[serde(default)]
+    pub mode_input: Option<String>,
+    #[serde(default)]
+    pub progress: Option<DebateProgress>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateProgress {
+    pub phase: String,
+    pub message: String,
+    #[serde(default)]
+    pub active_agent: Option<String>,
+    #[serde(default)]
+    pub current: usize,
+    #[serde(default)]
+    pub total: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

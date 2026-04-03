@@ -9,6 +9,7 @@ pub mod llm;
 pub mod agents;
 pub mod research;
 pub mod synthesis;
+pub mod modes;
 
 pub use types::*;
 pub use agents::{assign_agent_slots, parse_turn_metadata, strip_metadata_lines, tools_for_agent};
@@ -37,7 +38,7 @@ pub async fn debate_start(
     let mut agents = agents::assign_agent_slots(count);
 
     // Generate persona details via LLM
-    let prompt = agents::build_persona_generation_prompt(&req.topic, &agents);
+    let prompt = agents::build_persona_generation_prompt(&req.topic, &agents, &req.mode, req.mode_input.as_deref());
     let response = llm::call_llm(&state, prompt).await
         .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("Panel generation failed: {e}")))?;
 
@@ -90,6 +91,7 @@ pub async fn debate_start(
     let session = DebateSession {
         session_id: session_id.clone(),
         topic: req.topic.clone(),
+        mode: req.mode.clone(),
         status: DebateStatus::AwaitingStart,
         agents: agents.clone(),
         rounds: Vec::new(),
@@ -101,6 +103,8 @@ pub async fn debate_start(
         pending_injection: None,
         briefing: None,
         researched_gaps: Vec::new(),
+        mode_input: req.mode_input.clone(),
+        progress: None,
     };
 
     // Store session
@@ -112,9 +116,11 @@ pub async fn debate_start(
     Ok(Json(serde_json::json!({
         "session_id": session_id,
         "topic": req.topic,
+        "mode": req.mode,
         "status": "awaiting_start",
         "agents": agents,
-        "max_rounds": req.max_rounds
+        "max_rounds": req.max_rounds,
+        "mode_input": req.mode_input,
     })))
 }
 
@@ -130,6 +136,7 @@ pub async fn debate_get(
     Ok(Json(serde_json::json!({
         "session_id": session.session_id,
         "topic": session.topic,
+        "mode": session.mode,
         "status": session.status,
         "agents": session.agents,
         "rounds": session.rounds,
@@ -137,6 +144,8 @@ pub async fn debate_get(
         "max_rounds": session.max_rounds,
         "synthesis": session.synthesis,
         "briefing": session.briefing,
+        "mode_input": session.mode_input,
+        "progress": session.progress,
     })))
 }
 
@@ -220,10 +229,25 @@ pub async fn debate_run(
     })))
 }
 
+/// Update the progress field on the session.
+fn set_progress(state: &AppState, session_id: &str, phase: &str, message: &str, agent: Option<&str>, current: usize, total: usize) {
+    if let Ok(mut sessions) = state.debate_sessions.write() {
+        if let Some(s) = sessions.get_mut(session_id) {
+            s.progress = Some(DebateProgress {
+                phase: phase.into(),
+                message: message.into(),
+                active_agent: agent.map(String::from),
+                current,
+                total,
+            });
+        }
+    }
+}
+
 /// Background debate execution loop.
 async fn run_debate_loop(state: AppState, session_id: String) {
     // Get session info
-    let (agents, max_rounds, current_round, topic, tx) = {
+    let (agents, max_rounds, current_round, topic, mode, mode_input, tx) = {
         let sessions = match state.debate_sessions.read() {
             Ok(s) => s,
             Err(_) => return,
@@ -233,7 +257,8 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             None => return,
         };
         let (tx, _) = tokio::sync::broadcast::channel::<String>(256);
-        (session.agents.clone(), session.max_rounds, session.current_round, session.topic.clone(), tx)
+        (session.agents.clone(), session.max_rounds, session.current_round, session.topic.clone(),
+         session.mode.clone(), session.mode_input.clone(), tx)
     };
 
     // ── Starter Plate: build briefing before Round 1 ──
@@ -247,6 +272,7 @@ async fn run_debate_loop(state: AppState, session_id: String) {
         };
 
         if needs_briefing {
+            set_progress(&state, &session_id, "researching", "Building factual briefing...", None, 0, 0);
             let _ = tx.send(format!("event: status_change\ndata: {}\n\n",
                 serde_json::json!({"status": "Researching", "message": "Building factual briefing..."})));
 
@@ -304,7 +330,11 @@ async fn run_debate_loop(state: AppState, session_id: String) {
         let mut round_turns = Vec::new();
 
         // Execute each agent's turn
-        for agent in &agents {
+        let agent_total = agents.len();
+        for (agent_idx, agent) in agents.iter().enumerate() {
+            set_progress(&state, &session_id, "debating",
+                &format!("{} is analyzing...", agent.name),
+                Some(&agent.name), agent_idx + 1, agent_total);
             let _ = tx.send(format!("event: turn_start\ndata: {}\n\n",
                 serde_json::json!({"agent_id": agent.id, "agent_name": agent.name, "round": round_idx + 1})));
 
@@ -328,7 +358,8 @@ async fn run_debate_loop(state: AppState, session_id: String) {
 
             match agents::execute_agent_turn(
                 &state, agent, &topic, round_idx, &prev_turns, &agents,
-                user_injection.as_deref(), &prev_gap_research, &briefing_summary, &tx,
+                user_injection.as_deref(), &prev_gap_research, &briefing_summary,
+                &mode, mode_input.as_deref(), &tx,
             ).await {
                 Ok(turn) => {
                     let _ = tx.send(format!("event: turn_complete\ndata: {}\n\n",
@@ -375,6 +406,8 @@ async fn run_debate_loop(state: AppState, session_id: String) {
 
         // ── Gap-closing research between rounds ──
         if round_idx + 1 < max_rounds {
+            set_progress(&state, &session_id, "gap_closing",
+                "Detecting knowledge gaps...", None, 0, 0);
             let _ = tx.send(format!("event: gap_research_start\ndata: {}\n\n",
                 serde_json::json!({"round": round_idx + 1})));
 

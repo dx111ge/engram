@@ -17,6 +17,8 @@ pub fn DebatePage() -> impl IntoView {
 
     // Setup state
     let (topic, set_topic) = signal(String::new());
+    let (debate_mode, set_debate_mode) = signal("analyze".to_string());
+    let (mode_input, set_mode_input) = signal(String::new());
     let (agent_count, set_agent_count) = signal("5".to_string());
     let (max_rounds_input, set_max_rounds_input) = signal("3".to_string());
     let (loading, set_loading) = signal(false);
@@ -35,6 +37,7 @@ pub fn DebatePage() -> impl IntoView {
     let (inject_text, set_inject_text) = signal(String::new());
     let (synthesis_tab, set_synthesis_tab) = signal("evidence".to_string());
     let (polling, set_polling) = signal(false);
+    let (progress_msg, set_progress_msg) = signal(String::new());
     let (expanded_round, set_expanded_round) = signal(Option::<usize>::None);
     let (editing_agent, set_editing_agent) = signal(Option::<String>::None);
 
@@ -55,6 +58,8 @@ pub fn DebatePage() -> impl IntoView {
         set_synthesis.set(None);
         set_status_msg.set(String::new());
         set_topic.set(String::new());
+        set_debate_mode.set("analyze".into());
+        set_mode_input.set(String::new());
         set_current_round.set(0);
         set_expanded_round.set(None);
     };
@@ -73,7 +78,12 @@ pub fn DebatePage() -> impl IntoView {
             }
             set_loading.set(true);
             set_status_msg.set("Generating debate panel...".into());
-            let body = serde_json::json!({"topic": t, "agent_count": ac, "max_rounds": mr});
+            let m = debate_mode.get_untracked();
+            let mi = mode_input.get_untracked();
+            let body = serde_json::json!({
+                "topic": t, "mode": m, "agent_count": ac, "max_rounds": mr,
+                "mode_input": if mi.is_empty() { None } else { Some(mi) }
+            });
             match api.post::<_, DebateStartResponse>("/debate/start", &body).await {
                 Ok(resp) => {
                     set_session_id.set(Some(resp.session_id));
@@ -131,6 +141,15 @@ pub fn DebatePage() -> impl IntoView {
                         set_agents.set(resp.agents);
                         set_current_round.set(resp.current_round);
                         set_max_rounds.set(resp.max_rounds);
+                        // Update progress message
+                        if let Some(p) = &resp.progress {
+                            let msg = if p.total > 0 {
+                                format!("{} ({}/{})", p.message, p.current, p.total)
+                            } else {
+                                p.message.clone()
+                            };
+                            set_progress_msg.set(msg);
+                        }
                         // Auto-expand latest round
                         if resp.rounds.len() > rounds.get_untracked().len() {
                             set_expanded_round.set(Some(resp.rounds.len() - 1));
@@ -304,7 +323,7 @@ pub fn DebatePage() -> impl IntoView {
 
     view! {
         <div class="page-header">
-            <h2><i class="fa-solid fa-comments"></i>" Debate Panel"</h2>
+            <h2><i class="fa-solid fa-comments"></i>" Analysis Panel"</h2>
             <div style="display: flex; gap: 0.5rem; align-items: center;">
                 // Round indicator
                 {move || {
@@ -369,11 +388,38 @@ pub fn DebatePage() -> impl IntoView {
             if session_id.get().is_none() {
                 Some(view! {
                     <div class="card" style="margin-bottom: 1.5rem;">
-                        <h3>"Start a Debate"</h3>
+                        <h3>"Start Analysis"</h3>
+
+                        // Mode selector
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                            {[
+                                ("analyze", "fa-search", "Analyze", "What is/will happen?"),
+                                ("red_team", "fa-crosshairs", "Red Team", "How to achieve/break X?"),
+                                ("outcome_engineering", "fa-bullseye", "Outcome Eng.", "What must be true for X?"),
+                                ("scenario_forecast", "fa-code-branch", "Scenarios", "Map possible futures"),
+                                ("stakeholder_simulation", "fa-users-cog", "Stakeholders", "How will actors react?"),
+                                ("premortem", "fa-skull-crossbones", "Pre-mortem", "Why did plan X fail?"),
+                                ("decision_matrix", "fa-th-list", "Decision", "A vs B vs C?"),
+                            ].into_iter().map(|(val, icon, label, desc)| {
+                                let val_s = val.to_string();
+                                let val_c = val.to_string();
+                                view! {
+                                    <button
+                                        class=move || if debate_mode.get() == val_s { "btn btn-primary" } else { "btn" }
+                                        style="flex: 1; min-width: 120px; text-align: left; padding: 0.5rem;"
+                                        on:click=move |_| { set_debate_mode.set(val_c.clone()); }
+                                    >
+                                        <div><i class=format!("fa-solid {}", icon)></i>{format!(" {}", label)}</div>
+                                        <div style="font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.2rem;">{desc}</div>
+                                    </button>
+                                }
+                            }).collect::<Vec<_>>()}
+                        </div>
+
                         <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: end;">
                             <div style="flex: 1; min-width: 300px;">
                                 <label>"Topic / Question"</label>
-                                <input type="text" placeholder="e.g., Is AI regulation necessary?"
+                                <input type="text" placeholder="e.g., What will happen to oil prices if Iran closes the Strait of Hormuz?"
                                     prop:value=topic on:input=move |ev| set_topic.set(event_target_value(&ev))
                                     style="width: 100%;" />
                             </div>
@@ -392,6 +438,31 @@ pub fn DebatePage() -> impl IntoView {
                                     <option value="3" selected>"3"</option><option value="4">"4"</option><option value="5">"5"</option>
                                 </select>
                             </div>
+                        </div>
+
+                        // Mode-specific input
+                        {move || {
+                            let m = debate_mode.get();
+                            let (label, placeholder) = match m.as_str() {
+                                "red_team" => ("Desired Outcome", "e.g., End the war in favor of Ukraine within 12 months"),
+                                "outcome_engineering" => ("Desired End State", "e.g., Iran agrees to open negotiations on nuclear deal"),
+                                "stakeholder_simulation" => ("Actors to Simulate", "e.g., Russia, Ukraine, USA, China, EU, NATO"),
+                                "premortem" => ("Plan to Stress-Test", "e.g., EU implements full oil embargo on Iran by Q3 2026"),
+                                "decision_matrix" => ("Options to Evaluate", "e.g., Option A: Full embargo | Option B: Targeted sanctions | Option C: Diplomatic engagement"),
+                                _ => ("", ""),
+                            };
+                            if label.is_empty() { return None; }
+                            Some(view! {
+                                <div style="margin-top: 0.75rem;">
+                                    <label>{label}</label>
+                                    <textarea rows="2" placeholder=placeholder
+                                        prop:value=mode_input on:input=move |ev| set_mode_input.set(event_target_value(&ev))
+                                        style="width: 100%; resize: vertical;" />
+                                </div>
+                            })
+                        }}
+
+                        <div style="margin-top: 0.75rem;">
                             <button class="btn btn-primary" on:click=move |_| { start_debate.dispatch(()); }
                                 disabled=move || loading.get()>
                                 {move || if loading.get() { "Generating..." } else { "Generate Panel" }}
@@ -415,9 +486,14 @@ pub fn DebatePage() -> impl IntoView {
                         <span class="text-secondary" style="font-size: 0.85rem;">"Review agents below, click to edit. Then start."</span>
                     </div>
                 }.into_any()),
-                "running" => Some(view! {
+                "running" | "researching" => Some(view! {
                     <div class="card" style="position: sticky; top: 48px; z-index: 10; margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center;">
-                        <span class="badge badge-active"><i class="fa-solid fa-spinner fa-spin"></i>" Agents debating..."</span>
+                        <span class="badge badge-active"><i class="fa-solid fa-spinner fa-spin"></i>
+                            {move || {
+                                let msg = progress_msg.get();
+                                if msg.is_empty() { " Working...".to_string() } else { format!(" {}", msg) }
+                            }}
+                        </span>
                     </div>
                 }.into_any()),
                 "awaiting_input" => Some(view! {

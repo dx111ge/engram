@@ -9,6 +9,7 @@ use tokio::sync::Notify;
 pub struct DebateSession {
     pub session_id: String,
     pub topic: String,
+    pub mode: DebateMode,
     pub status: DebateStatus,
     pub agents: Vec<DebateAgent>,
     pub rounds: Vec<DebateRound>,
@@ -18,10 +19,63 @@ pub struct DebateSession {
     pub created_at: std::time::Instant,
     pub notify: Arc<Notify>,
     pub pending_injection: Option<String>,
-    /// Starter plate: factual briefing assembled before Round 1.
     pub briefing: Option<Briefing>,
-    /// All gap queries already researched (for dedup across rounds).
     pub researched_gaps: Vec<String>,
+    /// Mode-specific extra input (desired outcome, actor list, options, plan to test).
+    pub mode_input: Option<String>,
+    /// Live progress for frontend display.
+    pub progress: Option<DebateProgress>,
+}
+
+/// Live progress information for the frontend.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DebateProgress {
+    pub phase: String,
+    pub message: String,
+    /// Current agent being processed (if applicable).
+    pub active_agent: Option<String>,
+    /// Progress counter (e.g., "2 of 4").
+    pub current: usize,
+    pub total: usize,
+}
+
+// ── Debate Modes ────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DebateMode {
+    /// Analyze: "What is happening? What's likely?"
+    Analyze,
+    /// Red Team: "How to achieve X? What breaks it?"
+    RedTeam,
+    /// Outcome Engineering: "What must be true for X to happen?"
+    OutcomeEngineering,
+    /// Scenario Forecast: "What are the plausible futures?"
+    ScenarioForecast,
+    /// Stakeholder Simulation: "How will actual players react?"
+    StakeholderSimulation,
+    /// Pre-mortem: "Assume plan X failed. Why?"
+    Premortem,
+    /// Decision Matrix: "Should we do A, B, or C?"
+    DecisionMatrix,
+}
+
+impl Default for DebateMode {
+    fn default() -> Self { Self::Analyze }
+}
+
+impl std::fmt::Display for DebateMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Analyze => write!(f, "Analyze"),
+            Self::RedTeam => write!(f, "Red Team"),
+            Self::OutcomeEngineering => write!(f, "Outcome Engineering"),
+            Self::ScenarioForecast => write!(f, "Scenario Forecast"),
+            Self::StakeholderSimulation => write!(f, "Stakeholder Simulation"),
+            Self::Premortem => write!(f, "Pre-mortem"),
+            Self::DecisionMatrix => write!(f, "Decision Matrix"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -298,10 +352,16 @@ pub struct AgentPosition { pub agent_id: String, pub agent_name: String, pub fin
 #[derive(serde::Deserialize)]
 pub struct StartRequest {
     pub topic: String,
+    #[serde(default)]
+    pub mode: DebateMode,
     #[serde(default = "default_agent_count")]
     pub agent_count: u8,
     #[serde(default = "default_max_rounds")]
     pub max_rounds: u8,
+    /// Mode-specific input: desired outcome (RedTeam/OutcomeEng), actor list (Stakeholder),
+    /// plan to test (Premortem), options A/B/C (DecisionMatrix).
+    #[serde(default)]
+    pub mode_input: Option<String>,
 }
 
 fn default_agent_count() -> u8 { 5 }

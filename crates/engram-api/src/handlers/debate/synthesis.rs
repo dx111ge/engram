@@ -52,7 +52,7 @@ pub fn build_synthesis_prompt(session: &DebateSession) -> serde_json::Value {
         )
     }).collect();
 
-    let system_prompt = format!(
+    let mut system_prompt = format!(
         r#"You are a senior intelligence synthesis analyst. You must produce a structured 4-layer analysis of the following debate.
 
 Topic: "{topic}"
@@ -103,6 +103,12 @@ CRITICAL INSTRUCTIONS:
         profiles = agent_profiles.join("\n"),
         transcript = transcript,
     );
+
+    // Add mode-specific synthesis instructions
+    let mode_additions = super::modes::synthesis_additions(&session.mode, session.mode_input.as_deref());
+    if !mode_additions.is_empty() {
+        system_prompt.push_str(&mode_additions);
+    }
 
     serde_json::json!({
         "messages": [

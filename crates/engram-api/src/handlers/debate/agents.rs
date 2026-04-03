@@ -69,7 +69,8 @@ pub fn assign_agent_slots(count: u8) -> Vec<DebateAgent> {
 }
 
 /// Build the LLM prompt to generate persona details + biases for the assigned slots.
-pub fn build_persona_generation_prompt(topic: &str, agents: &[DebateAgent]) -> serde_json::Value {
+pub fn build_persona_generation_prompt(topic: &str, agents: &[DebateAgent], mode: &DebateMode, mode_input: Option<&str>) -> serde_json::Value {
+    let mode_rules = super::modes::persona_rules(mode, mode_input);
     let mut agent_descriptions = String::new();
     for a in agents {
         agent_descriptions.push_str(&format!(
@@ -86,11 +87,13 @@ pub fn build_persona_generation_prompt(topic: &str, agents: &[DebateAgent]) -> s
     }
 
     let system_prompt = format!(
-        r##"You are generating a diverse panel of {} intelligence analysts for a structured debate.
-Each analyst has pre-assigned characteristics (rigor level, source access, cognitive style).
-Your job: generate a name, background, bias assignment, and visual identity for each.
+        r##"You are generating a diverse panel of {} participants for a structured analysis session.
+Each participant has pre-assigned characteristics (rigor level, cognitive style).
+Your job: generate a name, background, role assignment, and visual identity for each.
 
-Topic under debate: "{}"
+{}
+
+Topic: "{}"
 
 Pre-assigned slots:
 {}
@@ -116,7 +119,7 @@ Return ONLY a JSON array (no markdown, no commentary):
     "color": "#hexcolor"
   }}
 ]"##,
-        agents.len(), topic, agent_descriptions
+        agents.len(), mode_rules, topic, agent_descriptions
     );
 
     serde_json::json!({
@@ -371,6 +374,8 @@ fn build_agent_system_prompt(
     user_injection: Option<&str>,
     gap_research: &[GapResearch],
     briefing_summary: &str,
+    mode: &DebateMode,
+    mode_input: Option<&str>,
 ) -> String {
     let mut prompt = format!(
         "You are {}, {}.\n\n",
@@ -405,7 +410,13 @@ fn build_agent_system_prompt(
         ));
     }
 
-    prompt.push_str(&format!("You are participating in Round {} of a structured debate on: \"{}\"\n\n", round + 1, topic));
+    // Mode-specific instructions
+    let mode_addition = super::modes::agent_prompt_addition(mode, mode_input);
+    if !mode_addition.is_empty() {
+        prompt.push_str(&mode_addition);
+    }
+
+    prompt.push_str(&format!("You are participating in Round {} of a structured analysis on: \"{}\"\n\n", round + 1, topic));
 
     // Previous round context
     if !previous_turns.is_empty() {
@@ -589,6 +600,8 @@ pub async fn execute_agent_turn(
     user_injection: Option<&str>,
     gap_research: &[GapResearch],
     briefing_summary: &str,
+    mode: &DebateMode,
+    mode_input: Option<&str>,
     tx: &tokio::sync::broadcast::Sender<String>,
 ) -> Result<DebateTurn, String> {
     let mut all_tool_invocations = Vec::new();
@@ -723,7 +736,7 @@ pub async fn execute_agent_turn(
 
     // ── Phase 2: LLM position formation (no function calling) ──
 
-    let system_prompt = build_agent_system_prompt(agent, topic, round, previous_turns, all_agents, user_injection, gap_research, briefing_summary);
+    let system_prompt = build_agent_system_prompt(agent, topic, round, previous_turns, all_agents, user_injection, gap_research, briefing_summary, mode, mode_input);
 
     let user_content = if research_summary.is_empty() {
         format!(
