@@ -259,12 +259,8 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                     Err(_) => return,
                 };
                 if let Some(s) = sessions.get_mut(&session_id) {
-                    // Add briefing questions to researched_gaps for dedup
-                    for q in &briefing.questions {
-                        if !s.researched_gaps.contains(q) {
-                            s.researched_gaps.push(q.clone());
-                        }
-                    }
+                    // Don't add briefing questions to researched_gaps -- they're broad context,
+                    // not specific gap queries. Gap-closing should find NEW specific gaps.
                     s.briefing = Some(briefing);
                     s.status = DebateStatus::Running;
                 }
@@ -414,7 +410,9 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             if let Some(s) = sessions.get_mut(&session_id) {
                 // Store gap queries for dedup in future rounds
                 for gr in &round.gap_research {
-                    if !s.researched_gaps.contains(&gr.gap_query) {
+                    // Only mark gap as "done" if it was actually closed (found real data).
+                    // Unclosed gaps will be retried in the next round.
+                    if gr.ingested && !s.researched_gaps.contains(&gr.gap_query) {
                         s.researched_gaps.push(gr.gap_query.clone());
                     }
                 }
