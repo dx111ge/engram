@@ -978,6 +978,21 @@ pub struct DebateRound {
     pub round_number: usize,
     pub turns: Vec<DebateTurn>,
     pub user_injection: Option<String>,
+    #[serde(default)]
+    pub gap_research: Vec<DebateGapResearch>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateGapResearch {
+    pub gap_query: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+    #[serde(default)]
+    pub ingested: bool,
+    #[serde(default)]
+    pub entities_stored: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

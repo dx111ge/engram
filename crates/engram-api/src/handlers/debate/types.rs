@@ -1,0 +1,278 @@
+/// Data types for the multi-agent debate panel.
+
+use std::sync::Arc;
+use tokio::sync::Notify;
+
+// ── Session ─────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct DebateSession {
+    pub session_id: String,
+    pub topic: String,
+    pub status: DebateStatus,
+    pub agents: Vec<DebateAgent>,
+    pub rounds: Vec<DebateRound>,
+    pub current_round: usize,
+    pub max_rounds: usize,
+    pub synthesis: Option<Synthesis>,
+    pub created_at: std::time::Instant,
+    pub notify: Arc<Notify>,
+    pub pending_injection: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DebateStatus {
+    GeneratingPanel,
+    AwaitingStart,
+    Running,
+    AwaitingInput,
+    AllRoundsComplete,
+    Synthesizing,
+    Complete,
+    Error,
+}
+
+// ── Agents ───────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DebateAgent {
+    pub id: String,
+    pub name: String,
+    pub persona_description: String,
+    pub rigor_level: f32,
+    pub source_access: SourceAccess,
+    pub evidence_threshold: f32,
+    pub cognitive_style: CognitiveStyle,
+    pub bias: AgentBias,
+    pub icon: String,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceAccess {
+    GraphOnly,
+    GraphAndWeb,
+    GraphLowConfidence,
+    WebOnly,
+}
+
+impl std::fmt::Display for SourceAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GraphOnly => write!(f, "Engram graph only"),
+            Self::GraphAndWeb => write!(f, "Engram graph + web search"),
+            Self::GraphLowConfidence => write!(f, "Engram graph (including low-confidence)"),
+            Self::WebOnly => write!(f, "External web sources only"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CognitiveStyle {
+    PatternSeeking,
+    Skeptical,
+    Contrarian,
+    DevilsAdvocate,
+    Empirical,
+    Intuitive,
+    Systemic,
+}
+
+impl std::fmt::Display for CognitiveStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PatternSeeking => write!(f, "Pattern-seeking: finds connections others miss"),
+            Self::Skeptical => write!(f, "Skeptical: demands proof, questions assumptions"),
+            Self::Contrarian => write!(f, "Contrarian: argues the opposing view"),
+            Self::DevilsAdvocate => write!(f, "Devil's advocate: tests arguments by attacking them"),
+            Self::Empirical => write!(f, "Empirical: data-driven, statistical thinking"),
+            Self::Intuitive => write!(f, "Intuitive: follows hunches and weak signals"),
+            Self::Systemic => write!(f, "Systemic: second-order effects, systems thinking"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgentBias {
+    pub label: String,
+    pub description: String,
+    pub is_neutral: bool,
+}
+
+// ── Rounds & Turns ──────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DebateRound {
+    pub round_number: usize,
+    pub turns: Vec<DebateTurn>,
+    pub user_injection: Option<String>,
+    #[serde(default)]
+    pub gap_research: Vec<GapResearch>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GapResearch {
+    pub gap_query: String,
+    pub source: String,
+    pub findings: Vec<String>,
+    pub ingested: bool,
+    pub entities_stored: Vec<String>,
+    /// Pipeline stats: facts stored + relations created from ingest.
+    #[serde(default)]
+    pub facts_stored: u32,
+    #[serde(default)]
+    pub relations_created: u32,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DebateTurn {
+    pub agent_id: String,
+    pub position: String,
+    pub evidence: Vec<TurnEvidence>,
+    pub confidence: f32,
+    pub tools_used: Vec<ToolInvocation>,
+    pub agrees_with: Vec<String>,
+    pub disagrees_with: Vec<String>,
+    #[serde(default)]
+    pub position_shift: String,
+    #[serde(default)]
+    pub concessions: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TurnEvidence {
+    pub entity: String,
+    pub confidence: f32,
+    pub source: String,
+    pub supporting: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ToolInvocation {
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+    pub result_summary: String,
+}
+
+// ── Synthesis ───────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Synthesis {
+    pub evidence_conclusion: String,
+    pub conclusion_confidence: f32,
+    pub evidence_gaps: Vec<String>,
+    pub key_evidence: Vec<EvidenceSummary>,
+
+    pub influence_map: Vec<AgentInfluence>,
+    pub unexpected_alignments: Vec<Alignment>,
+    pub cherry_picks: Vec<CherryPick>,
+
+    pub hidden_agendas: Vec<HiddenAgenda>,
+    pub beneficiary_map: Vec<Beneficiary>,
+    pub parallel_interests: Vec<ParallelInterest>,
+    pub blind_spots: Vec<BlindSpot>,
+
+    #[serde(default)]
+    pub evolution: Vec<AgentEvolution>,
+
+    pub areas_of_agreement: Vec<AgreementPoint>,
+    pub areas_of_disagreement: Vec<DisagreementPoint>,
+    pub key_tensions: Vec<String>,
+    pub recommended_investigations: Vec<String>,
+    pub agent_positions: Vec<AgentPosition>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgentEvolution {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub confidence_trajectory: Vec<f32>,
+    pub net_shift: f32,
+    pub pivot_cause: String,
+    pub flexibility_score: f32,
+    pub key_concessions: Vec<String>,
+    pub bias_override: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct EvidenceSummary { pub entity: String, pub fact: String, pub confidence: f32 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgentInfluence { pub agent_id: String, pub agent_name: String, pub bias_label: String, pub position_pushed: String, pub evidence_backed: bool, pub distortion_summary: String }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Alignment { pub agents: Vec<String>, pub common_position: String, pub reason: String }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct CherryPick { pub agent_id: String, pub ignored_evidence: String, pub why_ignored: String }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct HiddenAgenda { pub agent_id: String, pub agent_name: String, pub stated_position: String, pub underlying_interest: String, pub who_benefits: String, pub what_they_avoid: String, pub what_they_lose: String, pub second_order_effects: Vec<String> }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Beneficiary { pub position: String, pub beneficiaries: Vec<String>, pub mechanism: String }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ParallelInterest { pub agents: Vec<String>, pub surface_disagreement: String, pub hidden_alignment: String }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BlindSpot { pub agent_id: String, pub topic_avoided: String, pub likely_reason: String }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgreementPoint { pub statement: String, pub agents: Vec<String>, pub confidence: f32 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DisagreementPoint { pub statement: String, pub positions: Vec<(String, String)> }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgentPosition { pub agent_id: String, pub agent_name: String, pub final_position: String, pub confidence: f32, pub evidence_count: usize }
+
+// ── Request/response types ──────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct StartRequest {
+    pub topic: String,
+    #[serde(default = "default_agent_count")]
+    pub agent_count: u8,
+    #[serde(default = "default_max_rounds")]
+    pub max_rounds: u8,
+}
+
+fn default_agent_count() -> u8 { 5 }
+fn default_max_rounds() -> u8 { 3 }
+
+#[derive(serde::Deserialize)]
+pub struct InjectRequest {
+    pub message: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct AgentEdit {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub persona_description: Option<String>,
+    #[serde(default)]
+    pub rigor_level: Option<f32>,
+    #[serde(default)]
+    pub source_access: Option<SourceAccess>,
+    #[serde(default)]
+    pub evidence_threshold: Option<f32>,
+    #[serde(default)]
+    pub cognitive_style: Option<CognitiveStyle>,
+    #[serde(default)]
+    pub bias: Option<AgentBias>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct AgentEdits {
+    pub agents: Vec<AgentEdit>,
+}
+
+// ── Parsed turn metadata ────────────────────────────────────────────────
+
+pub struct TurnMetadata {
+    pub confidence: f32,
+    pub agrees_with: Vec<String>,
+    pub disagrees_with: Vec<String>,
+    pub position_shift: String,
+    pub concessions: Vec<String>,
+}

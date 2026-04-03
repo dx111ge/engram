@@ -40,6 +40,7 @@ pub fn DebatePage() -> impl IntoView {
 
     // Edit form signals
     let (edit_name, set_edit_name) = signal(String::new());
+    let (edit_persona, set_edit_persona) = signal(String::new());
     let (edit_bias_label, set_edit_bias_label) = signal(String::new());
     let (edit_bias_desc, set_edit_bias_desc) = signal(String::new());
     let (edit_rigor, set_edit_rigor) = signal(String::new());
@@ -274,6 +275,7 @@ pub fn DebatePage() -> impl IntoView {
                     "agents": [{
                         "id": aid,
                         "name": edit_name.get_untracked(),
+                        "persona_description": edit_persona.get_untracked(),
                         "rigor_level": rigor,
                         "source_access": edit_source.get_untracked(),
                         "bias": {
@@ -527,6 +529,7 @@ pub fn DebatePage() -> impl IntoView {
                                         if editable {
                                             set_editing_agent.set(Some(aid.clone()));
                                             set_edit_name.set(agent_for_edit.name.clone());
+                                            set_edit_persona.set(agent_for_edit.persona_description.clone());
                                             set_edit_bias_label.set(if agent_for_edit.bias.is_neutral { "Neutral".into() } else { agent_for_edit.bias.label.clone() });
                                             set_edit_bias_desc.set(agent_for_edit.bias.description.clone());
                                             set_edit_rigor.set(format!("{:.0}", agent_for_edit.rigor_level * 100.0));
@@ -571,6 +574,10 @@ pub fn DebatePage() -> impl IntoView {
                                 <input type="text" prop:value=edit_name on:input=move |ev| set_edit_name.set(event_target_value(&ev)) style="width: 100%;" />
                             </div>
                             <div>
+                                <label>"Persona Description"</label>
+                                <textarea rows="3" prop:value=edit_persona on:input=move |ev| set_edit_persona.set(event_target_value(&ev)) style="width: 100%; resize: vertical;" />
+                            </div>
+                            <div>
                                 <label>"Rigor (%)"</label>
                                 <input type="number" min="0" max="100" prop:value=edit_rigor on:input=move |ev| set_edit_rigor.set(event_target_value(&ev)) style="width: 100%;" />
                             </div>
@@ -585,11 +592,11 @@ pub fn DebatePage() -> impl IntoView {
                             </div>
                             <div>
                                 <label>"Bias Label (\"Neutral\" for no bias)"</label>
-                                <input type="text" prop:value=edit_bias_label on:input=move |ev| set_edit_bias_label.set(event_target_value(&ev)) style="width: 100%;" />
+                                <textarea rows="2" prop:value=edit_bias_label on:input=move |ev| set_edit_bias_label.set(event_target_value(&ev)) style="width: 100%; resize: vertical;" />
                             </div>
                             <div>
                                 <label>"Bias Description"</label>
-                                <input type="text" prop:value=edit_bias_desc on:input=move |ev| set_edit_bias_desc.set(event_target_value(&ev)) style="width: 100%;" />
+                                <textarea rows="3" prop:value=edit_bias_desc on:input=move |ev| set_edit_bias_desc.set(event_target_value(&ev)) style="width: 100%; resize: vertical;" />
                             </div>
                             <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
                                 <button class="btn" on:click=move |_| set_editing_agent.set(None)>"Cancel"</button>
@@ -612,6 +619,7 @@ pub fn DebatePage() -> impl IntoView {
                     {current_rounds.into_iter().enumerate().map(|(idx, round)| {
                         let round_num = round.round_number + 1;
                         let turn_count = round.turns.len();
+                        let gap_count = round.gap_research.len();
                         let injection = round.user_injection.clone();
                         let agents_for_round = current_agents.clone();
                         let is_expanded = move || expanded_round.get() == Some(idx);
@@ -631,6 +639,7 @@ pub fn DebatePage() -> impl IntoView {
                                         <strong>{format!(" Round {}", round_num)}</strong>
                                         <span class="text-secondary" style="margin-left: 0.5rem; font-size: 0.85rem;">
                                             {format!("{} turns", turn_count)}
+                                            {(gap_count > 0).then(|| format!(" + {} gaps researched", gap_count))}
                                         </span>
                                         {injection.as_ref().map(|inj| view! {
                                             <span class="badge" style="font-size: 0.65rem; margin-left: 0.5rem;">
@@ -655,6 +664,31 @@ pub fn DebatePage() -> impl IntoView {
                                                 let agent = agents_for_round.iter().find(|a| a.id == turn.agent_id).cloned();
                                                 render_turn(turn.clone(), agent)
                                             }).collect::<Vec<_>>()}
+                                            // Gap research results
+                                            {(!round.gap_research.is_empty()).then(|| {
+                                                let gaps = round.gap_research.clone();
+                                                view! {
+                                                    <div style="margin-top: 0.75rem; padding: 0.6rem; background: rgba(46,204,113,0.08); border-radius: 4px; border-left: 3px solid var(--success);">
+                                                        <strong style="font-size: 0.85rem;"><i class="fa-solid fa-magnifying-glass-plus"></i>" Gap-Closing Research"</strong>
+                                                        {gaps.iter().map(|gr| {
+                                                            let ingested = gr.ingested;
+                                                            view! {
+                                                                <div style="margin-top: 0.4rem; font-size: 0.8rem;">
+                                                                    <div><i class="fa-solid fa-search"></i>{format!(" {}", gr.gap_query)}</div>
+                                                                    {gr.findings.iter().map(|f| {
+                                                                        view! { <div style="margin-left: 1rem; color: var(--text-secondary);">{format!("- {}", f)}</div> }
+                                                                    }).collect::<Vec<_>>()}
+                                                                    {ingested.then(|| view! {
+                                                                        <div style="margin-left: 1rem; color: var(--success); font-size: 0.75rem;">
+                                                                            <i class="fa-solid fa-database"></i>" Added to knowledge graph"
+                                                                        </div>
+                                                                    })}
+                                                                </div>
+                                                            }
+                                                        }).collect::<Vec<_>>()}
+                                                    </div>
+                                                }
+                                            })}
                                         </div>
                                     })
                                 }}
