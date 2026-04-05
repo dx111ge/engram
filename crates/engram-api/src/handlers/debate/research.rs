@@ -350,7 +350,7 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str) 
     let mut ingested = false;
 
     let t0 = std::time::Instant::now();
-    dbg_debate!("[gap] ===== START gap: \"{}\" =====", &original_query[..original_query.len().min(80)]);
+    dbg_debate!("[gap] ===== START gap: \"{}\" =====", original_query);
 
     // 1. Check graph first
     {
@@ -525,7 +525,7 @@ async fn query_sparql_endpoints(state: &AppState, gap_query: &str) -> Option<Gap
         eprintln!("[sparql] generated query for {}:\n{}", ep.name, &sparql[..sparql.len().min(500)]);
 
         // Step 2: Execute SPARQL
-        dbg_debate!("[sparql] >> querying {} url={}", ep.name, &ep.url[..ep.url.len().min(60)]);
+        dbg_debate!("[sparql] >> querying {} url={}", ep.name, ep.url);
         let mut req = client.get(&ep.url)
             .query(&[("query", sparql.as_str()), ("format", "json")])
             .timeout(std::time::Duration::from_secs(10))
@@ -762,7 +762,7 @@ fn format_sparql_results(data: &serde_json::Value) -> String {
 async fn search_wikipedia(state: &AppState, gap_query: &str) -> Option<GapAnswer> {
     let client = &state.http_client;
     let t0 = std::time::Instant::now();
-    dbg_debate!("[wikipedia] >> searching \"{}\"", &gap_query[..gap_query.len().min(60)]);
+    dbg_debate!("[wikipedia] >> searching \"{}\"", gap_query);
 
     // Step 1: Search Wikipedia for relevant articles
     let search_url = format!(
@@ -845,15 +845,17 @@ Article: "{}"
 {}
 
 You MUST return found=true if the article contains ANY of these:
-- Numbers, percentages, or statistics related to the topic
-- Dates, timelines, or trends
-- Names of organizations, countries, or people involved
-- General facts or context about the topic
+- Numbers, percentages, statistics, or data tables (even from other countries as baselines)
+- Dates, timelines, trends, or time series data
+- Names of organizations, countries, or people involved in the broader topic
+- Comparative or contextual data that could inform analysis (e.g., global averages, peer country data)
+- Economic indicators, production figures, trade volumes, even if from a different country
+- General facts or context about the topic area
 
-Only return found=false if the article is completely unrelated to the question.
+Only return found=false if the article is completely unrelated to the BROAD TOPIC AREA (not just the specific question).
 
 Return ONLY this JSON (no other text, no code fences):
-{{"found": true, "answer": "2-4 sentences summarizing what this article says about the topic, include all numbers and facts"}}
+{{"found": true, "answer": "2-4 sentences summarizing ALL data and statistics in this article, noting the country/context. Include all numbers, percentages, dates, and comparisons."}}
 or
 {{"found": false}}"#,
         gap_query, title, &content[..content.len().min(4000)]
@@ -861,7 +863,7 @@ or
 
     let request = serde_json::json!({
         "messages": [
-            {"role": "system", "content": "You extract information from articles. Be generous -- if the article is even remotely related to the question, return found=true with a summary. Return ONLY raw JSON, no markdown fences."},
+            {"role": "system", "content": "You extract information from articles for intelligence analysis. Return found=true if the article contains ANY data that could inform analysis of the topic -- including comparative baselines, contextual statistics, or related data from other countries/sectors. A US industrial production report IS relevant when analyzing Russian production because it provides comparison data. Return ONLY raw JSON, no markdown fences."},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.1,
@@ -1139,7 +1141,7 @@ pub async fn execute_web_search_structured(state: &AppState, query: &str) -> Vec
 
     let t0 = std::time::Instant::now();
     dbg_debate!("[search] >> query=\"{}\"{}",
-        &query[..query.len().min(60)],
+        query,
         if search_query.len() < query.len() { format!(" (truncated to {} chars)", search_query.len()) } else { String::new() });
     match crate::handlers::web_search::search(state, search_query).await {
         Ok(results) => {
@@ -1171,11 +1173,154 @@ pub async fn fetch_article_content_debug(url: &str) -> Option<String> {
     fetch_article_content(&client, url).await
 }
 
+/// Domains that always block scrapers -- skip to save time.
+const BLOCKED_DOMAINS: &[&str] = &[
+    "studylibid.com", "studylib.net", "doczz.net", "scribd.com",
+    "academia.edu", "researchgate.net", "jstor.org",
+];
+
+/// Detect machine-readable download links in HTML (CSV, JSON, XML, XLSX, ASCII).
+/// Scans full page for href attributes pointing to data files.
+/// Returns the first usable download URL found.
+fn find_data_download_link(html: &str, base_url: &str) -> Option<String> {
+    let extensions = [".csv", ".json", ".xml", ".xlsx", ".tsv", ".xls", ".ascii"];
+    let lower = html.to_lowercase();
+
+    // Scan all href="..." occurrences in the page
+    for (pos, _) in lower.match_indices("href=\"") {
+        let after = &lower[pos + 6..];
+        let end = match after.find('"') {
+            Some(e) if e < 500 => e, // reasonable URL length
+            _ => continue,
+        };
+        let href = &html[pos + 6..pos + 6 + end]; // use original case from html
+
+        // Check if href points to a data file
+        let href_lower = href.to_lowercase();
+        let matched_ext = extensions.iter().find(|ext| href_lower.ends_with(*ext) || href_lower.contains(&format!("{}?", ext)));
+        if matched_ext.is_none() {
+            // Also check for "download" or "export" in the href
+            if !href_lower.contains("download") && !href_lower.contains("export") {
+                continue;
+            }
+            // download/export links must also have a data-ish extension or format param
+            if !extensions.iter().any(|ext| href_lower.contains(ext)) && !href_lower.contains("format=csv") && !href_lower.contains("format=json") {
+                continue;
+            }
+        }
+
+        if href.contains("javascript:") { continue; }
+
+        let full_url = if href.starts_with("http") {
+            href.to_string()
+        } else if href.starts_with('/') {
+            format!("{}{}", base_url, href)
+        } else {
+            continue;
+        };
+
+        let ext_name = matched_ext.map(|e| &e[1..]).unwrap_or("data");
+        dbg_debate!("[fetch] found data link: {} ({})", &full_url[..full_url.len().min(100)], ext_name);
+        return Some(full_url);
+    }
+    None
+}
+
+/// Extract HTML tables as markdown-formatted text, preserving structure.
+/// Returns extracted table text if tables with numeric data are found.
+fn extract_html_tables(html: &str, max_tables: usize) -> Option<String> {
+    let mut result = String::new();
+    let mut tables_found = 0;
+    let lower = html.to_lowercase();
+
+    // Find <table> blocks
+    let mut search_from = 0;
+    while tables_found < max_tables {
+        let table_start = match lower[search_from..].find("<table") {
+            Some(pos) => search_from + pos,
+            None => break,
+        };
+        let table_end = match lower[table_start..].find("</table>") {
+            Some(pos) => table_start + pos + 8,
+            None => break,
+        };
+        search_from = table_end;
+
+        let table_html = &html[table_start..table_end];
+        // Only extract tables that look like they have data (numbers)
+        let has_numbers = table_html.chars().filter(|c| c.is_ascii_digit()).count() > 5;
+        if !has_numbers { continue; }
+
+        // Simple extraction: strip tags, preserve rows
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut current_row: Vec<String> = Vec::new();
+        let mut in_cell = false;
+        let mut cell_content = String::new();
+        let table_lower = table_html.to_lowercase();
+
+        let mut i = 0;
+        let chars: Vec<char> = table_html.chars().collect();
+        while i < chars.len() {
+            if i + 3 < chars.len() && &table_lower[i..i+3] == "<tr" {
+                current_row = Vec::new();
+                // Skip to end of tag
+                while i < chars.len() && chars[i] != '>' { i += 1; }
+            } else if i + 4 < chars.len() && &table_lower[i..i+4] == "</tr" {
+                if !current_row.is_empty() { rows.push(current_row.clone()); }
+                while i < chars.len() && chars[i] != '>' { i += 1; }
+            } else if i + 3 < chars.len() && (&table_lower[i..i+3] == "<td" || &table_lower[i..i+3] == "<th") {
+                in_cell = true;
+                cell_content.clear();
+                while i < chars.len() && chars[i] != '>' { i += 1; }
+            } else if i + 4 < chars.len() && (&table_lower[i..i+4] == "</td" || &table_lower[i..i+4] == "</th") {
+                in_cell = false;
+                let clean = cell_content.trim().replace('\n', " ");
+                let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+                current_row.push(clean);
+                while i < chars.len() && chars[i] != '>' { i += 1; }
+            } else if in_cell {
+                if chars[i] == '<' {
+                    // Skip inner tags
+                    while i < chars.len() && chars[i] != '>' { i += 1; }
+                } else {
+                    cell_content.push(chars[i]);
+                }
+            }
+            i += 1;
+        }
+
+        if rows.len() >= 2 {
+            tables_found += 1;
+            result.push_str(&format!("\n[Table {}]\n", tables_found));
+            for row in &rows {
+                result.push_str(&row.join(" | "));
+                result.push('\n');
+            }
+        }
+    }
+
+    if tables_found > 0 {
+        dbg_debate!("[fetch] extracted {} tables ({} chars)", tables_found, result.len());
+        Some(result)
+    } else {
+        None
+    }
+}
+
 /// Fetch article content from a URL using dom_smoothie (Mozilla Readability).
+/// For large pages: extracts tables and scans for data download links first.
 /// Returns extracted plain text, or None on failure.
 async fn fetch_article_content(client: &reqwest::Client, url: &str) -> Option<String> {
     let url_short = &url[..url.len().min(80)];
     let t0 = std::time::Instant::now();
+
+    // Skip known-blocked domains
+    if let Some(domain) = url.split('/').nth(2) {
+        if BLOCKED_DOMAINS.iter().any(|d| domain.contains(d)) {
+            dbg_debate!("[fetch] SKIP blocked domain {} | {}", domain, url_short);
+            return None;
+        }
+    }
 
     let fetch_url = if url.contains("reddit.com/") && !url.contains("old.reddit.com") {
         url.replace("www.reddit.com", "old.reddit.com")
@@ -1209,18 +1354,56 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str) -> Option<St
     dbg_debate!("[fetch] body {} bytes in {:.1}s | {}", html.len(), t0.elapsed().as_secs_f32(), url_short);
     if html.len() < 200 { return None; }
 
-    // Cap HTML size to prevent dom_smoothie from spending too long on huge pages
-    let html_capped = if html.len() > 500_000 {
-        dbg_debate!("[fetch] SKIP html too large ({} bytes) | {}", html.len(), url_short);
-        return None;
-    } else {
-        html
-    };
+    // Always scan for machine-readable data links first (CSV, JSON, XML)
+    // These are more valuable than any HTML extraction
+    let base_origin = url.split('/').take(3).collect::<Vec<_>>().join("/");
+    if let Some(data_url) = find_data_download_link(&html, &base_origin) {
+        dbg_debate!("[fetch] >> fetching data link: {}", &data_url[..data_url.len().min(80)]);
+        if let Ok(data_resp) = client.get(&data_url)
+            .timeout(std::time::Duration::from_secs(10))
+            .header("User-Agent", "Mozilla/5.0 (compatible; engram/1.1)")
+            .send().await
+        {
+            if data_resp.status().is_success() {
+                if let Ok(data_text) = data_resp.text().await {
+                    let capped = &data_text[..data_text.len().min(8000)];
+                    dbg_debate!("[fetch] << data link OK {} chars | {}", capped.len(), &data_url[..data_url.len().min(60)]);
+                    return Some(capped.to_string());
+                }
+            }
+        }
+    }
 
-    // dom_smoothie is synchronous -- run on blocking thread to avoid starving tokio
+    // For large pages (>500KB): extract tables + readability fallback
+    if html.len() > 500_000 {
+        dbg_debate!("[fetch] large page ({} bytes), trying table extraction | {}", html.len(), url_short);
+
+        // Extract HTML tables (preserve structure as markdown)
+        if let Some(tables) = extract_html_tables(&html[..html.len().min(2_000_000)], 5) {
+            if tables.len() > 200 {
+                let capped = &tables[..tables.len().min(6000)];
+                dbg_debate!("[fetch] << DONE {:.1}s result=TABLES ({} chars) | {}", t0.elapsed().as_secs_f32(), capped.len(), url_short);
+                return Some(capped.to_string());
+            }
+        }
+
+        // 3. Last resort for large pages: take first 500KB through readability
+        dbg_debate!("[fetch] large page: no tables/data links, trying readability on first 500KB | {}", url_short);
+        let html_capped = html[..500_000].to_string();
+        let parse_result = tokio::task::spawn_blocking(move || {
+            let mut readability = dom_smoothie::Readability::new(html_capped, None, None).ok()?;
+            let article = readability.parse().ok()?;
+            let text = article.text_content.to_string().trim().to_string();
+            if text.len() > 100 { Some(text) } else { None }
+        }).await.ok().flatten();
+        dbg_debate!("[fetch] << DONE {:.1}s result={} | {}", t0.elapsed().as_secs_f32(), if parse_result.is_some() { "OK" } else { "EMPTY" }, url_short);
+        return parse_result;
+    }
+
+    // Normal path for pages < 500KB: readability extraction
     let parse_result = tokio::task::spawn_blocking(move || {
         let t_parse = std::time::Instant::now();
-        let mut readability = dom_smoothie::Readability::new(html_capped, None, None).ok()?;
+        let mut readability = dom_smoothie::Readability::new(html, None, None).ok()?;
         let article = readability.parse().ok()?;
         let text = article.text_content.to_string().trim().to_string();
         dbg_debate!("[fetch] parsed {} chars in {:.1}s", text.len(), t_parse.elapsed().as_secs_f32());

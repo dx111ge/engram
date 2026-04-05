@@ -11,7 +11,23 @@
 
 use crate::state::AppState;
 use std::sync::LazyLock;
+use std::sync::RwLock as StdRwLock;
 use tokio::sync::Mutex;
+
+/// Cached pool of public SearxNG instances from searx.space
+struct SearxPool {
+    instances: Vec<String>,  // URLs sorted by quality
+    fetched_at: std::time::Instant,
+    unhealthy: std::collections::HashMap<String, std::time::Instant>,  // url -> unhealthy_since
+}
+
+static SEARX_POOL: LazyLock<StdRwLock<SearxPool>> = LazyLock::new(|| {
+    StdRwLock::new(SearxPool {
+        instances: Vec::new(),
+        fetched_at: std::time::Instant::now(),
+        unhealthy: std::collections::HashMap::new(),
+    })
+});
 
 /// A single web search result.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -44,7 +60,7 @@ pub async fn search(state: &AppState, query: &str) -> Result<Vec<WebSearchResult
     let client = &state.http_client;
 
     let t0 = std::time::Instant::now();
-    dbg_debate!("[websearch] >> provider={} query=\"{}\"", provider, &query[..query.len().min(50)]);
+    dbg_debate!("[websearch] >> provider={} query=\"{}\"", provider, query);
     let result = match provider.as_str() {
         "searxng" => search_searxng(client, query, search_url.as_deref(), "").await,
         "brave"   => search_brave(&client, query, &api_key).await,
@@ -77,7 +93,7 @@ pub async fn search_with_time_range(
     let client = &state.http_client;
 
     let t0 = std::time::Instant::now();
-    dbg_debate!("[websearch] >> provider={} query=\"{}\" time_range={}", provider, &query[..query.len().min(50)], time_range);
+    dbg_debate!("[websearch] >> provider={} query=\"{}\" time_range={}", provider, query, time_range);
     let result = match provider.as_str() {
         "searxng" => search_searxng(client, query, search_url.as_deref(), time_range).await,
         "brave"   => search_brave(&client, query, &api_key).await,
@@ -116,6 +132,79 @@ async fn rate_limit_searxng() {
     *last = std::time::Instant::now();
 }
 
+// ── SearxNG fallback pool (searx.space) ────────────────────────────────
+
+/// Fetch public SearxNG instances from searx.space, filter for healthy ones.
+async fn refresh_searx_pool(client: &reqwest::Client) {
+    let url = "https://searx.space/data/instances.json";
+    let resp = match client.get(url).timeout(std::time::Duration::from_secs(10)).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => { dbg_debate!("[websearch] failed to fetch searx.space instance list"); return; }
+    };
+    let data: serde_json::Value = match resp.json().await {
+        Ok(d) => d,
+        _ => return,
+    };
+    let instances = data.get("instances").and_then(|i| i.as_object());
+    let Some(instances) = instances else { return };
+
+    let mut good: Vec<(String, f64)> = Vec::new();
+    for (url, info) in instances {
+        let status = info.pointer("/http/status_code").and_then(|s| s.as_u64()).unwrap_or(0);
+        let grade = info.pointer("/http/grade").and_then(|g| g.as_str()).unwrap_or("");
+        let timing = info.pointer("/timing/search/mean").and_then(|t| t.as_f64()).unwrap_or(99.0);
+        // Only grade A+, A, or B with status 200
+        if status == 200 && matches!(grade, "A+" | "A" | "B") {
+            let search_url = if url.ends_with('/') { format!("{}search", url) } else { format!("{}/search", url) };
+            good.push((search_url, timing));
+        }
+    }
+    // Sort by response time (fastest first)
+    good.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let urls: Vec<String> = good.into_iter().map(|(u, _)| u).collect();
+    dbg_debate!("[websearch] refreshed searx.space pool: {} healthy instances", urls.len());
+
+    if let Ok(mut pool) = SEARX_POOL.write() {
+        pool.instances = urls;
+        pool.fetched_at = std::time::Instant::now();
+    }
+}
+
+/// Get a list of healthy fallback SearxNG URLs to try.
+fn get_fallback_urls() -> Vec<String> {
+    let pool = match SEARX_POOL.read() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let now = std::time::Instant::now();
+    pool.instances.iter()
+        .filter(|url| {
+            // Skip if marked unhealthy within last 5 minutes
+            pool.unhealthy.get(*url)
+                .map(|since| now.duration_since(*since) > std::time::Duration::from_secs(300))
+                .unwrap_or(true)
+        })
+        .take(5)  // Try at most 5 fallbacks
+        .cloned()
+        .collect()
+}
+
+/// Mark an instance as unhealthy (skip for 5 minutes).
+fn mark_unhealthy(url: &str) {
+    if let Ok(mut pool) = SEARX_POOL.write() {
+        pool.unhealthy.insert(url.to_string(), std::time::Instant::now());
+    }
+}
+
+/// Check if the pool needs refreshing (older than 1 hour).
+fn pool_needs_refresh() -> bool {
+    match SEARX_POOL.read() {
+        Ok(pool) => pool.fetched_at.elapsed() > std::time::Duration::from_secs(3600) || pool.instances.is_empty(),
+        Err(_) => true,
+    }
+}
+
 // ── Provider implementations ────────────────────────────────────────────
 
 async fn search_searxng(
@@ -124,18 +213,70 @@ async fn search_searxng(
     base_url: Option<&str>,
     time_range: &str,
 ) -> Result<Vec<WebSearchResult>, String> {
-    let base = match base_url {
-        Some(url) if !url.is_empty() => url,
-        _ => {
-            let msg = "searxng configured but web_search_url is not set";
-            eprintln!("[web_search] {}", msg);
-            return Err(msg.to_string());
+    let has_local = matches!(base_url, Some(url) if !url.is_empty());
+
+    // Try local/configured instance first (with rate limiting)
+    if has_local {
+        let base = base_url.unwrap();
+        rate_limit_searxng().await;
+        match searxng_single_request(client, base, query, time_range).await {
+            Ok(results) if !results.is_empty() => return Ok(results),
+            Ok(_) => {
+                dbg_debate!("[websearch] local searxng returned 0 results, trying fallbacks");
+            }
+            Err(e) => {
+                dbg_debate!("[websearch] local searxng failed: {}, trying fallbacks", e);
+            }
         }
-    };
+    } else {
+        dbg_debate!("[websearch] no local searxng configured, trying fallbacks from searx.space");
+    }
 
-    // Rate limit to protect upstream engines
-    rate_limit_searxng().await;
+    // If primary failed or returned nothing, try fallbacks from searx.space pool
+    if pool_needs_refresh() {
+        refresh_searx_pool(client).await;
+    }
+    let fallbacks = get_fallback_urls();
+    if fallbacks.is_empty() {
+        let msg = if has_local {
+            "searxng: local instance returned no results and no fallbacks available".to_string()
+        } else {
+            "searxng configured but web_search_url is not set and no fallbacks available".to_string()
+        };
+        eprintln!("[web_search] {}", msg);
+        return Err(msg);
+    }
 
+    for fallback_url in &fallbacks {
+        dbg_debate!("[websearch] trying fallback: {}", fallback_url);
+        // No rate limiting for public instances -- they have their own limits
+        match searxng_single_request(client, fallback_url, query, time_range).await {
+            Ok(results) if !results.is_empty() => {
+                eprintln!("[web_search] searxng fallback: {} results from {}", results.len(), fallback_url);
+                return Ok(results);
+            }
+            Ok(_) => {
+                dbg_debate!("[websearch] fallback {} returned 0 results", fallback_url);
+            }
+            Err(e) => {
+                dbg_debate!("[websearch] fallback {} failed: {}", fallback_url, e);
+                mark_unhealthy(fallback_url);
+            }
+        }
+    }
+
+    let msg = format!("searxng: all {} fallbacks exhausted, no results", fallbacks.len());
+    eprintln!("[web_search] {}", msg);
+    Err(msg)
+}
+
+/// Execute a single SearxNG search request against one instance.
+async fn searxng_single_request(
+    client: &reqwest::Client,
+    base: &str,
+    query: &str,
+    time_range: &str,
+) -> Result<Vec<WebSearchResult>, String> {
     let time_param = if !time_range.is_empty() {
         format!("&time_range={}", urlencoding::encode(time_range))
     } else {
@@ -202,7 +343,6 @@ async fn search_searxng(
     }
 
     if results.is_empty() {
-        // Log which engines responded (helps diagnose rate limiting)
         let num_results = data.get("number_of_results").and_then(|n| n.as_u64()).unwrap_or(0);
         eprintln!("[web_search] searxng: 0 results (number_of_results={}) for \"{}\"",
             num_results, &query[..query.len().min(60)]);
