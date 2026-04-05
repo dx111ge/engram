@@ -160,13 +160,14 @@ pub(crate) const LLM_PRESETS: &[LlmPreset] = &[
         id: "ollama", name: "Ollama (Recommended)", endpoint: "http://localhost:11434/v1/chat/completions",
         needs_key: false, quality: "Good (local models)", privacy: "Local", cost: "Free",
         models: &[
-            ("llama3.2", "3B, fast, good quality"),
-            ("phi4", "14B, excellent reasoning"),
-            ("mistral", "7B, balanced"),
-            ("gemma3", "4B, efficient"),
-            ("qwen3", "8B, strong multilingual"),
+            ("llama3.2", "3B, fast but limited JSON quality"),
+            ("phi4", "14B, excellent reasoning, recommended"),
+            ("mistral", "7B, balanced speed/quality"),
+            ("gemma3", "4B, efficient, thinks by default"),
+            ("qwen3", "8B, multilingual, thinking model"),
+            ("gemma4:e4b", "47B, high quality, thinks by default"),
         ],
-        default_model: "llama3.2",
+        default_model: "phi4",
         can_fetch_models: true,
     },
     LlmPreset {
@@ -235,7 +236,7 @@ pub(crate) const LLM_PRESETS: &[LlmPreset] = &[
     },
 ];
 
-pub(crate) const THINKING_MODELS: &[&str] = &["deepseek-r1", "deepseek-reasoner", "qwq", "o3-mini"];
+pub(crate) const THINKING_MODELS: &[&str] = &["deepseek-r1", "deepseek-reasoner", "qwq", "qwen3", "o3-mini", "gemma4"];
 
 /// Parse ONNX status JSON into human-readable string
 pub(crate) fn parse_onnx_status(text: &str) -> String {

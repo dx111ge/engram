@@ -391,75 +391,127 @@ pub fn DebatePage() -> impl IntoView {
                         <h3>"Start Analysis"</h3>
 
                         // Mode selector
-                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                        <div class="debate-modes">
                             {[
-                                ("analyze", "fa-search", "Analyze", "What is/will happen?"),
-                                ("red_team", "fa-crosshairs", "Red Team", "How to achieve/break X?"),
-                                ("outcome_engineering", "fa-bullseye", "Outcome Eng.", "What must be true for X?"),
-                                ("scenario_forecast", "fa-code-branch", "Scenarios", "Map possible futures"),
-                                ("stakeholder_simulation", "fa-users-cog", "Stakeholders", "How will actors react?"),
-                                ("premortem", "fa-skull-crossbones", "Pre-mortem", "Why did plan X fail?"),
-                                ("decision_matrix", "fa-th-list", "Decision", "A vs B vs C?"),
-                            ].into_iter().map(|(val, icon, label, desc)| {
+                                ("analyze", "fa-search", "Analyze", "#4a9eff",
+                                 "What is happening? What's likely?",
+                                 "Diverse analysts with different biases debate evidence to answer your question. Best for intelligence questions and situational assessment."),
+                                ("red_team", "fa-crosshairs", "Red Team", "#e74c3c",
+                                 "How to achieve X? What breaks it?",
+                                 "Strategists propose plans while red team members attack them. Finds vulnerabilities, counter-strategies, and resource gaps."),
+                                ("outcome_engineering", "fa-bullseye", "Outcome Engineering", "#e67e22",
+                                 "What must be true for X to happen?",
+                                 "Works backwards from a desired end state. Maps dependency chains, blocking factors, and highest-leverage intervention points."),
+                                ("scenario_forecast", "fa-code-branch", "Scenario Forecast", "#9b59b6",
+                                 "What are the plausible futures?",
+                                 "Each agent builds one distinct scenario: best case, worst case, most likely, wild card. Identifies branching conditions and early warnings."),
+                                ("stakeholder_simulation", "fa-users-cog", "Stakeholder Simulation", "#1abc9c",
+                                 "How will real-world actors react?",
+                                 "Each agent becomes a real-world player (country, org, leader) and argues from their actual interests. Predicts moves and reaction chains."),
+                                ("premortem", "fa-skull-crossbones", "Pre-mortem", "#c0392b",
+                                 "Assume plan X failed. Why?",
+                                 "Pessimistic agents each find a different failure mode: technical, human, external, adversarial, slow-onset. Ranked by probability and severity."),
+                                ("decision_matrix", "fa-th-list", "Decision Matrix", "#2ecc71",
+                                 "Should we do A, B, or C?",
+                                 "One advocate per option plus neutral evaluators. Scores on cost, risk, speed, impact, and feasibility. Produces ranked recommendation."),
+                            ].into_iter().map(|(val, icon, label, color, question, desc)| {
                                 let val_s = val.to_string();
                                 let val_c = val.to_string();
                                 view! {
-                                    <button
-                                        class=move || if debate_mode.get() == val_s { "btn btn-primary" } else { "btn" }
-                                        style="flex: 1; min-width: 120px; text-align: left; padding: 0.5rem;"
+                                    <div
+                                        class=move || if debate_mode.get() == val_s { "debate-mode-card active" } else { "debate-mode-card" }
+                                        style=format!("--mode-color: {}", color)
                                         on:click=move |_| { set_debate_mode.set(val_c.clone()); }
                                     >
-                                        <div><i class=format!("fa-solid {}", icon)></i>{format!(" {}", label)}</div>
-                                        <div style="font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.2rem;">{desc}</div>
-                                    </button>
+                                        <div class="debate-mode-header">
+                                            <span class="debate-mode-icon"><i class=format!("fa-solid {}", icon)></i></span>
+                                            <span class="debate-mode-title">{label}</span>
+                                        </div>
+                                        <div class="debate-mode-question">{question}</div>
+                                        <div class="debate-mode-desc">{desc}</div>
+                                    </div>
                                 }
                             }).collect::<Vec<_>>()}
                         </div>
 
-                        <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: end;">
-                            <div style="flex: 1; min-width: 300px;">
-                                <label>"Topic / Question"</label>
-                                <input type="text" placeholder="e.g., What will happen to oil prices if Iran closes the Strait of Hormuz?"
-                                    prop:value=topic on:input=move |ev| set_topic.set(event_target_value(&ev))
-                                    style="width: 100%;" />
-                            </div>
-                            <div style="width: 100px;">
-                                <label>"Agents"</label>
-                                <select prop:value=agent_count on:change=move |ev| set_agent_count.set(event_target_value(&ev))>
-                                    <option value="2">"2"</option><option value="3">"3"</option>
-                                    <option value="4">"4"</option><option value="5" selected>"5"</option>
-                                    <option value="6">"6"</option><option value="7">"7"</option><option value="8">"8"</option>
-                                </select>
-                            </div>
-                            <div style="width: 100px;">
-                                <label>"Rounds"</label>
-                                <select prop:value=max_rounds_input on:change=move |ev| set_max_rounds_input.set(event_target_value(&ev))>
-                                    <option value="1">"1"</option><option value="2">"2"</option>
-                                    <option value="3" selected>"3"</option><option value="4">"4"</option><option value="5">"5"</option>
-                                </select>
-                            </div>
-                        </div>
-
-                        // Mode-specific input
+                        // Unified input area -- adapts labels and fields to the selected mode
                         {move || {
                             let m = debate_mode.get();
-                            let (label, placeholder) = match m.as_str() {
-                                "red_team" => ("Desired Outcome", "e.g., End the war in favor of Ukraine within 12 months"),
-                                "outcome_engineering" => ("Desired End State", "e.g., Iran agrees to open negotiations on nuclear deal"),
-                                "stakeholder_simulation" => ("Actors to Simulate", "e.g., Russia, Ukraine, USA, China, EU, NATO"),
-                                "premortem" => ("Plan to Stress-Test", "e.g., EU implements full oil embargo on Iran by Q3 2026"),
-                                "decision_matrix" => ("Options to Evaluate", "e.g., Option A: Full embargo | Option B: Targeted sanctions | Option C: Diplomatic engagement"),
-                                _ => ("", ""),
+                            let (topic_label, topic_placeholder, extra_label, extra_placeholder) = match m.as_str() {
+                                "red_team" => (
+                                    "Topic / Context",
+                                    "e.g., Our company's migration to microservices and its impact on reliability",
+                                    Some("Desired Outcome"),
+                                    Some("What should be achieved? e.g., Zero-downtime deployments within 6 months"),
+                                ),
+                                "outcome_engineering" => (
+                                    "Topic / Context",
+                                    "e.g., Reducing urban traffic congestion in a growing metropolitan area",
+                                    Some("Desired End State"),
+                                    Some("What end state should be reverse-engineered? e.g., 30% reduction in peak-hour commute times"),
+                                ),
+                                "stakeholder_simulation" => (
+                                    "Scenario / Situation",
+                                    "e.g., A major tech company announces open-sourcing its AI models -- how will key actors respond?",
+                                    Some("Actors to Simulate"),
+                                    Some("Comma-separated list: e.g., Competitors, Regulators, Open-source community, Investors"),
+                                ),
+                                "premortem" => (
+                                    "Topic / Context",
+                                    "e.g., Product launch strategy for a new SaaS platform",
+                                    Some("Plan to Stress-Test"),
+                                    Some("What plan has already 'failed'? e.g., The freemium launch flopped and user acquisition stalled at 1000"),
+                                ),
+                                "decision_matrix" => (
+                                    "Decision Context",
+                                    "e.g., How should our team handle the growing technical debt in the payment system?",
+                                    Some("Options to Evaluate"),
+                                    Some("Pipe-separated: e.g., Full rewrite | Incremental refactor | Buy a vendor solution"),
+                                ),
+                                "scenario_forecast" => (
+                                    "Topic / Situation to Forecast",
+                                    "e.g., How will remote work policies evolve in the tech industry over the next 5 years?",
+                                    None, None,
+                                ),
+                                _ => (
+                                    "Topic / Question",
+                                    "e.g., What are the implications of quantum computing on current encryption standards?",
+                                    None, None,
+                                ),
                             };
-                            if label.is_empty() { return None; }
-                            Some(view! {
-                                <div style="margin-top: 0.75rem;">
-                                    <label>{label}</label>
-                                    <textarea rows="2" placeholder=placeholder
-                                        prop:value=mode_input on:input=move |ev| set_mode_input.set(event_target_value(&ev))
-                                        style="width: 100%; resize: vertical;" />
+                            view! {
+                                <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: end;">
+                                    <div style="flex: 1; min-width: 300px;">
+                                        <label>{topic_label}</label>
+                                        <input type="text" placeholder=topic_placeholder
+                                            prop:value=topic on:input=move |ev| set_topic.set(event_target_value(&ev))
+                                            style="width: 100%;" />
+                                    </div>
+                                    <div style="width: 100px;">
+                                        <label>"Agents"</label>
+                                        <select prop:value=agent_count on:change=move |ev| set_agent_count.set(event_target_value(&ev))>
+                                            <option value="2">"2"</option><option value="3">"3"</option>
+                                            <option value="4">"4"</option><option value="5" selected>"5"</option>
+                                            <option value="6">"6"</option><option value="7">"7"</option><option value="8">"8"</option>
+                                        </select>
+                                    </div>
+                                    <div style="width: 100px;">
+                                        <label>"Rounds"</label>
+                                        <select prop:value=max_rounds_input on:change=move |ev| set_max_rounds_input.set(event_target_value(&ev))>
+                                            <option value="1">"1"</option><option value="2">"2"</option>
+                                            <option value="3" selected>"3"</option><option value="4">"4"</option><option value="5">"5"</option>
+                                        </select>
+                                    </div>
                                 </div>
-                            })
+                                {extra_label.map(|lbl| view! {
+                                    <div style="margin-top: 0.75rem;">
+                                        <label>{lbl}</label>
+                                        <textarea rows="2" placeholder=extra_placeholder.unwrap_or("")
+                                            prop:value=mode_input on:input=move |ev| set_mode_input.set(event_target_value(&ev))
+                                            style="width: 100%; resize: vertical;" />
+                                    </div>
+                                })}
+                            }
                         }}
 
                         <div style="margin-top: 0.75rem;">

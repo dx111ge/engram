@@ -15,6 +15,7 @@ pub struct DebateSession {
     pub rounds: Vec<DebateRound>,
     pub current_round: usize,
     pub max_rounds: usize,
+    pub selection: Option<SelectionResult>,
     pub synthesis: Option<Synthesis>,
     pub created_at: std::time::Instant,
     pub notify: Arc<Notify>,
@@ -310,6 +311,10 @@ pub struct Synthesis {
     pub key_tensions: Vec<String>,
     pub recommended_investigations: Vec<String>,
     pub agent_positions: Vec<AgentPosition>,
+    /// Raw LLM JSON when the model produces non-standard output.
+    /// Ensures no data is lost even if the model ignores our schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_llm_output: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -346,6 +351,54 @@ pub struct AgreementPoint { pub statement: String, pub agents: Vec<String>, pub 
 pub struct DisagreementPoint { pub statement: String, pub positions: Vec<(String, String)> }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgentPosition { pub agent_id: String, pub agent_name: String, pub final_position: String, pub confidence: f32, pub evidence_count: usize }
+
+// ── Selection (Layer 0: Select-then-Refine) ────────────────────────────
+
+/// Result of the pre-synthesis selection step.
+/// Scores each agent's final position and selects the strongest for refinement.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SelectionResult {
+    /// Per-agent scoring.
+    pub scores: Vec<AgentScore>,
+    /// ID of the selected (winning) agent.
+    pub selected_agent_id: String,
+    /// Name of the selected agent.
+    pub selected_agent_name: String,
+    /// The selected agent's final position (verbatim).
+    pub selected_position: String,
+    /// Best counterpoints extracted from non-selected agents.
+    pub best_counterpoints: Vec<Counterpoint>,
+    /// Brief rationale for why this agent was selected.
+    pub selection_rationale: String,
+}
+
+/// Scoring of a single agent's final position.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgentScore {
+    pub agent_id: String,
+    pub agent_name: String,
+    /// Evidence quality: how well-sourced and verifiable (0-10).
+    pub evidence_quality: f32,
+    /// Internal consistency: no contradictions within their argument (0-10).
+    pub internal_consistency: f32,
+    /// Counterargument handling: did they engage with opposing views? (0-10).
+    pub counterargument_handling: f32,
+    /// Confidence calibration: does stated confidence match evidence strength? (0-10).
+    pub confidence_calibration: f32,
+    /// Weighted total score.
+    pub total_score: f32,
+}
+
+/// A counterpoint extracted from a non-selected agent that strengthens the final analysis.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Counterpoint {
+    pub agent_id: String,
+    pub agent_name: String,
+    /// The counterpoint or insight worth preserving.
+    pub point: String,
+    /// Why this matters for the final analysis.
+    pub relevance: String,
+}
 
 // ── Request/response types ──────────────────────────────────────────────
 

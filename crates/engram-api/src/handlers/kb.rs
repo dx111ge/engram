@@ -197,10 +197,7 @@ pub async fn test_kb_endpoint(
     };
 
     let start = std::time::Instant::now();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let client = &state.http_client;
 
     match client.get(&url).send().await {
         Ok(resp) => {

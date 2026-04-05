@@ -196,7 +196,7 @@ pub async fn download_onnx_model(
         }
     }
 
-    let client = reqwest::Client::new();
+    let client = state.http_client.clone();
 
     // Download tokenizer first (small, quick validation)
     tracing::info!("downloading tokenizer from {}", tokenizer_url);
@@ -306,10 +306,7 @@ pub async fn ollama_pull(
     let pull_url = format!("{}/api/pull", base);
     tracing::info!("pulling Ollama model '{}' from {}", model, pull_url);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(600)) // 10 min timeout for large models
-        .build()
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("client error: {e}")))?;
+    let client = &state.http_client;
 
     let resp = client.post(&pull_url)
         .json(&serde_json::json!({ "name": model, "stream": false }))
@@ -347,6 +344,7 @@ pub async fn ollama_pull(
 ///
 /// Downloads all required ONNX files + tokenizer + config to `~/.engram/models/gliner2/<model>/`.
 pub async fn download_gliner2_model(
+    State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<serde_json::Value> {
     use tokio::io::AsyncWriteExt;
@@ -383,7 +381,7 @@ pub async fn download_gliner2_model(
         .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create dir: {e}")))?;
 
     let base_url = format!("https://huggingface.co/{}/resolve/main", repo_id);
-    let client = reqwest::Client::new();
+    let client = &state.http_client;
 
     // Files to download: config first (tells us which ONNX files to get)
     let config_files = vec![
@@ -486,6 +484,7 @@ pub async fn download_gliner2_model(
 ///
 /// For air-gapped systems, use `/config/model-upload` instead.
 pub async fn download_ner_model(
+    State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<serde_json::Value> {
     use tokio::io::AsyncWriteExt;
@@ -537,7 +536,7 @@ pub async fn download_ner_model(
     let model_url = format!("{}/{}", base_url, onnx_filename);
     let tokenizer_url = format!("{}/tokenizer.json", base_url);
 
-    let client = reqwest::Client::new();
+    let client = &state.http_client;
 
     // Download tokenizer first (small, ~16 MB)
     tracing::info!(model = %model_id, "downloading tokenizer.json");
@@ -596,6 +595,7 @@ pub async fn download_ner_model(
 
 /// Legacy endpoint: download ONNX-format NER model files from HuggingFace URLs.
 pub async fn download_ner_model_onnx(
+    State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<serde_json::Value> {
     use tokio::io::AsyncWriteExt;
@@ -645,7 +645,7 @@ pub async fn download_ner_model_onnx(
         }
     }
 
-    let client = reqwest::Client::new();
+    let client = &state.http_client;
 
     // Download tokenizer first (small)
     tracing::info!("NER: downloading tokenizer from {}", tokenizer_url);
@@ -729,6 +729,7 @@ pub async fn check_ner_model(
 // ── POST /config/rel-download -- Download GLiREL model from HuggingFace ──
 
 pub async fn download_rel_model(
+    State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<serde_json::Value> {
     use tokio::io::AsyncWriteExt;
@@ -775,7 +776,7 @@ pub async fn download_rel_model(
         }
     }
 
-    let client = reqwest::Client::new();
+    let client = &state.http_client;
 
     tracing::info!("REL: downloading tokenizer from {}", tokenizer_url);
     let resp = client.get(tokenizer_url).send().await

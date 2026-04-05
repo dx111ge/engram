@@ -5,6 +5,7 @@ use super::*;
 /// Proxy GDELT requests to avoid CORS restrictions in browser.
 /// Forwards query params to api.gdeltproject.org and returns the response.
 pub async fn proxy_gdelt(
+    State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
     use axum::response::IntoResponse;
@@ -16,10 +17,7 @@ pub async fn proxy_gdelt(
         .collect();
     url.push_str(&query_string.join("&"));
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let client = &state.http_client;
 
     let resp = client
         .get(&url)
@@ -47,6 +45,7 @@ pub async fn proxy_gdelt(
 
 /// Proxy for Google News RSS -- fetches RSS XML and converts to JSON for the dashboard.
 pub async fn proxy_news_rss(
+    State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
     use axum::response::IntoResponse;
@@ -61,10 +60,7 @@ pub async fn proxy_news_rss(
         urlencoding::encode(&query)
     );
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let client = &state.http_client;
 
     let resp = client
         .get(&rss_url)
@@ -128,165 +124,23 @@ pub async fn proxy_web_search(
         return Err(api_err(StatusCode::BAD_REQUEST, "missing 'q' parameter".to_string()));
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let mut results = Vec::new();
-
-    // Read web search config from AppState
-    let (provider, api_key, search_base_url) = {
-        let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
-        (
-            cfg.web_search_provider.clone().unwrap_or_else(|| "searxng".to_string()),
-            cfg.web_search_api_key.clone().unwrap_or_default(),
-            cfg.web_search_url.clone(),
-        )
-    };
-
-    // Optional time_range: "day", "week", "month", "year"
     let time_range = params.get("time_range").cloned().unwrap_or_default();
 
-    match provider.as_str() {
-        "brave" => {
-            // Brave Search API
-            let brave_url = format!(
-                "https://api.search.brave.com/res/v1/web/search?q={}",
-                urlencoding::encode(&query),
-            );
-            let resp = client
-                .get(&brave_url)
-                .header("Accept", "application/json")
-                .header("X-Subscription-Token", &api_key)
-                .send()
-                .await;
+    let search_results = super::web_search::search_with_time_range(&state, &query, &time_range)
+        .await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, e))?;
 
-            if let Ok(resp) = resp {
-                if resp.status().is_success() {
-                    if let Ok(data) = resp.json::<serde_json::Value>().await {
-                        if let Some(web_results) = data.pointer("/web/results").and_then(|r| r.as_array()) {
-                            for r in web_results.iter().take(50) {
-                                let title = r.get("title").and_then(|t| t.as_str()).unwrap_or_default();
-                                let url = r.get("url").and_then(|u| u.as_str()).unwrap_or_default();
-                                let snippet = r.get("description").and_then(|d| d.as_str()).unwrap_or_default();
-                                let domain = url.split('/').nth(2).unwrap_or("");
-                                if !title.is_empty() && !url.is_empty() {
-                                    results.push(serde_json::json!({
-                                        "title": title,
-                                        "url": url,
-                                        "snippet": snippet,
-                                        "domain": domain,
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        "duckduckgo" => {
-            // DuckDuckGo only -- skip SearXNG entirely
-        }
-        _ => {
-            // Default: SearXNG (self-hosted meta search, no API key needed)
-            let searxng_base = search_base_url.clone()
-                .or_else(|| std::env::var("ENGRAM_SEARXNG_URL").ok())
-                .unwrap_or_else(|| "http://localhost:8090".to_string());
-            let time_param = if !time_range.is_empty() {
-                format!("&time_range={}", urlencoding::encode(&time_range))
-            } else {
-                String::new()
-            };
-            let search_url = format!(
-                "{}/search?q={}&format=json&categories=general&engines=google,bing,duckduckgo{}",
-                searxng_base,
-                urlencoding::encode(&query),
-                time_param
-            );
-            let resp = client
-                .get(&search_url)
-                .header("Accept", "application/json")
-                .send()
-                .await;
-
-            if let Ok(resp) = resp {
-                if resp.status().is_success() {
-                    if let Ok(data) = resp.json::<serde_json::Value>().await {
-                        if let Some(web_results) = data.get("results").and_then(|r| r.as_array()) {
-                            for r in web_results.iter().take(50) {
-                                let title = r.get("title").and_then(|t| t.as_str()).unwrap_or_default();
-                                let url = r.get("url").and_then(|u| u.as_str()).unwrap_or_default();
-                                let snippet = r.get("content").and_then(|d| d.as_str()).unwrap_or_default();
-                                let domain = url.split('/').nth(2).unwrap_or("");
-                                if !title.is_empty() && !url.is_empty() {
-                                    results.push(serde_json::json!({
-                                        "title": title,
-                                        "url": url,
-                                        "snippet": snippet,
-                                        "domain": domain,
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Fallback: DuckDuckGo Instant Answer API (limited but no auth needed)
-    if results.is_empty() {
-        let ddg_url = format!(
-            "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
-            urlencoding::encode(&query)
-        );
-        let resp = client
-            .get(&ddg_url)
-            .header("User-Agent", "engram-intel/1.0")
-            .send()
-            .await;
-
-        if let Ok(resp) = resp {
-            if resp.status().is_success() {
-                if let Ok(data) = resp.json::<serde_json::Value>().await {
-                    // Abstract
-                    if let (Some(heading), Some(abs)) = (
-                        data.get("Heading").and_then(|h| h.as_str()),
-                        data.get("Abstract").and_then(|a| a.as_str()),
-                    ) {
-                        if !abs.is_empty() {
-                            let url = data.get("AbstractURL").and_then(|u| u.as_str()).unwrap_or_default();
-                            let domain = url.split('/').nth(2).unwrap_or("");
-                            results.push(serde_json::json!({
-                                "title": heading,
-                                "url": url,
-                                "snippet": abs,
-                                "domain": domain,
-                            }));
-                        }
-                    }
-                    // Related topics
-                    if let Some(topics) = data.get("RelatedTopics").and_then(|r| r.as_array()) {
-                        for t in topics.iter().take(8) {
-                            let text = t.get("Text").and_then(|x| x.as_str()).unwrap_or_default();
-                            let url = t.get("FirstURL").and_then(|u| u.as_str()).unwrap_or_default();
-                            if !text.is_empty() {
-                                let title = text.split(" - ").next().unwrap_or(text);
-                                let domain = url.split('/').nth(2).unwrap_or("");
-                                results.push(serde_json::json!({
-                                    "title": title,
-                                    "url": url,
-                                    "snippet": text,
-                                    "domain": domain,
-                                }));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let results: Vec<serde_json::Value> = search_results.iter()
+        .map(|r| {
+            let domain = r.url.split('/').nth(2).unwrap_or("");
+            serde_json::json!({
+                "title": r.title,
+                "url": r.url,
+                "snippet": r.snippet,
+                "domain": domain,
+            })
+        })
+        .collect();
 
     let body = serde_json::json!({ "results": results }).to_string();
 
@@ -357,10 +211,7 @@ pub async fn proxy_llm(
         request_body["tools"] = tools_val;
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let client = &state.http_client;
 
     let mut req = client.post(&url)
         .header("Content-Type", "application/json");
@@ -427,10 +278,7 @@ pub async fn proxy_llm_models(
         format!("{}/v1/models", &base[..host_end])
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let client = &state.http_client;
 
     let mut req = client.get(&models_url);
     if !api_key.is_empty() {
@@ -461,6 +309,7 @@ pub async fn proxy_llm_models(
 /// Body: { "endpoint": "http://localhost:11434/api/embed" }
 /// Returns the raw JSON from {base}/api/tags (Ollama) or {base}/v1/models (OpenAI-compatible).
 pub async fn proxy_fetch_models(
+    State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<serde_json::Value> {
     let endpoint = body.get("endpoint").and_then(|v| v.as_str()).unwrap_or("");
@@ -475,10 +324,7 @@ pub async fn proxy_fetch_models(
         .replace("/api/embed", "")
         .replace("/api/generate", "");
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let client = &state.http_client;
 
     // Try Ollama-style /api/tags first
     let ollama_url = format!("{base}/api/tags");

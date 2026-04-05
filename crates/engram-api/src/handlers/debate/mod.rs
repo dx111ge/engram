@@ -38,7 +38,7 @@ pub async fn debate_start(
     let mut agents = agents::assign_agent_slots(count);
 
     // Generate persona details via LLM
-    let prompt = agents::build_persona_generation_prompt(&req.topic, &agents, &req.mode, req.mode_input.as_deref());
+    let prompt = agents::build_persona_generation_prompt(&req.topic, &agents, &req.mode, req.mode_input.as_deref(), llm::medium_output_budget(&state));
     let response = llm::call_llm(&state, prompt).await
         .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("Panel generation failed: {e}")))?;
 
@@ -97,6 +97,7 @@ pub async fn debate_start(
         rounds: Vec::new(),
         current_round: 0,
         max_rounds: req.max_rounds as usize,
+        selection: None,
         synthesis: None,
         created_at: std::time::Instant::now(),
         notify: Arc::new(Notify::new()),
@@ -142,6 +143,7 @@ pub async fn debate_get(
         "rounds": session.rounds,
         "current_round": session.current_round,
         "max_rounds": session.max_rounds,
+        "selection": session.selection,
         "synthesis": session.synthesis,
         "briefing": session.briefing,
         "mode_input": session.mode_input,
@@ -276,7 +278,9 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             let _ = tx.send(format!("event: status_change\ndata: {}\n\n",
                 serde_json::json!({"status": "Researching", "message": "Building factual briefing..."})));
 
+            let t_briefing = std::time::Instant::now();
             let briefing = research::build_starter_plate(&state, &topic).await;
+            eprintln!("[debate] briefing took {:.1}s ({} facts, {} stored)", t_briefing.elapsed().as_secs_f32(), briefing.facts.len(), briefing.facts_stored);
 
             // Store briefing + set status to Running
             {
@@ -327,6 +331,7 @@ async fn run_debate_loop(state: AppState, session_id: String) {
         let _ = tx.send(format!("event: round_start\ndata: {}\n\n",
             serde_json::json!({"round": round_idx + 1})));
 
+        let t_round = std::time::Instant::now();
         let mut round_turns = Vec::new();
 
         // Execute each agent's turn
@@ -400,8 +405,15 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             moderator_checks: Vec::new(),
         };
 
+        let t_agents_done = t_round.elapsed();
+        eprintln!("[debate] round {} agents took {:.1}s ({} turns)", round_idx + 1, t_agents_done.as_secs_f32(), round.turns.len());
+
         // ── Moderator fact-check ──
+        set_progress(&state, &session_id, "moderating",
+            "Fact-checking claims...", None, 0, 0);
+        let t_mod = std::time::Instant::now();
         let checks = research::moderate_round(&state, &round, &agents, &topic).await;
+        eprintln!("[debate] round {} moderator took {:.1}s ({} checks)", round_idx + 1, t_mod.elapsed().as_secs_f32(), checks.len());
         round.moderator_checks = checks;
 
         // ── Gap-closing research between rounds ──
@@ -411,18 +423,31 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             let _ = tx.send(format!("event: gap_research_start\ndata: {}\n\n",
                 serde_json::json!({"round": round_idx + 1})));
 
+            let t_gap_start = std::time::Instant::now();
             let gap_queries = research::detect_gaps(&state, &round, &agents, &topic, &already_researched).await;
+            eprintln!("[debate] gap detection took {:.1}s, found {} gaps", t_gap_start.elapsed().as_secs_f32(), gap_queries.len());
 
             if !gap_queries.is_empty() {
                 let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
                     serde_json::json!({"gaps": gap_queries, "message": format!("Researching {} gaps...", gap_queries.len())})));
 
-                // Close gaps: search + ingest into graph
-                let gap_results = research::close_gaps(&state, &gap_queries, &topic).await;
+                // Close gaps sequentially (Ollama serializes anyway) with per-gap progress
+                let t_close_start = std::time::Instant::now();
+                let mut gap_results = Vec::new();
+                for (gi, gq) in gap_queries.iter().enumerate() {
+                    set_progress(&state, &session_id, "gap_closing",
+                        &format!("Closing gap {}/{}: {}...", gi + 1, gap_queries.len(), &gq[..gq.len().min(50)]),
+                        None, gi, gap_queries.len());
+                    let result = research::close_single_gap_with_timeout(&state, gq, &topic, 90).await;
+                    gap_results.push(result);
+                }
+                eprintln!("[debate] gap-closing took {:.1}s total for {} gaps", t_close_start.elapsed().as_secs_f32(), gap_queries.len());
 
                 let findings_count: usize = gap_results.iter().map(|g| g.findings.len()).sum();
                 let ingested_count: usize = gap_results.iter().filter(|g| g.ingested).count();
 
+                set_progress(&state, &session_id, "gap_closing",
+                    &format!("Gaps complete: {}/{} resolved", ingested_count, gap_results.len()), None, gap_results.len(), gap_results.len());
                 let _ = tx.send(format!("event: gap_research_complete\ndata: {}\n\n",
                     serde_json::json!({
                         "gaps_researched": gap_results.len(),
@@ -433,6 +458,8 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                 round.gap_research = gap_results;
             }
         }
+
+        eprintln!("[debate] round {} TOTAL: {:.1}s", round_idx + 1, t_round.elapsed().as_secs_f32());
 
         // Store round results
         {
@@ -593,41 +620,149 @@ pub async fn debate_synthesize(
         session.clone()
     };
 
-    // Run synthesis LLM call
-    let prompt = synthesis::build_synthesis_prompt(&session_data);
-    let response = llm::call_llm(&state, prompt).await
-        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("Synthesis failed: {e}")))?;
+    // Helper: run an LLM call with a per-call timeout (120s).
+    // Returns Err on timeout or LLM failure.
+    let call_with_timeout = |state: AppState, prompt: serde_json::Value| async move {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            llm::call_llm(&state, prompt),
+        ).await {
+            Ok(result) => result,
+            Err(_) => Err("LLM call timed out (120s)".to_string()),
+        }
+    };
 
-    let content = llm::extract_content(&response)
-        .ok_or_else(|| api_err(StatusCode::BAD_GATEWAY, "No content in synthesis response"))?;
+    let total_steps = if modes::uses_selection(&session_data.mode) { 6 } else { 5 };
+    let mut step = 0;
 
-    let synthesis_json = llm::parse_json_from_llm(&content)
-        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("Synthesis parse error: {e}")))?;
-
-    // Parse synthesis into typed struct
-    let synthesis: Synthesis = serde_json::from_value(synthesis_json.clone())
-        .unwrap_or_else(|_| {
-            // Fallback: construct minimal synthesis from raw JSON
-            Synthesis {
-                evidence_conclusion: synthesis_json.get("evidence_conclusion").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                conclusion_confidence: synthesis_json.get("conclusion_confidence").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32,
-                evidence_gaps: llm::extract_string_array(&synthesis_json, "evidence_gaps"),
-                key_evidence: Vec::new(),
-                influence_map: Vec::new(),
-                unexpected_alignments: Vec::new(),
-                cherry_picks: Vec::new(),
-                hidden_agendas: Vec::new(),
-                beneficiary_map: Vec::new(),
-                parallel_interests: Vec::new(),
-                blind_spots: Vec::new(),
-                areas_of_agreement: Vec::new(),
-                areas_of_disagreement: Vec::new(),
-                key_tensions: llm::extract_string_array(&synthesis_json, "key_tensions"),
-                recommended_investigations: llm::extract_string_array(&synthesis_json, "recommended_investigations"),
-                evolution: Vec::new(),
-                agent_positions: Vec::new(),
+    // ── Layer 0: Select-then-Refine (mode-gated) ──
+    let selection = if modes::uses_selection(&session_data.mode) {
+        step += 1;
+        set_progress(&state, &session_id, "synthesizing", "Layer 0: Scoring agents and selecting strongest position...", None, step, total_steps);
+        eprintln!("[debate] synthesis: Layer 0 -- selecting strongest position...");
+        let t0 = std::time::Instant::now();
+        let sel_prompt = synthesis::build_selection_prompt(&session_data, llm::medium_output_budget(&state));
+        match call_with_timeout(state.clone(), sel_prompt).await {
+            Ok(sel_response) => {
+                let sel_content = llm::extract_content(&sel_response);
+                let sel = match sel_content.and_then(|c| llm::parse_json_from_llm(&c).ok()) {
+                    Some(sel_json) => serde_json::from_value::<SelectionResult>(sel_json).ok(),
+                    None => { eprintln!("[debate] Layer 0: parse failed, skipping selection"); None }
+                };
+                if let Some(ref s) = sel {
+                    eprintln!("[debate] Layer 0: selected {} (score {:.1}) in {:.1}s", s.selected_agent_name,
+                        s.scores.iter().find(|sc| sc.agent_id == s.selected_agent_id).map(|sc| sc.total_score).unwrap_or(0.0),
+                        t0.elapsed().as_secs_f32());
+                }
+                sel
             }
-        });
+            Err(e) => { eprintln!("[debate] Layer 0: failed: {}, skipping", e); None }
+        }
+    } else {
+        None
+    };
+
+    // Store selection on session
+    if selection.is_some() {
+        let mut sessions = state.debate_sessions.write().map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "lock failed"))?;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.selection = selection.clone();
+        }
+    }
+
+    // ── Pass 1: Evidence conclusion (think=ON, prose) ──
+    step += 1;
+    set_progress(&state, &session_id, "synthesizing", "Pass 1: Writing evidence-based conclusion (deep analysis)...", None, step, total_steps);
+    eprintln!("[debate] synthesis: Pass 1 -- generating evidence conclusion...");
+    let t0 = std::time::Instant::now();
+    let conclusion_prompt = synthesis::build_conclusion_prompt(&session_data, selection.as_ref(), llm::medium_output_budget(&state));
+    let conclusion_response = call_with_timeout(state.clone(), conclusion_prompt).await
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("Synthesis conclusion failed: {e}")))?;
+    let conclusion_content = llm::extract_content(&conclusion_response)
+        .ok_or_else(|| api_err(StatusCode::BAD_GATEWAY, "No content in conclusion response"))?;
+    let (evidence_conclusion, conclusion_confidence) = synthesis::parse_conclusion(&conclusion_content);
+    eprintln!("[debate] Pass 1 done: {} chars, confidence={:.2} in {:.1}s", evidence_conclusion.len(), conclusion_confidence, t0.elapsed().as_secs_f32());
+
+    // ── Pass 2: Structured extraction (think=OFF, sequential to avoid Ollama queue stacking) ──
+    let short_budget = llm::short_output_budget(&state);
+
+    // 2a: Evidence gaps
+    step += 1;
+    set_progress(&state, &session_id, "synthesizing", "Pass 2a: Identifying evidence gaps and investigations...", None, step, total_steps);
+    eprintln!("[debate] synthesis: Pass 2a -- gaps...");
+    let t0 = std::time::Instant::now();
+    let gaps_prompt = synthesis::build_gaps_prompt(&session_data, &evidence_conclusion, short_budget);
+    let gaps_json = parse_extraction_result(call_with_timeout(state.clone(), gaps_prompt).await, "gaps");
+    eprintln!("[debate] Pass 2a done in {:.1}s", t0.elapsed().as_secs_f32());
+
+    // 2b: Influence map
+    step += 1;
+    set_progress(&state, &session_id, "synthesizing", "Pass 2b: Mapping agent influence and bias distortion...", None, step, total_steps);
+    eprintln!("[debate] synthesis: Pass 2b -- influence...");
+    let t0 = std::time::Instant::now();
+    let influence_prompt = synthesis::build_influence_prompt(&session_data, &evidence_conclusion, short_budget);
+    let influence_json = parse_extraction_result(call_with_timeout(state.clone(), influence_prompt).await, "influence");
+    eprintln!("[debate] Pass 2b done in {:.1}s", t0.elapsed().as_secs_f32());
+
+    // 2c: Consensus (agreements, disagreements, tensions)
+    step += 1;
+    set_progress(&state, &session_id, "synthesizing", "Pass 2c: Analyzing consensus, disagreements, and tensions...", None, step, total_steps);
+    eprintln!("[debate] synthesis: Pass 2c -- consensus...");
+    let t0 = std::time::Instant::now();
+    let consensus_prompt = synthesis::build_consensus_prompt(&session_data, &evidence_conclusion, short_budget);
+    let consensus_json = parse_extraction_result(call_with_timeout(state.clone(), consensus_prompt).await, "consensus");
+    eprintln!("[debate] Pass 2c done in {:.1}s", t0.elapsed().as_secs_f32());
+
+    // 2d: Evolution + final positions
+    step += 1;
+    set_progress(&state, &session_id, "synthesizing", "Pass 2d: Tracking agent evolution and final positions...", None, step, total_steps);
+    eprintln!("[debate] synthesis: Pass 2d -- evolution...");
+    let t0 = std::time::Instant::now();
+    let evolution_prompt = synthesis::build_evolution_prompt(&session_data, &evidence_conclusion, short_budget);
+    let evolution_json = parse_extraction_result(call_with_timeout(state.clone(), evolution_prompt).await, "evolution");
+    eprintln!("[debate] Pass 2d done in {:.1}s", t0.elapsed().as_secs_f32());
+
+    // Assemble final Synthesis struct
+    let synthesis = Synthesis {
+        evidence_conclusion,
+        conclusion_confidence,
+        evidence_gaps: llm::extract_string_array(&gaps_json, "evidence_gaps"),
+        key_evidence: Vec::new(),
+        influence_map: serde_json::from_value(
+            influence_json.get("influence_map").cloned().unwrap_or(serde_json::json!([]))
+        ).unwrap_or_default(),
+        unexpected_alignments: Vec::new(),
+        cherry_picks: serde_json::from_value(
+            influence_json.get("cherry_picks").cloned().unwrap_or(serde_json::json!([]))
+        ).unwrap_or_default(),
+        hidden_agendas: Vec::new(),
+        beneficiary_map: Vec::new(),
+        parallel_interests: Vec::new(),
+        blind_spots: Vec::new(),
+        areas_of_agreement: serde_json::from_value(
+            consensus_json.get("areas_of_agreement").cloned().unwrap_or(serde_json::json!([]))
+        ).unwrap_or_default(),
+        areas_of_disagreement: serde_json::from_value(
+            consensus_json.get("areas_of_disagreement").cloned().unwrap_or(serde_json::json!([]))
+        ).unwrap_or_default(),
+        key_tensions: llm::extract_string_array(&consensus_json, "key_tensions"),
+        recommended_investigations: llm::extract_string_array(&gaps_json, "recommended_investigations"),
+        evolution: serde_json::from_value(
+            evolution_json.get("evolution").cloned().unwrap_or(serde_json::json!([]))
+        ).unwrap_or_default(),
+        agent_positions: serde_json::from_value(
+            evolution_json.get("agent_positions").cloned().unwrap_or(serde_json::json!([]))
+        ).unwrap_or_default(),
+        raw_llm_output: None,
+    };
+
+    eprintln!("[debate] synthesis complete: conclusion={} chars, gaps={}, influence={}, tensions={}, evolution={}",
+        synthesis.evidence_conclusion.len(),
+        synthesis.evidence_gaps.len(),
+        synthesis.influence_map.len(),
+        synthesis.key_tensions.len(),
+        synthesis.evolution.len(),
+    );
 
     // Store synthesis on session
     {
@@ -638,9 +773,18 @@ pub async fn debate_synthesize(
         }
     }
 
+    set_progress(&state, &session_id, "complete", "Synthesis complete", None, total_steps, total_steps);
+
+    // Retrieve selection for the response
+    let selection_out = {
+        let sessions = state.debate_sessions.read().map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "lock failed"))?;
+        sessions.get(&session_id).and_then(|s| s.selection.clone())
+    };
+
     Ok(Json(serde_json::json!({
         "session_id": session_id,
         "status": "complete",
+        "selection": selection_out,
         "synthesis": synthesis,
     })))
 }
@@ -656,6 +800,7 @@ pub async fn debate_stream(
         session_id: String,
         last_round_count: usize,
         last_status: String,
+        last_progress: String,
         sent_initial: bool,
     }
 
@@ -664,6 +809,7 @@ pub async fn debate_stream(
         session_id,
         last_round_count: 0,
         last_status: String::new(),
+        last_progress: String::new(),
         sent_initial: false,
     };
 
@@ -698,14 +844,33 @@ pub async fn debate_stream(
         // Snapshot session state (drop lock before returning ps)
         let snapshot = ps.state.debate_sessions.read().ok().and_then(|sessions| {
             sessions.get(&ps.session_id).map(|s| {
-                (format!("{:?}", s.status), s.status.clone(), s.rounds.clone(), s.synthesis.clone())
+                (format!("{:?}", s.status), s.status.clone(), s.rounds.clone(), s.synthesis.clone(), s.progress.clone())
             })
         });
 
-        let (status, status_enum, rounds, synthesis) = match snapshot {
+        let (status, status_enum, rounds, synthesis, progress) = match snapshot {
             Some(s) => s,
             None => return None, // session deleted
         };
+
+        // Emit progress updates (synthesis steps, gap-closing, etc.)
+        if let Some(ref prog) = progress {
+            let prog_msg = format!("{}:{}", prog.phase, prog.message);
+            if prog_msg != ps.last_progress {
+                ps.last_progress = prog_msg;
+                let data = serde_json::json!({
+                    "phase": prog.phase,
+                    "message": prog.message,
+                    "current": prog.current,
+                    "total": prog.total,
+                    "active_agent": prog.active_agent,
+                });
+                return Some((
+                    Ok(axum::response::sse::Event::default().event("progress").data(data.to_string())),
+                    ps,
+                ));
+            }
+        }
 
         let round_count = rounds.len();
 
@@ -763,6 +928,58 @@ pub async fn debate_stream(
         .keep_alive(axum::response::sse::KeepAlive::default())
 }
 
+/// POST /debate/test-gap -- test gap-closing directly (debug endpoint).
+pub async fn debate_test_gap(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("test gap query");
+    let topic = body.get("topic").and_then(|v| v.as_str()).unwrap_or("general");
+    eprintln!("[test-gap] Starting: query=\"{}\"", query);
+    let result = research::close_gaps(&state, &[query.to_string()], topic).await;
+    let gap = result.into_iter().next().unwrap_or_else(|| GapResearch {
+        gap_query: query.to_string(), source: "test".into(), findings: Vec::new(),
+        ingested: false, entities_stored: Vec::new(), facts_stored: 0, relations_created: 0,
+    });
+    Ok(Json(serde_json::json!({
+        "gap_query": gap.gap_query,
+        "ingested": gap.ingested,
+        "facts_stored": gap.facts_stored,
+        "relations_created": gap.relations_created,
+        "findings": gap.findings,
+        "entities_stored": gap.entities_stored,
+    })))
+}
+
+/// POST /debate/test-fetch -- test article fetching in isolation (debug endpoint).
+pub async fn debate_test_fetch(
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let urls: Vec<String> = if let Some(arr) = body.get("urls").and_then(|v| v.as_array()) {
+        arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+    } else if let Some(url) = body.get("url").and_then(|v| v.as_str()) {
+        vec![url.to_string()]
+    } else {
+        return Ok(Json(serde_json::json!({"error": "provide 'url' or 'urls'"})));
+    };
+
+    let mut results = Vec::new();
+    for url in &urls {
+        let t0 = std::time::Instant::now();
+        let content = research::fetch_article_content_debug(url).await;
+        let elapsed = t0.elapsed().as_secs_f32();
+        results.push(serde_json::json!({
+            "url": url,
+            "elapsed_s": format!("{:.1}", elapsed),
+            "chars": content.as_ref().map(|c| c.len()).unwrap_or(0),
+            "ok": content.is_some(),
+            "preview": content.as_ref().map(|c| &c[..c.len().min(200)]).unwrap_or(""),
+        }));
+    }
+
+    Ok(Json(serde_json::json!({"results": results})))
+}
+
 /// DELETE /debate/{id} -- remove a debate session.
 pub async fn debate_delete(
     State(state): State<AppState>,
@@ -774,6 +991,36 @@ pub async fn debate_delete(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Parse an extraction LLM result into JSON, logging failures.
+fn parse_extraction_result(
+    result: Result<serde_json::Value, String>,
+    label: &str,
+) -> serde_json::Value {
+    match result {
+        Ok(response) => {
+            let content = llm::extract_content(&response).unwrap_or_default();
+            if content.is_empty() {
+                eprintln!("[debate] Pass 2 ({label}): empty content");
+                return serde_json::json!({});
+            }
+            match llm::parse_json_from_llm(&content) {
+                Ok(json) => {
+                    eprintln!("[debate] Pass 2 ({label}): OK");
+                    json
+                }
+                Err(e) => {
+                    eprintln!("[debate] Pass 2 ({label}): JSON parse failed: {}", e);
+                    serde_json::json!({})
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[debate] Pass 2 ({label}): LLM call failed: {}", e);
+            serde_json::json!({})
+        }
+    }
+}
 
 /// Generate a short UUID-like ID.
 fn uuid_short() -> String {

@@ -3,7 +3,7 @@
 
 use crate::state::AppState;
 use super::types::*;
-use super::llm::{call_llm, extract_content};
+use super::llm::{call_llm, extract_content, short_output_budget, medium_output_budget};
 use super::research::execute_web_search;
 
 // ── Persona auto-generation ─────────────────────────────────────────────
@@ -69,7 +69,7 @@ pub fn assign_agent_slots(count: u8) -> Vec<DebateAgent> {
 }
 
 /// Build the LLM prompt to generate persona details + biases for the assigned slots.
-pub fn build_persona_generation_prompt(topic: &str, agents: &[DebateAgent], mode: &DebateMode, mode_input: Option<&str>) -> serde_json::Value {
+pub fn build_persona_generation_prompt(topic: &str, agents: &[DebateAgent], mode: &DebateMode, mode_input: Option<&str>, max_tokens: u64) -> serde_json::Value {
     let mode_rules = super::modes::persona_rules(mode, mode_input);
     let mut agent_descriptions = String::new();
     for a in agents {
@@ -127,7 +127,8 @@ Return ONLY a JSON array (no markdown, no commentary):
             { "role": "system", "content": system_prompt }
         ],
         "temperature": 0.9,
-        "max_tokens": 2048
+        "max_tokens": max_tokens,
+        "think": false
     })
 }
 
@@ -759,7 +760,8 @@ pub async fn execute_agent_turn(
             {"role": "user", "content": user_content}
         ],
         "temperature": (0.5 + agent.rigor_level * 0.3).min(1.0),
-        "max_tokens": 2048
+        "max_tokens": medium_output_budget(state),
+        "think": true
     });
 
     let response = call_llm(state, request).await?;

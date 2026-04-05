@@ -256,6 +256,17 @@ pub(crate) fn render_llm_modal(
             />
         </div>
 
+        // Performance tip
+        <div class="alert alert-info" style="font-size: 0.85rem; margin: 0.75rem 0; padding: 0.75rem; border-radius: 6px; background: var(--bg-tertiary); border-left: 3px solid var(--accent);">
+            <p style="margin: 0 0 0.5rem 0;"><i class="fa-solid fa-lightbulb"></i><strong>" Model Performance Tips"</strong></p>
+            <ul style="margin: 0; padding-left: 1.2rem; line-height: 1.6;">
+                <li><strong>"Thinking models"</strong>" (deepseek-r1, qwq, qwen3) use extra tokens for reasoning. Great for debate analysis, slower for structured extraction. engram toggles thinking on/off per task automatically."</li>
+                <li><strong>"Model size"</strong>" matters: 7-8B models are fast but may struggle with JSON output. 14B+ recommended for debate panel. For Ollama: check VRAM with "<code>"ollama ps"</code>"."</li>
+                <li><strong>"Context window"</strong>" is auto-detected when you change models. For Ollama, engram sends "<code>"num_ctx"</code>" to use the full window. If you see truncated output, verify with "<code>"ollama show &lt;model&gt;"</code>" and adjust via "<code>"POST /config {\"llm_context_window\": N}"</code>"."</li>
+                <li><strong>"Some models think by default"</strong>" (e.g. gemma4). If JSON output looks garbled or slow, ensure engram detects the model correctly -- thinking is suppressed for extraction tasks."</li>
+            </ul>
+        </div>
+
         // Thinking model toggle
         {move || {
             let model = llm_model.get();

@@ -29,6 +29,7 @@ pub async fn get_config(
         "has_llm_api_key": has_llm_api_key,
         "llm_temperature": cfg.llm_temperature,
         "llm_thinking": cfg.llm_thinking.unwrap_or(false),
+        "llm_context_window": cfg.llm_context_window,
         "pipeline_batch_size": cfg.pipeline_batch_size,
         "pipeline_workers": cfg.pipeline_workers,
         "pipeline_skip_stages": cfg.pipeline_skip_stages,
@@ -103,6 +104,55 @@ pub async fn set_config(
             api_err(StatusCode::INTERNAL_SERVER_ERROR, "config lock poisoned")
         })?;
         cfg.merge(&patch);
+    }
+
+    // Auto-detect LLM context window when model or endpoint changes
+    let llm_changed = patch.llm_model.is_some() || patch.llm_endpoint.is_some();
+    if llm_changed {
+        let (endpoint, model, api_key, has_manual_ctx) = {
+            let cfg = state.config.read().map_err(|_| {
+                api_err(StatusCode::INTERNAL_SERVER_ERROR, "config lock poisoned")
+            })?;
+            (
+                cfg.llm_endpoint.clone().unwrap_or_default(),
+                cfg.llm_model.clone().unwrap_or_default(),
+                cfg.llm_api_key.clone().unwrap_or_default(),
+                // Only auto-detect if user didn't explicitly set it in this request
+                patch.llm_context_window.is_some(),
+            )
+        };
+        if !has_manual_ctx && !endpoint.is_empty() && !model.is_empty() {
+            let ep = endpoint.clone();
+            let m = model.clone();
+            let ak = api_key.clone();
+            let state_clone = state.clone();
+            // Spawn async detection (don't block the config response)
+            tokio::spawn(async move {
+                // Detect context window
+                if let Some(ctx) = super::debate::llm::detect_context_window(&ep, &m, &ak).await {
+                    eprintln!("[config] Auto-detected LLM context window: {} tokens for model '{}'", ctx, m);
+                    if let Ok(mut cfg) = state_clone.config.write() {
+                        cfg.llm_context_window = Some(ctx);
+                    }
+                    let _ = state_clone.save_config();
+                } else {
+                    eprintln!("[config] WARNING: Could not auto-detect context window for '{}'. \
+                               Set it manually via POST /config {{\"llm_context_window\": 32768}}", m);
+                }
+
+                // Auto-detect thinking model
+                let is_thinking = super::debate::llm::detect_thinking_model(&ep, &m).await;
+                if is_thinking {
+                    eprintln!("[config] Auto-detected reasoning/thinking model: '{}'", m);
+                    if let Ok(mut cfg) = state_clone.config.write() {
+                        if cfg.llm_thinking.is_none() {
+                            cfg.llm_thinking = Some(true);
+                        }
+                    }
+                    let _ = state_clone.save_config();
+                }
+            });
+        }
     }
 
     // Invalidate cached NER/REL backends if relevant config fields changed

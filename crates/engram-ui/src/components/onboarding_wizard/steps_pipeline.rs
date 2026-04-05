@@ -520,6 +520,14 @@ pub(crate) fn render_step_llm(
                 })
             }}
             // LLM is mandatory — no skip button
+            <div class="wizard-tip" style="font-size: 0.82rem; margin-top: 1rem; padding: 0.6rem 0.8rem; background: var(--bg-tertiary); border-radius: 6px; border-left: 3px solid var(--accent);">
+                <p style="margin: 0 0 0.4rem 0;"><i class="fa-solid fa-circle-info"></i><strong>" Choosing a model"</strong></p>
+                <ul style="margin: 0; padding-left: 1.1rem; line-height: 1.5; color: var(--text-secondary);">
+                    <li>"For Ollama: "<strong>"14B+ parameters"</strong>" recommended (e.g. gemma4:e4b, qwen3:14b). Smaller models (7-8B) work but may produce unreliable JSON."</li>
+                    <li><strong>"Thinking models"</strong>" (deepseek-r1, qwq, qwen3) give deeper analysis but use more tokens. engram toggles thinking per task automatically."</li>
+                    <li>"Context window is auto-detected. For Ollama, run "<code>"ollama show &lt;model&gt;"</code>" to check. Larger context = better debate synthesis."</li>
+                </ul>
+            </div>
         </div>
     }.into_any()
 }

@@ -94,7 +94,7 @@ pub async fn reason_suggest(
     let llm_body = build_request(&config, &gap);
 
     // Call the LLM endpoint
-    let client = reqwest::Client::new();
+    let client = &state.http_client;
     let mut req = client.post(&config.endpoint).json(&llm_body);
     if let Some(key) = &config.api_key {
         req = req.header("Authorization", format!("Bearer {key}"));
@@ -109,8 +109,6 @@ pub async fn reason_suggest(
     let content = extract_content(&resp_json)
         .unwrap_or_default();
     let suggestions = parse_suggestions(&content, config.max_suggestions);
-
-    let _ = state; // state not needed but keeps signature consistent
 
     Ok(Json(serde_json::json!({
         "suggestions": suggestions,

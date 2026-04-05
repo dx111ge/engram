@@ -63,6 +63,9 @@ pub struct EngineConfig {
     pub llm_temperature: Option<f32>,
     /// Whether the configured model is a thinking/reasoning model (e.g. DeepSeek-R1, o3-mini)
     pub llm_thinking: Option<bool>,
+    /// Maximum context window of the configured LLM in tokens. Used to budget max_tokens
+    /// for debate synthesis and other large prompts. Common values: 8192, 32768, 131072.
+    pub llm_context_window: Option<u32>,
     pub pipeline_batch_size: Option<u32>,
     pub pipeline_workers: Option<u32>,
     pub pipeline_skip_stages: Option<Vec<String>>,
@@ -140,6 +143,9 @@ impl EngineConfig {
         }
         if other.llm_thinking.is_some() {
             self.llm_thinking = other.llm_thinking;
+        }
+        if other.llm_context_window.is_some() {
+            self.llm_context_window = other.llm_context_window;
         }
         if other.pipeline_batch_size.is_some() {
             self.pipeline_batch_size = other.pipeline_batch_size;
@@ -342,6 +348,9 @@ pub struct IngestPreviewRelation {
 /// Thread-safe shared graph state for the HTTP server.
 #[derive(Clone)]
 pub struct AppState {
+    /// Shared HTTP client -- reuse everywhere instead of creating new clients.
+    /// reqwest::Client is Clone (Arc internally), supports connection pooling and TLS session reuse.
+    pub http_client: reqwest::Client,
     pub graph: Arc<RwLock<Graph>>,
     pub compute: Arc<RwLock<ComputeInfo>>,
     /// Set to true when a write happens; cleared after checkpoint.
@@ -405,7 +414,14 @@ impl AppState {
     pub fn new(graph: Graph) -> Self {
         let hw = engram_compute::planner::HardwareInfo::detect();
         let graph = Arc::new(RwLock::new(graph));
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .pool_max_idle_per_host(8)
+            .build()
+            .expect("failed to build shared HTTP client");
         AppState {
+            http_client,
             #[cfg(feature = "actions")]
             action_engine: Arc::new(RwLock::new(engram_action::ActionEngine::new(graph.clone()))),
             graph,

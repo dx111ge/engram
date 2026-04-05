@@ -127,6 +127,8 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/assessments/{label}/suggest-watches", post(handlers::suggest_watches_for_assessment))
         // Multi-agent debate panel
         .route("/debate/start", post(handlers::debate::debate_start))
+        .route("/debate/test-gap", post(handlers::debate::debate_test_gap)) // debug endpoint
+        .route("/debate/test-fetch", post(handlers::debate::debate_test_fetch)) // debug endpoint
         .route("/debate/{id}", get(handlers::debate::debate_get))
         .route("/debate/{id}", delete(handlers::debate::debate_delete))
         .route("/debate/{id}/agents", patch(handlers::debate::debate_edit_agents))

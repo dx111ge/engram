@@ -3,6 +3,19 @@
 
 use super::types::DebateMode;
 
+/// Whether this mode benefits from Layer 0 select-then-refine.
+/// Modes where agents don't compete (each owns a scenario/actor) skip selection.
+pub fn uses_selection(mode: &DebateMode) -> bool {
+    match mode {
+        // Each agent owns a distinct scenario -- no "winner"
+        DebateMode::ScenarioForecast => false,
+        // Each agent IS a stakeholder -- no "best" actor
+        DebateMode::StakeholderSimulation => false,
+        // All other modes have competing positions that can be ranked
+        _ => true,
+    }
+}
+
 /// Get the persona generation rules for a mode (added to the LLM prompt that generates agent names/biases).
 pub fn persona_rules(mode: &DebateMode, mode_input: Option<&str>) -> String {
     match mode {

@@ -76,6 +76,7 @@ pub mod chat_reporting;
 pub mod document;
 pub mod fact;
 pub mod debate;
+pub mod web_search;
 
 // Re-export all public functions so `use crate::handlers::*` continues to work.
 pub use store::*;
