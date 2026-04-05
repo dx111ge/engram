@@ -111,6 +111,7 @@ pub async fn debate_start(
         researched_gaps: Vec::new(),
         mode_input: req.mode_input.clone(),
         progress: None,
+        search_queries: Vec::new(),
     };
 
     // Store session
@@ -309,6 +310,44 @@ async fn run_debate_loop(state: AppState, session_id: String) {
         }
     }
 
+    // ── Generate short search queries from topic (once, reuse everywhere) ──
+    let search_queries = {
+        let already_has = state.debate_sessions.read().ok()
+            .and_then(|s| s.get(&session_id).map(|s| !s.search_queries.is_empty()))
+            .unwrap_or(false);
+        if already_has {
+            state.debate_sessions.read().ok()
+                .and_then(|s| s.get(&session_id).map(|s| s.search_queries.clone()))
+                .unwrap_or_default()
+        } else {
+            dbg_debate!("[debate] >> generating short search query from topic");
+            let prompt = serde_json::json!({
+                "messages": [{"role": "system", "content": format!(
+                    "Convert this debate topic into ONE short search engine query (max 8 words). \
+                     Return ONLY the query text, nothing else. No quotes, no JSON.\n\nTopic: \"{}\"", topic
+                )}],
+                "temperature": 0.1,
+                "max_tokens": 64,
+                "think": false
+            });
+            let queries = match llm::call_llm(&state, prompt).await {
+                Ok(resp) => {
+                    let content = llm::extract_content(&resp).unwrap_or_default().trim().trim_matches('"').to_string();
+                    if content.len() > 5 { vec![content] } else { vec![topic.clone()] }
+                }
+                Err(_) => vec![topic.clone()],
+            };
+            dbg_debate!("[debate] << search query: {:?}", queries);
+            // Store on session
+            if let Ok(mut sessions) = state.debate_sessions.write() {
+                if let Some(s) = sessions.get_mut(&session_id) {
+                    s.search_queries = queries.clone();
+                }
+            }
+            queries
+        }
+    };
+
     for round_idx in current_round..max_rounds {
         // Check if we should stop
         {
@@ -343,8 +382,9 @@ async fn run_debate_loop(state: AppState, session_id: String) {
         dbg_debate!("[debate] ---- ROUND {} START ----", round_idx + 1);
         let mut round_turns = Vec::new();
 
-        // Search once per round, share across agents
-        let cached_web = research::execute_web_search(&state, &topic).await;
+        // Search once per round using short query, share across agents
+        let search_query = search_queries.first().map(|s| s.as_str()).unwrap_or(&topic);
+        let cached_web = research::execute_web_search(&state, search_query).await;
         let cached_web_opt = if cached_web.is_empty() { None } else { Some(cached_web.as_str()) };
 
         // Execute each agent's turn

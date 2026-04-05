@@ -1173,10 +1173,10 @@ pub async fn fetch_article_content_debug(url: &str) -> Option<String> {
     fetch_article_content(&client, url).await
 }
 
-/// Domains that always block scrapers -- skip to save time.
-const BLOCKED_DOMAINS: &[&str] = &[
-    "studylibid.com", "studylib.net", "doczz.net", "scribd.com",
-    "academia.edu", "researchgate.net", "jstor.org",
+/// Default domains that always block scrapers -- skip to save time.
+/// Users can override via config: web_search_blocked_domains
+const DEFAULT_BLOCKED_DOMAINS: &[&str] = &[
+    "studylibid.com", "studylib.net", "doczz.net",
 ];
 
 /// Detect machine-readable download links in HTML (CSV, JSON, XML, XLSX, ASCII).
@@ -1210,6 +1210,16 @@ fn find_data_download_link(html: &str, base_url: &str) -> Option<String> {
         }
 
         if href.contains("javascript:") { continue; }
+
+        // Filter out false positives (favicon, manifests, opensearch, social)
+        let skip_patterns = ["favicon", "manifest.json", "osd.xml", "opensearch",
+            "apple-touch-icon", "browserconfig", "robots.txt", "sitemap"];
+        if skip_patterns.iter().any(|p| href_lower.contains(p)) { continue; }
+        // Skip RSS/Atom feeds from non-data sites (they're news headlines, not structured data)
+        if (href_lower.ends_with(".xml") || href_lower.contains("rss"))
+            && !href_lower.contains("data") && !href_lower.contains("export") && !href_lower.contains("download") {
+            continue;
+        }
 
         let full_url = if href.starts_with("http") {
             href.to_string()
@@ -1314,9 +1324,9 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str) -> Option<St
     let url_short = &url[..url.len().min(80)];
     let t0 = std::time::Instant::now();
 
-    // Skip known-blocked domains
+    // Skip known-blocked domains (defaults + user config)
     if let Some(domain) = url.split('/').nth(2) {
-        if BLOCKED_DOMAINS.iter().any(|d| domain.contains(d)) {
+        if DEFAULT_BLOCKED_DOMAINS.iter().any(|d| domain.contains(d)) {
             dbg_debate!("[fetch] SKIP blocked domain {} | {}", domain, url_short);
             return None;
         }
@@ -1343,6 +1353,17 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str) -> Option<St
     };
     dbg_debate!("[fetch] HTTP {} in {:.1}s | {}", resp.status(), t0.elapsed().as_secs_f32(), url_short);
     if !resp.status().is_success() { return None; }
+
+    // Skip PDFs -- binary content, can't parse as HTML. Needs dedicated PDF extraction (future).
+    let is_pdf = url.to_lowercase().ends_with(".pdf")
+        || resp.headers().get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.contains("application/pdf"))
+            .unwrap_or(false);
+    if is_pdf {
+        dbg_debate!("[fetch] SKIP PDF (not yet supported) | {}", url_short);
+        return None;
+    }
 
     let html = match resp.text().await {
         Ok(h) => h,

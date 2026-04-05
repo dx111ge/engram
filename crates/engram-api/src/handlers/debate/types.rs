@@ -26,6 +26,9 @@ pub struct DebateSession {
     pub mode_input: Option<String>,
     /// Live progress for frontend display.
     pub progress: Option<DebateProgress>,
+    /// LLM-generated short search queries derived from the topic.
+    /// Generated once at briefing, reused for all agent web searches.
+    pub search_queries: Vec<String>,
 }
 
 /// Live progress information for the frontend.
