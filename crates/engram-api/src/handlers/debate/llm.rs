@@ -160,21 +160,37 @@ pub async fn call_llm(state: &AppState, request_body: serde_json::Value) -> Resu
 
     let client = &state.http_client;
 
+    let prompt_len: usize = messages.as_array().map(|a| a.iter().map(|m| m.get("content").and_then(|c| c.as_str()).map(|s| s.len()).unwrap_or(0)).sum()).unwrap_or(0);
+    let t_llm = std::time::Instant::now();
+    dbg_debate!("[llm] >> CALL model={} think={} max_tokens={} prompt_chars={} url={}",
+        model, use_thinking, max_tokens, prompt_len, &url[..url.len().min(60)]);
+
     let mut req = client.post(&url).header("Content-Type", "application/json");
     if !api_key.is_empty() {
         req = req.header("Authorization", format!("Bearer {api_key}"));
     }
 
-    let resp = req.json(&body).send().await.map_err(|e| format!("LLM request failed: {e}"))?;
+    let resp = req.json(&body).send().await.map_err(|e| {
+        dbg_debate!("[llm] << ERROR model={} send_failed took={:.1}s err={}",
+            model, t_llm.elapsed().as_secs_f32(), e);
+        format!("LLM request failed: {e}")
+    })?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
+        dbg_debate!("[llm] << ERROR model={} http_status={} took={:.1}s",
+            model, status, t_llm.elapsed().as_secs_f32());
         return Err(format!("LLM returned {status}: {text}"));
     }
 
     let text = resp.text().await.map_err(|e| e.to_string())?;
     let response: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("invalid JSON from LLM: {e}"))?;
+
+    let content_len = extract_content(&response).map(|c| c.len()).unwrap_or(0);
+    let finish = response.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("finish_reason")).and_then(|f| f.as_str()).unwrap_or("?");
+    dbg_debate!("[llm] << DONE model={} finish={} content_chars={} took={:.1}s",
+        model, finish, content_len, t_llm.elapsed().as_secs_f32());
 
     // Warn if reasoning model exhausted tokens (content will likely be empty/truncated)
     if let Some(choice) = response.get("choices").and_then(|c| c.get(0)) {

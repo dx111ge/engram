@@ -13,6 +13,11 @@ pub mod modes;
 
 pub use types::*;
 pub use agents::{assign_agent_slots, parse_turn_metadata, strip_metadata_lines, tools_for_agent};
+
+// ── Debug toggle ──────────────────────────────────────────────────────
+// Toggle via POST /config {"debate_debug": true} -- zero cost when off.
+// Logs go to debate_debug.log (append, open/close per line).
+pub static DEBATE_DEBUG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub use llm::parse_json_from_llm;
 
 use axum::extract::{Path, State};
@@ -936,6 +941,7 @@ pub async fn debate_test_gap(
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("test gap query");
     let topic = body.get("topic").and_then(|v| v.as_str()).unwrap_or("general");
     eprintln!("[test-gap] Starting: query=\"{}\"", query);
+    dbg_debate!("[test-gap] query=\"{}\"", query);
     let result = research::close_gaps(&state, &[query.to_string()], topic).await;
     let gap = result.into_iter().next().unwrap_or_else(|| GapResearch {
         gap_query: query.to_string(), source: "test".into(), findings: Vec::new(),

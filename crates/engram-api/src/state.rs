@@ -103,6 +103,10 @@ pub struct EngineConfig {
     /// Whether the onboarding wizard has been dismissed.
     #[serde(default)]
     pub wizard_dismissed: Option<bool>,
+    /// Enable verbose debug logging for the debate flow (LLM calls, fetches, search, timing).
+    /// Toggle via POST /config {"debate_debug": true}
+    #[serde(default)]
+    pub debate_debug: Option<bool>,
 }
 
 impl EngineConfig {
@@ -203,6 +207,14 @@ impl EngineConfig {
         }
         if other.wizard_dismissed.is_some() {
             self.wizard_dismissed = other.wizard_dismissed;
+        }
+        if other.debate_debug.is_some() {
+            self.debate_debug = other.debate_debug;
+            // Update the static flag immediately so all debate code sees it
+            crate::handlers::debate::DEBATE_DEBUG.store(
+                other.debate_debug.unwrap_or(false),
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
     }
 }
@@ -492,6 +504,10 @@ impl AppState {
     /// Load config from a sidecar file and store the path for later saves.
     pub fn load_config(&mut self, path: PathBuf) {
         let cfg = EngineConfig::load(&path);
+        // Sync debate_debug static from persisted config
+        if let Some(debug) = cfg.debate_debug {
+            crate::handlers::debate::DEBATE_DEBUG.store(debug, std::sync::atomic::Ordering::Relaxed);
+        }
         self.config = Arc::new(RwLock::new(cfg));
         self.config_path = Some(path);
     }

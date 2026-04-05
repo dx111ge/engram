@@ -350,6 +350,7 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str) 
     let mut ingested = false;
 
     let t0 = std::time::Instant::now();
+    dbg_debate!("[gap] ===== START gap: \"{}\" =====", &original_query[..original_query.len().min(80)]);
 
     // 1. Check graph first
     {
@@ -483,6 +484,8 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str) 
         }
     }
 
+    dbg_debate!("[gap] ===== END gap: {} answers, ingested={}, {:.1}s total =====", answers.len(), ingested, t0.elapsed().as_secs_f32());
+
     GapResearch {
         gap_query: original_query.to_string(),
         source: "persistent-research".into(),
@@ -512,6 +515,7 @@ async fn query_sparql_endpoints(state: &AppState, gap_query: &str) -> Option<Gap
     let client = &state.http_client;
 
     for ep in &enabled {
+        let t_ep = std::time::Instant::now();
         // Step 1: LLM generates a SPARQL query for this endpoint
         let sparql = generate_sparql_query(state, gap_query, &ep.name).await;
         let sparql = match sparql {
@@ -521,8 +525,10 @@ async fn query_sparql_endpoints(state: &AppState, gap_query: &str) -> Option<Gap
         eprintln!("[sparql] generated query for {}:\n{}", ep.name, &sparql[..sparql.len().min(500)]);
 
         // Step 2: Execute SPARQL
+        dbg_debate!("[sparql] >> querying {} url={}", ep.name, &ep.url[..ep.url.len().min(60)]);
         let mut req = client.get(&ep.url)
             .query(&[("query", sparql.as_str()), ("format", "json")])
+            .timeout(std::time::Duration::from_secs(10))
             .header("Accept", "application/sparql-results+json")
             .header("User-Agent", "engram/1.1 (knowledge-graph)");
 
@@ -546,7 +552,7 @@ async fn query_sparql_endpoints(state: &AppState, gap_query: &str) -> Option<Gap
         let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[sparql] {} request failed: {}", ep.name, e);
+                dbg_debate!("[sparql] << {} request failed in {:.1}s: {}", ep.name, t_ep.elapsed().as_secs_f32(), e);
                 continue;
             }
         };
@@ -585,7 +591,7 @@ async fn query_sparql_endpoints(state: &AppState, gap_query: &str) -> Option<Gap
             continue;
         }
 
-        eprintln!("[sparql] {} returned {} chars of data", ep.name, text.len());
+        dbg_debate!("[sparql] << {} returned {} chars of data in {:.1}s", ep.name, text.len(), t_ep.elapsed().as_secs_f32());
 
         return Some(GapAnswer {
             text,
@@ -690,6 +696,8 @@ LIMIT 20"#,
 
 /// Resolve an entity name to a Wikidata QID using the wbsearchentities API.
 async fn resolve_wikidata_qid(client: &reqwest::Client, entity_name: &str) -> Option<String> {
+    dbg_debate!("[wikidata] >> resolving entity=\"{}\"", entity_name);
+    let t0 = std::time::Instant::now();
 
     let url = format!(
         "https://www.wikidata.org/w/api.php?action=wbsearchentities&search={}&language=en&limit=3&format=json",
@@ -697,6 +705,7 @@ async fn resolve_wikidata_qid(client: &reqwest::Client, entity_name: &str) -> Op
     );
 
     let resp = client.get(&url)
+        .timeout(std::time::Duration::from_secs(5))
         .header("User-Agent", "engram/1.1 (knowledge-graph)")
         .send().await.ok()?;
 
@@ -707,10 +716,11 @@ async fn resolve_wikidata_qid(client: &reqwest::Client, entity_name: &str) -> Op
         let qid = first.get("id")?.as_str()?;
         let label = first.get("label").and_then(|l| l.as_str()).unwrap_or("");
         let desc = first.get("description").and_then(|d| d.as_str()).unwrap_or("");
-        eprintln!("[sparql] resolved \"{}\" -> {} ({}: {})", entity_name, qid, label, desc);
+        dbg_debate!("[wikidata] << resolved \"{}\" -> {} ({}: {}) in {:.1}s", entity_name, qid, label, desc, t0.elapsed().as_secs_f32());
         return Some(qid.to_string());
     }
 
+    dbg_debate!("[wikidata] << no result for \"{}\" in {:.1}s", entity_name, t0.elapsed().as_secs_f32());
     None
 }
 
@@ -751,6 +761,8 @@ fn format_sparql_results(data: &serde_json::Value) -> String {
 /// Uses the Wikipedia REST API (free, no auth, no rate limits, ~200ms).
 async fn search_wikipedia(state: &AppState, gap_query: &str) -> Option<GapAnswer> {
     let client = &state.http_client;
+    let t0 = std::time::Instant::now();
+    dbg_debate!("[wikipedia] >> searching \"{}\"", &gap_query[..gap_query.len().min(60)]);
 
     // Step 1: Search Wikipedia for relevant articles
     let search_url = format!(
@@ -759,27 +771,32 @@ async fn search_wikipedia(state: &AppState, gap_query: &str) -> Option<GapAnswer
     );
 
     let resp = client.get(&search_url)
+        .timeout(std::time::Duration::from_secs(8))
         .header("User-Agent", "engram/1.1 (knowledge-graph; contact@engram.dev)")
         .send().await.ok()?;
     if !resp.status().is_success() {
-        eprintln!("[wikipedia] search failed: HTTP {}", resp.status());
+        dbg_debate!("[wikipedia] << search failed: HTTP {} in {:.1}s", resp.status(), t0.elapsed().as_secs_f32());
         return None;
     }
 
     let data: serde_json::Value = resp.json().await.ok()?;
     let results = data.pointer("/query/search")?.as_array()?;
     if results.is_empty() {
+        dbg_debate!("[wikipedia] << 0 results in {:.1}s", t0.elapsed().as_secs_f32());
         return None;
     }
+    dbg_debate!("[wikipedia] << {} results in {:.1}s", results.len(), t0.elapsed().as_secs_f32());
 
     // Step 2: Get the extract (plain text summary) of the top result
     let title = results[0].get("title")?.as_str()?;
+    dbg_debate!("[wikipedia] >> fetching article \"{}\"", title);
     let extract_url = format!(
         "https://en.wikipedia.org/w/api.php?action=query&titles={}&prop=extracts&exintro=false&explaintext=true&exlimit=1&format=json",
         urlencoding::encode(title),
     );
 
     let resp = client.get(&extract_url)
+        .timeout(std::time::Duration::from_secs(8))
         .header("User-Agent", "engram/1.1 (knowledge-graph; contact@engram.dev)")
         .send().await.ok()?;
     let data: serde_json::Value = resp.json().await.ok()?;
@@ -790,8 +807,10 @@ async fn search_wikipedia(state: &AppState, gap_query: &str) -> Option<GapAnswer
     let extract = page.get("extract")?.as_str()?;
 
     if extract.len() < 100 {
+        dbg_debate!("[wikipedia] << article \"{}\" too short ({} chars) in {:.1}s", title, extract.len(), t0.elapsed().as_secs_f32());
         return None;
     }
+    dbg_debate!("[wikipedia] << article \"{}\" {} chars in {:.1}s", title, extract.len(), t0.elapsed().as_secs_f32());
 
     // Truncate to reasonable size for LLM
     let content = if extract.len() > 4000 { &extract[..4000] } else { extract };
@@ -851,17 +870,18 @@ or
     });
 
     let t0 = std::time::Instant::now();
+    dbg_debate!("[gap] >> LLM reading article \"{}\" ({} chars)", &title[..title.len().min(40)], content.len());
     let response = match call_llm(state, request).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[debate] gap-read: LLM error for \"{}\": {}", &title[..title.len().min(40)], e);
+            dbg_debate!("[gap] << LLM error for \"{}\" in {:.1}s: {}", &title[..title.len().min(40)], t0.elapsed().as_secs_f32(), e);
             return None;
         }
     };
     let raw_content = match extract_content(&response) {
         Some(c) => c,
         None => {
-            eprintln!("[debate] gap-read: empty LLM response for \"{}\"", &title[..title.len().min(40)]);
+            dbg_debate!("[gap] << empty LLM response for \"{}\" in {:.1}s", &title[..title.len().min(40)], t0.elapsed().as_secs_f32());
             return None;
         }
     };
@@ -869,13 +889,13 @@ or
     let json = match parse_json_from_llm(&raw_content) {
         Ok(j) => j,
         Err(e) => {
-            eprintln!("[debate] gap-read: JSON parse failed for \"{}\": {} | raw({} chars): {}", &title[..title.len().min(40)], e, raw_content.len(), &raw_content[..raw_content.len().min(500)]);
+            dbg_debate!("[gap] << JSON parse failed for \"{}\" in {:.1}s: {} | raw({} chars): {}", &title[..title.len().min(40)], t0.elapsed().as_secs_f32(), e, raw_content.len(), &raw_content[..raw_content.len().min(500)]);
             return None;
         }
     };
 
     let found = json.get("found").and_then(|f| f.as_bool()).unwrap_or(false);
-    eprintln!("[debate] gap-read: found={} in {:.1}s for \"{}\"", found, t0.elapsed().as_secs_f32(), &title[..title.len().min(40)]);
+    dbg_debate!("[gap] << LLM result: found={} in {:.1}s for \"{}\"", found, t0.elapsed().as_secs_f32(), &title[..title.len().min(40)]);
 
     if !found {
         return None;
@@ -928,16 +948,18 @@ Instructions:
         "think": false
     });
 
+    dbg_debate!("[gap] >> cross-validating {} answers via LLM", answers.len());
+    let t_cv = std::time::Instant::now();
     match call_llm(state, request).await {
         Ok(response) => {
             if let Some(content) = extract_content(&response) {
                 let trimmed = content.trim().to_string();
-                eprintln!("[debate] gap: cross-validated {} chars from 2 sources", trimmed.len());
+                dbg_debate!("[gap] << cross-validation done ({} chars) in {:.1}s", trimmed.len(), t_cv.elapsed().as_secs_f32());
                 return trimmed;
             }
         }
         Err(e) => {
-            eprintln!("[debate] gap: cross-validation LLM failed: {}, using source 1", e);
+            dbg_debate!("[gap] << cross-validation LLM failed in {:.1}s: {}, using source 1", t_cv.elapsed().as_secs_f32(), e);
         }
     }
 
@@ -1103,10 +1125,15 @@ pub use crate::handlers::web_search::WebSearchResult;
 
 /// Execute a web search and return structured results (with URLs).
 pub async fn execute_web_search_structured(state: &AppState, query: &str) -> Vec<WebSearchResult> {
+    let t0 = std::time::Instant::now();
+    dbg_debate!("[search] >> query=\"{}\"", &query[..query.len().min(60)]);
     match crate::handlers::web_search::search(state, query).await {
-        Ok(results) => results,
+        Ok(results) => {
+            dbg_debate!("[search] << {} results in {:.1}s", results.len(), t0.elapsed().as_secs_f32());
+            results
+        }
         Err(e) => {
-            eprintln!("[debate] web search failed: {}", e);
+            dbg_debate!("[search] << FAILED in {:.1}s: {}", t0.elapsed().as_secs_f32(), e);
             Vec::new()
         }
     }
@@ -1114,7 +1141,10 @@ pub async fn execute_web_search_structured(state: &AppState, query: &str) -> Vec
 
 /// Legacy wrapper: returns formatted strings for display.
 pub async fn execute_web_search(state: &AppState, query: &str) -> String {
+    let t0 = std::time::Instant::now();
+    dbg_debate!("[search] >> query=\"{}\"", &query[..query.len().min(60)]);
     let results = execute_web_search_structured(state, query).await;
+    dbg_debate!("[search] << {} results in {:.1}s", results.len(), t0.elapsed().as_secs_f32());
     results.iter()
         .map(|r| format!("- {}: {}", r.title, r.snippet))
         .collect::<Vec<_>>()
@@ -1143,33 +1173,34 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str) -> Option<St
         url.to_string()
     };
 
-    eprintln!("[fetch] START {}", url_short);
+    dbg_debate!("[fetch] >> START {}", url_short);
     let resp = match client.get(&fetch_url)
+        .timeout(std::time::Duration::from_secs(15))
         .header("User-Agent", "Mozilla/5.0 (compatible; engram/1.1)")
         .send().await
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[fetch] FAIL {:.1}s send error: {} | {}", t0.elapsed().as_secs_f32(), e, url_short);
+            dbg_debate!("[fetch] FAIL {:.1}s send error: {} | {}", t0.elapsed().as_secs_f32(), e, url_short);
             return None;
         }
     };
-    eprintln!("[fetch] HTTP {} in {:.1}s | {}", resp.status(), t0.elapsed().as_secs_f32(), url_short);
+    dbg_debate!("[fetch] HTTP {} in {:.1}s | {}", resp.status(), t0.elapsed().as_secs_f32(), url_short);
     if !resp.status().is_success() { return None; }
 
     let html = match resp.text().await {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("[fetch] FAIL {:.1}s body read error: {} | {}", t0.elapsed().as_secs_f32(), e, url_short);
+            dbg_debate!("[fetch] FAIL {:.1}s body read error: {} | {}", t0.elapsed().as_secs_f32(), e, url_short);
             return None;
         }
     };
-    eprintln!("[fetch] body {} bytes in {:.1}s | {}", html.len(), t0.elapsed().as_secs_f32(), url_short);
+    dbg_debate!("[fetch] body {} bytes in {:.1}s | {}", html.len(), t0.elapsed().as_secs_f32(), url_short);
     if html.len() < 200 { return None; }
 
     // Cap HTML size to prevent dom_smoothie from spending too long on huge pages
     let html_capped = if html.len() > 500_000 {
-        eprintln!("[fetch] SKIP html too large ({} bytes) | {}", html.len(), url_short);
+        dbg_debate!("[fetch] SKIP html too large ({} bytes) | {}", html.len(), url_short);
         return None;
     } else {
         html
@@ -1181,11 +1212,11 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str) -> Option<St
         let mut readability = dom_smoothie::Readability::new(html_capped, None, None).ok()?;
         let article = readability.parse().ok()?;
         let text = article.text_content.to_string().trim().to_string();
-        eprintln!("[fetch] parsed {} chars in {:.1}s", text.len(), t_parse.elapsed().as_secs_f32());
+        dbg_debate!("[fetch] parsed {} chars in {:.1}s", text.len(), t_parse.elapsed().as_secs_f32());
         if text.len() > 100 { Some(text) } else { None }
     }).await.ok().flatten();
 
-    eprintln!("[fetch] DONE {:.1}s result={} | {}", t0.elapsed().as_secs_f32(), if parse_result.is_some() { "OK" } else { "EMPTY" }, url_short);
+    dbg_debate!("[fetch] << DONE {:.1}s result={} | {}", t0.elapsed().as_secs_f32(), if parse_result.is_some() { "OK" } else { "EMPTY" }, url_short);
     parse_result
 }
 

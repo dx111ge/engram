@@ -43,7 +43,9 @@ pub async fn search(state: &AppState, query: &str) -> Result<Vec<WebSearchResult
 
     let client = &state.http_client;
 
-    match provider.as_str() {
+    let t0 = std::time::Instant::now();
+    dbg_debate!("[websearch] >> provider={} query=\"{}\"", provider, &query[..query.len().min(50)]);
+    let result = match provider.as_str() {
         "searxng" => search_searxng(client, query, search_url.as_deref(), "").await,
         "brave"   => search_brave(&client, query, &api_key).await,
         "duckduckgo" => search_duckduckgo(&client, query).await,
@@ -52,7 +54,10 @@ pub async fn search(state: &AppState, query: &str) -> Result<Vec<WebSearchResult
             eprintln!("[web_search] {}", msg);
             Err(msg)
         }
-    }
+    };
+    let count = result.as_ref().map(|r| r.len()).unwrap_or(0);
+    dbg_debate!("[websearch] << {} results in {:.1}s", count, t0.elapsed().as_secs_f32());
+    result
 }
 
 /// Like [`search`] but also accepts `time_range` (for the proxy endpoint).
@@ -71,7 +76,9 @@ pub async fn search_with_time_range(
 
     let client = &state.http_client;
 
-    match provider.as_str() {
+    let t0 = std::time::Instant::now();
+    dbg_debate!("[websearch] >> provider={} query=\"{}\" time_range={}", provider, &query[..query.len().min(50)], time_range);
+    let result = match provider.as_str() {
         "searxng" => search_searxng(client, query, search_url.as_deref(), time_range).await,
         "brave"   => search_brave(&client, query, &api_key).await,
         "duckduckgo" => search_duckduckgo(&client, query).await,
@@ -80,7 +87,10 @@ pub async fn search_with_time_range(
             eprintln!("[web_search] {}", msg);
             Err(msg)
         }
-    }
+    };
+    let count = result.as_ref().map(|r| r.len()).unwrap_or(0);
+    dbg_debate!("[websearch] << {} results in {:.1}s", count, t0.elapsed().as_secs_f32());
+    result
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -140,6 +150,7 @@ async fn search_searxng(
     );
 
     let resp = client.get(&url)
+        .timeout(std::time::Duration::from_secs(10))
         .header("Accept", "application/json")
         .send()
         .await
@@ -219,6 +230,7 @@ async fn search_brave(
     );
 
     let resp = client.get(&url)
+        .timeout(std::time::Duration::from_secs(10))
         .header("Accept", "application/json")
         .header("X-Subscription-Token", api_key)
         .send()
@@ -269,6 +281,7 @@ async fn search_duckduckgo(
     );
 
     let resp = client.get(&url)
+        .timeout(std::time::Duration::from_secs(10))
         .header("User-Agent", "engram/1.1")
         .send()
         .await

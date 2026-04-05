@@ -46,6 +46,7 @@ pub async fn get_config(
         "web_search_provider": cfg.web_search_provider,
         "web_search_url": cfg.web_search_url,
         "has_web_search_api_key": cfg.web_search_api_key.is_some(),
+        "debate_debug": cfg.debate_debug.unwrap_or(false),
     }))
 }
 
