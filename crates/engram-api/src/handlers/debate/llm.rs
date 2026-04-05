@@ -165,6 +165,17 @@ pub async fn call_llm(state: &AppState, request_body: serde_json::Value) -> Resu
     dbg_debate!("[llm] >> CALL model={} think={} max_tokens={} prompt_chars={} url={}",
         model, use_thinking, max_tokens, prompt_len, &url[..url.len().min(60)]);
 
+    // Log full prompt when debug is on
+    if crate::handlers::debate::DEBATE_DEBUG.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(msgs) = messages.as_array() {
+            for (i, m) in msgs.iter().enumerate() {
+                let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("?");
+                let content = m.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                dbg_debate!("[llm] prompt[{}] role={} chars={}\n{}", i, role, content.len(), content);
+            }
+        }
+    }
+
     let mut req = client.post(&url).header("Content-Type", "application/json");
     if !api_key.is_empty() {
         req = req.header("Authorization", format!("Bearer {api_key}"));

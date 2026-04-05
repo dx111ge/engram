@@ -264,6 +264,7 @@ pub(crate) fn render_llm_modal(
                 <li><strong>"Model size"</strong>" matters: 7-8B models are fast but may struggle with JSON output. 14B+ recommended for debate panel. For Ollama: check VRAM with "<code>"ollama ps"</code>"."</li>
                 <li><strong>"Context window"</strong>" is auto-detected when you change models. For Ollama, engram sends "<code>"num_ctx"</code>" to use the full window. If you see truncated output, verify with "<code>"ollama show &lt;model&gt;"</code>" and adjust via "<code>"POST /config {\"llm_context_window\": N}"</code>"."</li>
                 <li><strong>"Some models think by default"</strong>" (e.g. gemma4). If JSON output looks garbled or slow, ensure engram detects the model correctly -- thinking is suppressed for extraction tasks."</li>
+                <li><strong>"Ollama serializes"</strong>" concurrent requests for a single model. Multi-agent debates run agents sequentially. For parallel workloads, consider "<a href="https://docs.vllm.ai/" target="_blank" rel="noopener">"vLLM"</a>" or "<a href="https://huggingface.co/docs/text-generation-inference/" target="_blank" rel="noopener">"text-generation-inference"</a>"."</li>
             </ul>
         </div>
 

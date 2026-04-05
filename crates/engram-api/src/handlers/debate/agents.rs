@@ -604,6 +604,7 @@ pub async fn execute_agent_turn(
     mode: &DebateMode,
     mode_input: Option<&str>,
     tx: &tokio::sync::broadcast::Sender<String>,
+    cached_web_results: Option<&str>,
 ) -> Result<DebateTurn, String> {
     let mut all_tool_invocations = Vec::new();
     let mut all_evidence = Vec::new();
@@ -692,13 +693,17 @@ pub async fn execute_agent_turn(
         }
     }
 
-    // Web search (all agents get web access now)
+    // Web search (use cached results if available, otherwise fetch)
     {
         let _ = tx.send(format!("event: tool_call\ndata: {}\n\n", serde_json::json!({
             "agent_id": agent.id, "tool_name": "web_search", "args": {"query": topic}
         })));
 
-        let web_result = execute_web_search(state, topic).await;
+        let web_result = if let Some(cached) = cached_web_results {
+            cached.to_string()
+        } else {
+            execute_web_search(state, topic).await
+        };
         if !web_result.is_empty() {
             research_summary.push_str(&format!("\n[Web search for \"{}\"]:\n{}\n", topic, web_result));
             all_tool_invocations.push(ToolInvocation {

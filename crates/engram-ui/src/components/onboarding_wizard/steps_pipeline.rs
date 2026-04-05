@@ -526,6 +526,7 @@ pub(crate) fn render_step_llm(
                     <li>"For Ollama: "<strong>"14B+ parameters"</strong>" recommended (e.g. gemma4:e4b, qwen3:14b). Smaller models (7-8B) work but may produce unreliable JSON."</li>
                     <li><strong>"Thinking models"</strong>" (deepseek-r1, qwq, qwen3) give deeper analysis but use more tokens. engram toggles thinking per task automatically."</li>
                     <li>"Context window is auto-detected. For Ollama, run "<code>"ollama show &lt;model&gt;"</code>" to check. Larger context = better debate synthesis."</li>
+                    <li>"Ollama serializes concurrent requests for a single model. Multi-agent debates run agents sequentially. For parallel workloads, consider vLLM or text-generation-inference."</li>
                 </ul>
             </div>
         </div>

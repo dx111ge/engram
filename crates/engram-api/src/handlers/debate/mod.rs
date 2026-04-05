@@ -253,6 +253,7 @@ fn set_progress(state: &AppState, session_id: &str, phase: &str, message: &str, 
 
 /// Background debate execution loop.
 async fn run_debate_loop(state: AppState, session_id: String) {
+    dbg_debate!("[debate] ========== DEBATE LOOP START session={} ==========", session_id);
     // Get session info
     let (agents, max_rounds, current_round, topic, mode, mode_input, tx) = {
         let sessions = match state.debate_sessions.read() {
@@ -284,7 +285,9 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                 serde_json::json!({"status": "Researching", "message": "Building factual briefing..."})));
 
             let t_briefing = std::time::Instant::now();
+            dbg_debate!("[debate] >> briefing START topic=\"{}\"", &topic[..topic.len().min(60)]);
             let briefing = research::build_starter_plate(&state, &topic).await;
+            dbg_debate!("[debate] << briefing DONE {} facts, {} stored, {:.1}s", briefing.facts.len(), briefing.facts_stored, t_briefing.elapsed().as_secs_f32());
             eprintln!("[debate] briefing took {:.1}s ({} facts, {} stored)", t_briefing.elapsed().as_secs_f32(), briefing.facts.len(), briefing.facts_stored);
 
             // Store briefing + set status to Running
@@ -337,7 +340,12 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             serde_json::json!({"round": round_idx + 1})));
 
         let t_round = std::time::Instant::now();
+        dbg_debate!("[debate] ---- ROUND {} START ----", round_idx + 1);
         let mut round_turns = Vec::new();
+
+        // Search once per round, share across agents
+        let cached_web = research::execute_web_search(&state, &topic).await;
+        let cached_web_opt = if cached_web.is_empty() { None } else { Some(cached_web.as_str()) };
 
         // Execute each agent's turn
         let agent_total = agents.len();
@@ -366,12 +374,15 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                 }
             };
 
+            dbg_debate!("[debate] >> agent turn {}/{} \"{}\" round={}", agent_idx + 1, agent_total, agent.name, round_idx + 1);
+            let t_agent = std::time::Instant::now();
             match agents::execute_agent_turn(
                 &state, agent, &topic, round_idx, &prev_turns, &agents,
                 user_injection.as_deref(), &prev_gap_research, &briefing_summary,
-                &mode, mode_input.as_deref(), &tx,
+                &mode, mode_input.as_deref(), &tx, cached_web_opt,
             ).await {
                 Ok(turn) => {
+                    dbg_debate!("[debate] << agent turn \"{}\" done conf={:.0}% evidence={} took={:.1}s", agent.name, turn.confidence * 100.0, turn.evidence.len(), t_agent.elapsed().as_secs_f32());
                     let _ = tx.send(format!("event: turn_complete\ndata: {}\n\n",
                         serde_json::json!({
                             "agent_id": agent.id,
@@ -385,9 +396,9 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                     round_turns.push(turn);
                 }
                 Err(e) => {
+                    dbg_debate!("[debate] << agent turn \"{}\" FAILED took={:.1}s err={}", agent.name, t_agent.elapsed().as_secs_f32(), e);
                     let _ = tx.send(format!("event: error\ndata: {}\n\n",
                         serde_json::json!({"agent_id": agent.id, "error": e})));
-                    // Continue with other agents
                 }
             }
         }
@@ -411,13 +422,16 @@ async fn run_debate_loop(state: AppState, session_id: String) {
         };
 
         let t_agents_done = t_round.elapsed();
+        dbg_debate!("[debate] round {} agents done {:.1}s ({} turns)", round_idx + 1, t_agents_done.as_secs_f32(), round.turns.len());
         eprintln!("[debate] round {} agents took {:.1}s ({} turns)", round_idx + 1, t_agents_done.as_secs_f32(), round.turns.len());
 
         // ── Moderator fact-check ──
         set_progress(&state, &session_id, "moderating",
             "Fact-checking claims...", None, 0, 0);
         let t_mod = std::time::Instant::now();
+        dbg_debate!("[debate] >> moderator fact-check round={}", round_idx + 1);
         let checks = research::moderate_round(&state, &round, &agents, &topic).await;
+        dbg_debate!("[debate] << moderator done {} checks {:.1}s", checks.len(), t_mod.elapsed().as_secs_f32());
         eprintln!("[debate] round {} moderator took {:.1}s ({} checks)", round_idx + 1, t_mod.elapsed().as_secs_f32(), checks.len());
         round.moderator_checks = checks;
 
@@ -429,7 +443,9 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                 serde_json::json!({"round": round_idx + 1})));
 
             let t_gap_start = std::time::Instant::now();
+            dbg_debate!("[debate] >> gap detection round={}", round_idx + 1);
             let gap_queries = research::detect_gaps(&state, &round, &agents, &topic, &already_researched).await;
+            dbg_debate!("[debate] << gap detection found {} gaps {:.1}s", gap_queries.len(), t_gap_start.elapsed().as_secs_f32());
             eprintln!("[debate] gap detection took {:.1}s, found {} gaps", t_gap_start.elapsed().as_secs_f32(), gap_queries.len());
 
             if !gap_queries.is_empty() {
@@ -443,7 +459,10 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                     set_progress(&state, &session_id, "gap_closing",
                         &format!("Closing gap {}/{}: {}...", gi + 1, gap_queries.len(), &gq[..gq.len().min(50)]),
                         None, gi, gap_queries.len());
+                    dbg_debate!("[debate] >> gap {}/{} \"{}\"", gi + 1, gap_queries.len(), &gq[..gq.len().min(60)]);
+                    let t_gap = std::time::Instant::now();
                     let result = research::close_single_gap_with_timeout(&state, gq, &topic, 90).await;
+                    dbg_debate!("[debate] << gap {}/{} ingested={} facts={} {:.1}s", gi + 1, gap_queries.len(), result.ingested, result.facts_stored, t_gap.elapsed().as_secs_f32());
                     gap_results.push(result);
                 }
                 eprintln!("[debate] gap-closing took {:.1}s total for {} gaps", t_close_start.elapsed().as_secs_f32(), gap_queries.len());
@@ -462,8 +481,11 @@ async fn run_debate_loop(state: AppState, session_id: String) {
 
                 round.gap_research = gap_results;
             }
+        } else {
+            dbg_debate!("[debate] skip gap-closing on final round (by design)");
         }
 
+        dbg_debate!("[debate] ---- ROUND {} DONE {:.1}s ----", round_idx + 1, t_round.elapsed().as_secs_f32());
         eprintln!("[debate] round {} TOTAL: {:.1}s", round_idx + 1, t_round.elapsed().as_secs_f32());
 
         // Store round results

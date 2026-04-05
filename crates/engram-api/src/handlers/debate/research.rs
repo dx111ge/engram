@@ -1125,9 +1125,23 @@ pub use crate::handlers::web_search::WebSearchResult;
 
 /// Execute a web search and return structured results (with URLs).
 pub async fn execute_web_search_structured(state: &AppState, query: &str) -> Vec<WebSearchResult> {
+    // Truncate overly long queries -- search engines work better with shorter queries
+    let search_query = if query.len() > 120 {
+        // Take first 120 chars and try to break at a word boundary
+        let truncated = &query[..120];
+        match truncated.rfind(' ') {
+            Some(pos) if pos > 60 => &truncated[..pos],
+            _ => truncated,
+        }
+    } else {
+        query
+    };
+
     let t0 = std::time::Instant::now();
-    dbg_debate!("[search] >> query=\"{}\"", &query[..query.len().min(60)]);
-    match crate::handlers::web_search::search(state, query).await {
+    dbg_debate!("[search] >> query=\"{}\"{}",
+        &query[..query.len().min(60)],
+        if search_query.len() < query.len() { format!(" (truncated to {} chars)", search_query.len()) } else { String::new() });
+    match crate::handlers::web_search::search(state, search_query).await {
         Ok(results) => {
             dbg_debate!("[search] << {} results in {:.1}s", results.len(), t0.elapsed().as_secs_f32());
             results
@@ -1141,10 +1155,7 @@ pub async fn execute_web_search_structured(state: &AppState, query: &str) -> Vec
 
 /// Legacy wrapper: returns formatted strings for display.
 pub async fn execute_web_search(state: &AppState, query: &str) -> String {
-    let t0 = std::time::Instant::now();
-    dbg_debate!("[search] >> query=\"{}\"", &query[..query.len().min(60)]);
     let results = execute_web_search_structured(state, query).await;
-    dbg_debate!("[search] << {} results in {:.1}s", results.len(), t0.elapsed().as_secs_f32());
     results.iter()
         .map(|r| format!("- {}: {}", r.title, r.snippet))
         .collect::<Vec<_>>()
