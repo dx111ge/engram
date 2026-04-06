@@ -24,6 +24,68 @@ pub(crate) fn write_lock_err() -> (StatusCode, Json<ErrorResponse>) {
     api_err(StatusCode::INTERNAL_SERVER_ERROR, "graph write lock poisoned")
 }
 
+/// Maximum time to wait for a graph write lock before giving up.
+/// Prevents any handler from blocking the async runtime indefinitely.
+const GRAPH_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Acquire a graph write lock off the async runtime with a timeout.
+/// Runs the closure in `spawn_blocking` so std::sync::RwLock never blocks tokio.
+/// Use this for ALL graph write operations in async handlers.
+pub(crate) async fn with_graph_write<F, T>(
+    state: &AppState,
+    f: F,
+) -> Result<T, (StatusCode, Json<ErrorResponse>)>
+where
+    F: FnOnce(&mut engram_core::Graph) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let graph = state.graph.clone();
+    let result = tokio::time::timeout(
+        GRAPH_LOCK_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            let mut g = graph.write().map_err(|_| ())?;
+            Ok::<T, ()>(f(&mut g))
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Ok(val))) => Ok(val),
+        Ok(Ok(Err(_))) => Err(write_lock_err()),
+        Ok(Err(_)) => Err(api_err(StatusCode::INTERNAL_SERVER_ERROR, "graph write task panicked")),
+        Err(_) => Err(api_err(StatusCode::SERVICE_UNAVAILABLE, "graph write lock timeout -- try again")),
+    }
+}
+
+/// Acquire a graph read lock off the async runtime with a timeout.
+/// Runs the closure in `spawn_blocking` so std::sync::RwLock never blocks tokio.
+/// Use this for ALL graph read operations in async handlers.
+pub(crate) async fn with_graph_read<F, T>(
+    state: &AppState,
+    f: F,
+) -> Result<T, (StatusCode, Json<ErrorResponse>)>
+where
+    F: FnOnce(&engram_core::Graph) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let graph = state.graph.clone();
+    let result = tokio::time::timeout(
+        GRAPH_LOCK_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            let g = graph.read().map_err(|_| ())?;
+            Ok::<T, ()>(f(&g))
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Ok(val))) => Ok(val),
+        Ok(Ok(Err(_))) => Err(read_lock_err()),
+        Ok(Err(_)) => Err(api_err(StatusCode::INTERNAL_SERVER_ERROR, "graph read task panicked")),
+        Err(_) => Err(api_err(StatusCode::SERVICE_UNAVAILABLE, "graph read lock timeout -- try again")),
+    }
+}
+
 pub(crate) fn provenance(source: &Option<String>) -> Provenance {
     match source {
         Some(s) => Provenance::user(s),

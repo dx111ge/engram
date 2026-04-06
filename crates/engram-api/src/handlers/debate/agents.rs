@@ -205,15 +205,58 @@ fn tool_def(name: &str, description: &str, parameters: serde_json::Value) -> ser
 
 /// Execute a tool call against the local graph (server-side, no HTTP round-trip).
 /// Uses the label-based Graph API (search_text, edges_from, node_confidence, etc.).
+/// All graph operations run in spawn_blocking with a timeout to never block the async runtime.
 async fn execute_tool(state: &AppState, tool_name: &str, args: &serde_json::Value) -> serde_json::Value {
+    // Tools that don't touch the graph
+    match tool_name {
+        "engram_investigate" => {
+            let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
+            return serde_json::json!({
+                "note": "Web search capability. Results would come from configured web search provider.",
+                "query": query,
+                "status": "web_search_placeholder"
+            });
+        }
+        _ if !tool_name.starts_with("engram_") => {
+            return serde_json::json!({"error": format!("unknown tool: {}", tool_name)});
+        }
+        _ => {}
+    }
+
+    // All graph tools: run in spawn_blocking with 10s timeout
+    let graph = state.graph.clone();
+    let tool = tool_name.to_string();
+    let args = args.clone();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            execute_tool_sync(&graph, &tool, &args)
+        }),
+    ).await;
+
+    match result {
+        Ok(Ok(val)) => val,
+        Ok(Err(_)) => serde_json::json!({"error": "graph tool task panicked"}),
+        Err(_) => serde_json::json!({"error": "graph tool timed out (10s) -- lock contention likely"}),
+    }
+}
+
+/// Synchronous graph tool execution (runs on blocking threadpool).
+fn execute_tool_sync(
+    graph: &std::sync::Arc<std::sync::RwLock<engram_core::Graph>>,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> serde_json::Value {
+    let g = match graph.read() {
+        Ok(g) => g,
+        Err(_) => return serde_json::json!({"error": "graph lock failed"}),
+    };
+
     match tool_name {
         "engram_search" => {
             let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
             let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
-            let g = match state.graph.read() {
-                Ok(g) => g,
-                Err(_) => return serde_json::json!({"error": "graph lock failed"}),
-            };
             match g.search_text(query, limit) {
                 Ok(results) => {
                     let items: Vec<serde_json::Value> = results.iter().map(|r| {
@@ -231,10 +274,6 @@ async fn execute_tool(state: &AppState, tool_name: &str, args: &serde_json::Valu
         "engram_query" => {
             let start = args.get("start").and_then(|s| s.as_str()).unwrap_or("");
             let depth = args.get("depth").and_then(|d| d.as_u64()).unwrap_or(2) as usize;
-            let g = match state.graph.read() {
-                Ok(g) => g,
-                Err(_) => return serde_json::json!({"error": "graph lock failed"}),
-            };
             // BFS traversal using label-based API
             let mut visited = std::collections::HashSet::new();
             let mut queue = std::collections::VecDeque::new();
@@ -270,10 +309,6 @@ async fn execute_tool(state: &AppState, tool_name: &str, args: &serde_json::Valu
         }
         "engram_explain" => {
             let entity = args.get("entity").and_then(|e| e.as_str()).unwrap_or("");
-            let g = match state.graph.read() {
-                Ok(g) => g,
-                Err(_) => return serde_json::json!({"error": "graph lock failed"}),
-            };
             let conf = g.node_confidence(entity).unwrap_or(None);
             match conf {
                 Some(c) => {
@@ -300,10 +335,6 @@ async fn execute_tool(state: &AppState, tool_name: &str, args: &serde_json::Valu
         "engram_what_if" => {
             let entity = args.get("entity").and_then(|e| e.as_str()).unwrap_or("");
             let new_conf = args.get("new_confidence").and_then(|c| c.as_f64()).unwrap_or(0.5) as f32;
-            let g = match state.graph.read() {
-                Ok(g) => g,
-                Err(_) => return serde_json::json!({"error": "graph lock failed"}),
-            };
             match g.node_confidence(entity).unwrap_or(None) {
                 Some(current_conf) => {
                     let delta = new_conf - current_conf;
@@ -330,10 +361,6 @@ async fn execute_tool(state: &AppState, tool_name: &str, args: &serde_json::Valu
         }
         "engram_contradictions" => {
             let entity = args.get("entity").and_then(|e| e.as_str());
-            let g = match state.graph.read() {
-                Ok(g) => g,
-                Err(_) => return serde_json::json!({"error": "graph lock failed"}),
-            };
             let mut contradictions = Vec::new();
             if let Some(label) = entity {
                 let edges = g.edges_from(label).unwrap_or_default();
@@ -350,14 +377,6 @@ async fn execute_tool(state: &AppState, tool_name: &str, args: &serde_json::Valu
                 }
             }
             serde_json::json!({"contradictions": contradictions})
-        }
-        "engram_investigate" => {
-            let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
-            serde_json::json!({
-                "note": "Web search capability. Results would come from configured web search provider.",
-                "query": query,
-                "status": "web_search_placeholder"
-            })
         }
         _ => serde_json::json!({"error": format!("unknown tool: {}", tool_name)}),
     }
@@ -377,14 +396,25 @@ fn build_agent_system_prompt(
     briefing_summary: &str,
     mode: &DebateMode,
     mode_input: Option<&str>,
+    compressed_context: &str,
 ) -> String {
     let mut prompt = format!(
         "You are {}, {}.\n\n",
         agent.name, agent.persona_description
     );
 
-    // Include the briefing (factual foundation for all agents)
-    if !briefing_summary.is_empty() {
+    // For round 0: use the raw briefing. For later rounds: use compressed context
+    // which already contains briefing + all previous rounds compressed by LLM.
+    if round == 0 {
+        if !briefing_summary.is_empty() {
+            prompt.push_str(&format!("{}\n\n", briefing_summary));
+            prompt.push_str("The above briefing contains verified facts. Use them as the foundation for your analysis.\n\n");
+        }
+    } else if !compressed_context.is_empty() {
+        prompt.push_str(compressed_context);
+        prompt.push_str("\n\nThe above summarizes the briefing and all previous rounds. Do NOT restate what's already covered -- build on it.\n\n");
+    } else if !briefing_summary.is_empty() {
+        // Fallback: no compressed context available yet
         prompt.push_str(&format!("{}\n\n", briefing_summary));
         prompt.push_str("The above briefing contains verified facts. Use them as the foundation for your analysis.\n\n");
     }
@@ -432,17 +462,19 @@ fn build_agent_system_prompt(
 
         // Evolution instructions (only after round 1)
         prompt.push_str(
-            "IMPORTANT -- POSITION EVOLUTION:\n\
-             This is NOT round 1. You have heard other agents' arguments. You MUST evolve your thinking:\n\
-             - If another agent presented compelling evidence you hadn't considered, ACKNOWLEDGE it and adjust your position.\n\
-             - If your confidence should change based on what you heard, change it. Don't stubbornly hold the same number.\n\
-             - You CAN concede specific points while maintaining your overall stance.\n\
-             - You CAN shift your position entirely if the evidence warrants it.\n\
-             - Real analysts update their views. Stubbornly repeating the same position without engaging with new evidence is a sign of bias, not strength.\n"
+            "CRITICAL -- DO NOT REPEAT YOURSELF:\n\
+             The compressed context above already contains your previous arguments. The reader has seen them.\n\
+             In this round you MUST:\n\
+             1. Start with what CHANGED since last round (new evidence, shifted positions, concessions).\n\
+             2. Directly engage with specific points other agents made -- agree, refute, or qualify.\n\
+             3. Introduce NEW arguments or evidence you haven't used before.\n\
+             4. Update your confidence number based on what you learned.\n\
+             DO NOT restate your previous position. DO NOT summarize what you said before.\n\
+             If you have nothing new to add, say so in one sentence and focus on responding to others.\n"
         );
         if !agent.bias.is_neutral {
             prompt.push_str(
-                "- Even as an advocate, you should acknowledge when opposing evidence is strong. \
+                "- Even as an advocate, acknowledge when opposing evidence is strong. \
                  Credibility comes from honest engagement, not blind advocacy.\n"
             );
         }
@@ -605,6 +637,7 @@ pub async fn execute_agent_turn(
     mode_input: Option<&str>,
     tx: &tokio::sync::broadcast::Sender<String>,
     cached_web_results: Option<&str>,
+    compressed_context: &str,
 ) -> Result<DebateTurn, String> {
     let mut all_tool_invocations = Vec::new();
     let mut all_evidence = Vec::new();
@@ -742,7 +775,7 @@ pub async fn execute_agent_turn(
 
     // ── Phase 2: LLM position formation (no function calling) ──
 
-    let system_prompt = build_agent_system_prompt(agent, topic, round, previous_turns, all_agents, user_injection, gap_research, briefing_summary, mode, mode_input);
+    let system_prompt = build_agent_system_prompt(agent, topic, round, previous_turns, all_agents, user_injection, gap_research, briefing_summary, mode, mode_input, compressed_context);
 
     let user_content = if research_summary.is_empty() {
         format!(

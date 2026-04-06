@@ -361,15 +361,19 @@ pub async fn serve(state: AppState, addr: &str) -> std::io::Result<()> {
 /// Start the HTTP server, optionally serving a frontend directory.
 pub async fn serve_with_frontend(state: AppState, addr: &str, frontend_dir: Option<&str>) -> std::io::Result<()> {
     // Background checkpoint timer — flush dirty writes every 5 seconds
+    // Runs in spawn_blocking to avoid holding graph write lock on the tokio runtime.
     let checkpoint_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut cleanup_counter = 0u32;
         loop {
             interval.tick().await;
-            if checkpoint_state.checkpoint_if_dirty() {
-                tracing::debug!("background checkpoint complete");
-            }
+            let cs = checkpoint_state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if cs.checkpoint_if_dirty() {
+                    tracing::debug!("background checkpoint complete");
+                }
+            }).await;
             // Clean up expired sessions every 60 seconds (12 ticks)
             cleanup_counter += 1;
             if cleanup_counter >= 12 {
@@ -407,7 +411,8 @@ pub async fn serve_with_frontend(state: AppState, addr: &str, frontend_dir: Opti
                                 results.len()
                             );
                             // Update current_probability on assessment graph nodes
-                            if let Ok(mut g) = assess_state.graph.write() {
+                            // try_write to avoid blocking readers (debate agents, search API)
+                            if let Ok(mut g) = assess_state.graph.try_write() {
                                 for result in &results {
                                     let prob_with_shift = format!("{}|{}", result.new_probability, result.shift);
                                     let _ = g.set_property(&result.label, "current_probability", &prob_with_shift);

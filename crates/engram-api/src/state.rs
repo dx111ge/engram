@@ -708,13 +708,32 @@ impl AppState {
         self.dirty.store(true, Ordering::Release);
     }
 
-    /// If dirty, acquire write lock and checkpoint. Returns true if flushed.
+    /// If dirty, checkpoint in two phases to minimize write-lock hold time:
+    ///   Phase 1 (write lock): WAL flush -- fast, microseconds to low ms.
+    ///   Phase 2 (read lock):  sidecar flush -- slow disk I/O, but readers aren't blocked.
+    /// Uses try_write/try_read to never block the caller.
     pub fn checkpoint_if_dirty(&self) -> bool {
         let mut flushed = false;
         if self.dirty.swap(false, Ordering::AcqRel) {
-            if let Ok(mut g) = self.graph.write() {
-                let _ = g.checkpoint();
+            // Phase 1: WAL checkpoint under write lock (fast -- no disk I/O beyond mmap sync)
+            match self.graph.try_write() {
+                Ok(mut g) => {
+                    let _ = g.checkpoint_wal();
+                    // Write lock released here when `g` drops
+                }
+                Err(_) => {
+                    // Lock contended — restore dirty flag, retry next tick
+                    self.dirty.store(true, Ordering::Release);
+                    return false;
+                }
+            }
+            // Phase 2: sidecar flush under read lock (slow I/O, but readers can proceed)
+            if let Ok(g) = self.graph.try_read() {
+                let _ = g.flush_sidecars();
                 flushed = true;
+            } else {
+                // Sidecars will be flushed next tick
+                self.dirty.store(true, Ordering::Release);
             }
         }
         // Also checkpoint assessment sidecar
@@ -819,9 +838,10 @@ impl AppState {
             let rules_snapshot: Vec<Rule> = rules_guard.clone();
             drop(rules_guard);
 
-            let mut g = match graph.write() {
+            // try_write to avoid blocking readers (debate agents, search API)
+            let mut g = match graph.try_write() {
                 Ok(g) => g,
-                Err(_) => return,
+                Err(_) => return, // lock contended, skip this evaluation
             };
             let prov = engram_core::graph::Provenance {
                 source_type: engram_core::graph::SourceType::Derived,

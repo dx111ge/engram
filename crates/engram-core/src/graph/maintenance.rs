@@ -77,8 +77,25 @@ impl Graph {
     }
 
     /// Flush and checkpoint everything: mmap, WAL, types, properties, vectors, co-occurrence.
+    /// NOTE: Prefer `checkpoint_wal` + `flush_sidecars` for concurrent workloads.
+    /// This method holds &mut self for the entire duration including disk I/O,
+    /// which blocks all readers when called under a write lock.
     pub fn checkpoint(&mut self) -> Result<()> {
-        self.brain.checkpoint()?;
+        self.checkpoint_wal()?;
+        self.flush_sidecars()?;
+        Ok(())
+    }
+
+    /// Phase 1: WAL checkpoint only. Requires &mut self (modifies mmap header).
+    /// Fast -- applies WAL entries to mmap and syncs. Microseconds to low milliseconds.
+    pub fn checkpoint_wal(&mut self) -> Result<()> {
+        self.brain.checkpoint()
+    }
+
+    /// Phase 2: Flush all sidecar files to disk. Only needs &self (no graph mutation).
+    /// Slow -- does disk I/O for properties, vectors, co-occurrence, types.
+    /// Safe to call with a read lock or no lock, since sidecars use interior mutability.
+    pub fn flush_sidecars(&self) -> Result<()> {
         self.type_registry.flush()?;
         self.props.flush()?;
         self.edge_props.flush()?;

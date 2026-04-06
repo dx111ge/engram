@@ -125,29 +125,41 @@ Return ONLY a JSON array:
 async fn gather_facts_for_question(state: &AppState, question: &str, _topic: &str) -> Vec<BriefingFact> {
     let mut facts = Vec::new();
 
-    // Graph search
+    // Graph search (spawn_blocking to never block async runtime)
     {
-        let g = match state.graph.read() {
-            Ok(g) => g,
-            Err(_) => return facts,
-        };
-        if let Ok(results) = g.search_text(question, 5) {
-            for r in &results {
-                if r.confidence >= 0.3 {
-                    let mut content = format!("{} (confidence: {:.2})", r.label, r.confidence);
-                    if let Ok(edges) = g.edges_from(&r.label) {
-                        for e in edges.iter().take(3) {
-                            content.push_str(&format!("\n  -> {} -> {} ({:.2})", e.relationship, e.to, e.confidence));
+        let graph = state.graph.clone();
+        let q = question.to_string();
+        let graph_facts = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::task::spawn_blocking(move || {
+                let g = match graph.read() {
+                    Ok(g) => g,
+                    Err(_) => return Vec::new(),
+                };
+                let mut result = Vec::new();
+                if let Ok(results) = g.search_text(&q, 5) {
+                    for r in &results {
+                        if r.confidence >= 0.3 {
+                            let mut content = format!("{} (confidence: {:.2})", r.label, r.confidence);
+                            if let Ok(edges) = g.edges_from(&r.label) {
+                                for e in edges.iter().take(3) {
+                                    content.push_str(&format!("\n  -> {} -> {} ({:.2})", e.relationship, e.to, e.confidence));
+                                }
+                            }
+                            result.push(BriefingFact {
+                                question: q.clone(),
+                                source: "graph".into(),
+                                content,
+                                confidence: r.confidence,
+                            });
                         }
                     }
-                    facts.push(BriefingFact {
-                        question: question.to_string(),
-                        source: "graph".into(),
-                        content,
-                        confidence: r.confidence,
-                    });
                 }
-            }
+                result
+            }),
+        ).await;
+        if let Ok(Ok(graph_results)) = graph_facts {
+            facts.extend(graph_results);
         }
     }
 
@@ -172,33 +184,42 @@ async fn gather_facts_for_question(state: &AppState, question: &str, _topic: &st
 
 /// Search graph for topic-related facts (used after ingest to find enriched data).
 async fn gather_graph_facts(state: &AppState, topic: &str) -> Vec<BriefingFact> {
-    let mut facts = Vec::new();
-    let g = match state.graph.read() {
-        Ok(g) => g,
-        Err(_) => return facts,
-    };
-
-    let terms: Vec<&str> = topic.split_whitespace().filter(|w| w.len() > 3).take(5).collect();
-    for term in terms {
-        if let Ok(results) = g.search_text(term, 3) {
-            for r in &results {
-                let mut content = format!("{} (confidence: {:.2})", r.label, r.confidence);
-                if let Ok(edges) = g.edges_from(&r.label) {
-                    for e in edges.iter().take(5) {
-                        content.push_str(&format!("\n  -> {} -> {} ({:.2})", e.relationship, e.to, e.confidence));
+    let graph = state.graph.clone();
+    let topic_owned = topic.to_string();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            let mut facts = Vec::new();
+            let g = match graph.read() {
+                Ok(g) => g,
+                Err(_) => return facts,
+            };
+            let terms: Vec<&str> = topic_owned.split_whitespace().filter(|w| w.len() > 3).take(5).collect();
+            for term in terms {
+                if let Ok(results) = g.search_text(term, 3) {
+                    for r in &results {
+                        let mut content = format!("{} (confidence: {:.2})", r.label, r.confidence);
+                        if let Ok(edges) = g.edges_from(&r.label) {
+                            for e in edges.iter().take(5) {
+                                content.push_str(&format!("\n  -> {} -> {} ({:.2})", e.relationship, e.to, e.confidence));
+                            }
+                        }
+                        facts.push(BriefingFact {
+                            question: topic_owned.clone(),
+                            source: "graph".into(),
+                            content,
+                            confidence: r.confidence,
+                        });
                     }
                 }
-                facts.push(BriefingFact {
-                    question: topic.to_string(),
-                    source: "graph".into(),
-                    content,
-                    confidence: r.confidence,
-                });
             }
-        }
+            facts
+        }),
+    ).await;
+    match result {
+        Ok(Ok(facts)) => facts,
+        _ => Vec::new(),
     }
-
-    facts
 }
 
 fn build_briefing_summary(facts: &[BriefingFact], topic: &str) -> String {
@@ -271,8 +292,11 @@ Return ONLY a JSON array: ["query 1", "query 2"]"#,
         "think": false
     });
 
+    dbg_debate!("[gap-detect] calling LLM with {} chars prompt", prompt.len());
+    eprintln!("[debate] detect_gaps: calling LLM now...");
     match call_llm(state, request).await {
         Ok(response) => {
+            dbg_debate!("[gap-detect] LLM returned OK");
             let content = extract_content(&response);
             let content_str = content.unwrap_or_default();
             if content_str.is_empty() {
@@ -357,17 +381,30 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
     let t0 = std::time::Instant::now();
     dbg_debate!("[gap] ===== START gap: \"{}\" =====", original_query);
 
-    // 1. Check graph first
+    // 1. Check graph first (spawn_blocking to never block async runtime)
     {
-        let g = match state.graph.read() {
-            Ok(g) => g,
-            Err(_) => return empty_gap(original_query),
-        };
-        if let Ok(results) = g.search_text(original_query, 5) {
-            for r in &results {
-                let finding = format!("[graph] {} (confidence: {:.2})", r.label, r.confidence);
-                if !all_findings.contains(&finding) {
-                    all_findings.push(finding);
+        let graph = state.graph.clone();
+        let q = original_query.to_string();
+        let graph_findings = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::task::spawn_blocking(move || {
+                let g = match graph.read() {
+                    Ok(g) => g,
+                    Err(_) => return Vec::new(),
+                };
+                let mut findings = Vec::new();
+                if let Ok(results) = g.search_text(&q, 5) {
+                    for r in &results {
+                        findings.push(format!("[graph] {} (confidence: {:.2})", r.label, r.confidence));
+                    }
+                }
+                findings
+            }),
+        ).await;
+        if let Ok(Ok(findings)) = graph_findings {
+            for f in findings {
+                if !all_findings.contains(&f) {
+                    all_findings.push(f);
                 }
             }
         }
@@ -508,7 +545,7 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
     } else {
         // NER produced nothing -- store directly as fact node
         let prov = engram_core::graph::Provenance::user(&source_label);
-        if let Ok(mut g) = state.graph.write() {
+        if let Ok(mut g) = state.graph.try_write() {
             let label = if final_answer.len() > 250 { &final_answer[..250] } else { &final_answer };
             if g.store_with_confidence(label, 0.55, &prov).is_ok() {
                 state.dirty.store(true, std::sync::atomic::Ordering::Release);
@@ -1101,41 +1138,53 @@ Return ONLY a JSON array:
         }
     };
 
-    let mut checks = Vec::new();
-    let g = match state.graph.read() {
-        Ok(g) => g,
-        Err(_) => return checks,
-    };
+    // Fact-check claims against graph (spawn_blocking to never block async runtime)
+    let graph = state.graph.clone();
+    let claims_clone = claims.clone();
+    let checks_result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            let mut checks = Vec::new();
+            let g = match graph.read() {
+                Ok(g) => g,
+                Err(_) => return checks,
+            };
 
-    for (agent_id, claim) in &claims {
-        let results = g.search_text(claim, 3).unwrap_or_default();
-        let (verdict, confidence, explanation) = if results.is_empty() {
-            (ModeratorVerdict::Unsupported, None,
-             format!("No evidence in engram for: \"{}\"", claim))
-        } else {
-            let best = &results[0];
-            if best.confidence >= 0.7 {
-                (ModeratorVerdict::Supported, Some(best.confidence),
-                 format!("Supported: {} ({:.2})", best.label, best.confidence))
-            } else if best.confidence < 0.3 {
-                (ModeratorVerdict::LowConfidence, Some(best.confidence),
-                 format!("Low-confidence: {} ({:.2})", best.label, best.confidence))
-            } else {
-                (ModeratorVerdict::Supported, Some(best.confidence),
-                 format!("Partially supported: {} ({:.2})", best.label, best.confidence))
+            for (agent_id, claim) in &claims_clone {
+                let results = g.search_text(claim, 3).unwrap_or_default();
+                let (verdict, confidence, explanation) = if results.is_empty() {
+                    (ModeratorVerdict::Unsupported, None,
+                     format!("No evidence in engram for: \"{}\"", claim))
+                } else {
+                    let best = &results[0];
+                    if best.confidence >= 0.7 {
+                        (ModeratorVerdict::Supported, Some(best.confidence),
+                         format!("Supported: {} ({:.2})", best.label, best.confidence))
+                    } else if best.confidence < 0.3 {
+                        (ModeratorVerdict::LowConfidence, Some(best.confidence),
+                         format!("Low-confidence: {} ({:.2})", best.label, best.confidence))
+                    } else {
+                        (ModeratorVerdict::Supported, Some(best.confidence),
+                         format!("Partially supported: {} ({:.2})", best.label, best.confidence))
+                    }
+                };
+
+                checks.push(ModeratorCheck {
+                    agent_id: agent_id.clone(),
+                    claim: claim.clone(),
+                    verdict,
+                    engram_confidence: confidence,
+                    explanation,
+                });
             }
-        };
+            checks
+        }),
+    ).await;
 
-        checks.push(ModeratorCheck {
-            agent_id: agent_id.clone(),
-            claim: claim.clone(),
-            verdict,
-            engram_confidence: confidence,
-            explanation,
-        });
+    match checks_result {
+        Ok(Ok(checks)) => checks,
+        _ => Vec::new(),
     }
-
-    checks
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────

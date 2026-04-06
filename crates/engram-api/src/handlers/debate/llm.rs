@@ -14,9 +14,45 @@
 /// - Warns loudly if context window is unknown
 
 use crate::state::AppState;
+use std::collections::VecDeque;
+use std::sync::LazyLock;
+use tokio::sync::Mutex;
 
 /// Conservative default when context window is unknown. Low enough to work everywhere.
 const DEFAULT_CONTEXT_WINDOW: u32 = 8192;
+
+/// Cold-start timeout before we have any LLM speed measurements.
+const COLD_START_TIMEOUT_SECS: u64 = 300;
+
+/// Minimum timeout regardless of measured speed.
+const MIN_TIMEOUT_SECS: u64 = 60;
+
+/// Safety multiplier: timeout = max(recent_durations) * this
+const TIMEOUT_MULTIPLIER: f32 = 3.0;
+
+/// Rolling buffer of recent LLM call durations (seconds) for adaptive timeout.
+static LLM_DURATIONS: LazyLock<Mutex<VecDeque<f32>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(10)));
+
+/// Compute adaptive timeout based on recent LLM call performance.
+async fn adaptive_timeout_secs() -> u64 {
+    let durations = LLM_DURATIONS.lock().await;
+    if durations.is_empty() {
+        return COLD_START_TIMEOUT_SECS;
+    }
+    let max_duration = durations.iter().cloned().fold(0.0f32, f32::max);
+    let timeout = (max_duration * TIMEOUT_MULTIPLIER) as u64;
+    timeout.max(MIN_TIMEOUT_SECS)
+}
+
+/// Record a successful LLM call duration for adaptive timeout calibration.
+async fn record_llm_duration(secs: f32) {
+    let mut durations = LLM_DURATIONS.lock().await;
+    if durations.len() >= 10 {
+        durations.pop_front();
+    }
+    durations.push_back(secs);
+}
 
 /// Map ISO 639-1 codes to human-readable language names.
 pub fn language_name(code: &str) -> &str {
@@ -69,6 +105,69 @@ pub fn medium_output_budget(state: &AppState) -> u64 {
         .and_then(|c| c.llm_context_window)
         .unwrap_or(DEFAULT_CONTEXT_WINDOW) as u64;
     (ctx / 4).min(4096).max(512)
+}
+
+/// Context budget for agent prompts: 15% of context window (in chars, ~4 chars/token).
+/// This keeps agent turns fast regardless of model size.
+pub fn context_budget_chars(state: &AppState) -> usize {
+    let ctx = state.config.read()
+        .ok()
+        .and_then(|c| c.llm_context_window)
+        .unwrap_or(DEFAULT_CONTEXT_WINDOW) as usize;
+    // 15% of context window, converted to chars (~4 chars per token)
+    (ctx * 4 * 15) / 100
+}
+
+/// Compress debate context (briefing + history + round + gaps) into a budget.
+/// Uses a quick non-thinking LLM call to intelligently summarize.
+/// Returns the compressed context string, or the original if compression fails.
+pub async fn compress_debate_context(
+    state: &AppState,
+    raw_context: &str,
+    budget_chars: usize,
+) -> String {
+    // If already within budget, no compression needed
+    if raw_context.len() <= budget_chars {
+        return raw_context.to_string();
+    }
+
+    let target_words = budget_chars / 6; // rough chars-to-words
+    let prompt = format!(
+        "Compress this debate context into a concise summary of max {} words.\n\
+         Keep: key factual claims with numbers, who holds which position, \
+         evidence that changed minds, unresolved disagreements, and critical data points.\n\
+         Drop: verbose reasoning, redundant arguments, pleasantries.\n\n\
+         ---\n{}\n---\n\nCompressed summary:",
+        target_words, &raw_context[..raw_context.len().min(budget_chars * 3)] // don't send more than 3x budget
+    );
+
+    let request = serde_json::json!({
+        "messages": [
+            {"role": "system", "content": "You are a precise summarizer. Output ONLY the compressed summary, no meta-commentary."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.1,
+        "max_tokens": short_output_budget(state),
+        "think": false
+    });
+
+    match call_llm(state, request).await {
+        Ok(response) => {
+            if let Some(content) = extract_content(&response) {
+                let compressed = content.trim().to_string();
+                dbg_debate!("[compress] {} chars -> {} chars ({:.0}% reduction)",
+                    raw_context.len(), compressed.len(),
+                    (1.0 - compressed.len() as f64 / raw_context.len() as f64) * 100.0);
+                compressed
+            } else {
+                raw_context[..raw_context.len().min(budget_chars)].to_string()
+            }
+        }
+        Err(e) => {
+            dbg_debate!("[compress] LLM compression failed: {}, truncating", e);
+            raw_context[..raw_context.len().min(budget_chars)].to_string()
+        }
+    }
 }
 
 /// Known reasoning model name patterns. Lowercase match.
@@ -191,8 +290,11 @@ pub async fn call_llm(state: &AppState, request_body: serde_json::Value) -> Resu
 
     let prompt_len: usize = messages.as_array().map(|a| a.iter().map(|m| m.get("content").and_then(|c| c.as_str()).map(|s| s.len()).unwrap_or(0)).sum()).unwrap_or(0);
     let t_llm = std::time::Instant::now();
-    dbg_debate!("[llm] >> CALL model={} think={} max_tokens={} prompt_chars={} url={}",
-        model, use_thinking, max_tokens, prompt_len, &url[..url.len().min(60)]);
+
+    // Adaptive timeout: based on measured LLM speed, not fixed constants
+    let timeout_secs = adaptive_timeout_secs().await;
+    dbg_debate!("[llm] >> CALL model={} think={} max_tokens={} prompt_chars={} timeout={}s url={}",
+        model, use_thinking, max_tokens, prompt_len, timeout_secs, &url[..url.len().min(60)]);
 
     // Log full prompt when debug is on
     if crate::handlers::debate::DEBATE_DEBUG.load(std::sync::atomic::Ordering::Relaxed) {
@@ -210,27 +312,49 @@ pub async fn call_llm(state: &AppState, request_body: serde_json::Value) -> Resu
         req = req.header("Authorization", format!("Bearer {api_key}"));
     }
 
-    let resp = req.json(&body).send().await.map_err(|e| {
-        dbg_debate!("[llm] << ERROR model={} send_failed took={:.1}s err={}",
-            model, t_llm.elapsed().as_secs_f32(), e);
-        format!("LLM request failed: {e}")
-    })?;
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
-        dbg_debate!("[llm] << ERROR model={} http_status={} took={:.1}s",
-            model, status, t_llm.elapsed().as_secs_f32());
-        return Err(format!("LLM returned {status}: {text}"));
-    }
+    // Wrap the ENTIRE HTTP call in tokio::time::timeout (reqwest timeout alone is unreliable
+    // for keep-alive connections to local Ollama)
+    let http_future = async {
+        let resp = req.json(&body).send().await.map_err(|e| {
+            format!("LLM request failed: {e}")
+        })?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("LLM returned {status}: {text}"));
+        }
+        let text = resp.text().await.map_err(|e| format!("LLM response read failed: {e}"))?;
+        let response: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("invalid JSON from LLM: {e}"))?;
+        Ok(response)
+    };
 
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-    let response: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("invalid JSON from LLM: {e}"))?;
+    let response = match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        http_future,
+    ).await {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => {
+            dbg_debate!("[llm] << ERROR model={} took={:.1}s err={}",
+                model, t_llm.elapsed().as_secs_f32(), e);
+            return Err(e);
+        }
+        Err(_) => {
+            dbg_debate!("[llm] << TIMEOUT model={} after {}s (prompt_chars={})",
+                model, timeout_secs, prompt_len);
+            return Err(format!("LLM call timed out after {}s (prompt was {} chars). \
+                Your LLM may be overloaded or the context too large.", timeout_secs, prompt_len));
+        }
+    };
 
+    let elapsed = t_llm.elapsed().as_secs_f32();
     let content_len = extract_content(&response).map(|c| c.len()).unwrap_or(0);
     let finish = response.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("finish_reason")).and_then(|f| f.as_str()).unwrap_or("?");
     dbg_debate!("[llm] << DONE model={} finish={} content_chars={} took={:.1}s",
-        model, finish, content_len, t_llm.elapsed().as_secs_f32());
+        model, finish, content_len, elapsed);
+
+    // Record duration for adaptive timeout calibration
+    record_llm_duration(elapsed).await;
 
     // Warn if reasoning model exhausted tokens (content will likely be empty/truncated)
     if let Some(choice) = response.get("choices").and_then(|c| c.get(0)) {

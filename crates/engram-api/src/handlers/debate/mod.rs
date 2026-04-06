@@ -113,6 +113,7 @@ pub async fn debate_start(
         progress: None,
         search_queries: Vec::new(),
         topic_languages: vec!["en".to_string()],
+        compressed_context: String::new(),
     };
 
     // Store session
@@ -440,21 +441,22 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             let _ = tx.send(format!("event: turn_start\ndata: {}\n\n",
                 serde_json::json!({"agent_id": agent.id, "agent_name": agent.name, "round": round_idx + 1})));
 
-            // Get previous turns, gap research, and briefing
-            let (prev_turns, prev_gap_research, briefing_summary) = {
+            // Get previous turns, gap research, briefing, and compressed context
+            let (prev_turns, prev_gap_research, briefing_summary, comp_ctx) = {
                 let sessions = match state.debate_sessions.read() {
                     Ok(s) => s,
                     Err(_) => return,
                 };
                 if let Some(s) = sessions.get(&session_id) {
                     let briefing_text = s.briefing.as_ref().map(|b| b.summary.clone()).unwrap_or_default();
+                    let compressed = s.compressed_context.clone();
                     if let Some(prev_round) = s.rounds.last() {
-                        (prev_round.turns.clone(), prev_round.gap_research.clone(), briefing_text)
+                        (prev_round.turns.clone(), prev_round.gap_research.clone(), briefing_text, compressed)
                     } else {
-                        (Vec::new(), Vec::new(), briefing_text)
+                        (Vec::new(), Vec::new(), briefing_text, compressed)
                     }
                 } else {
-                    (Vec::new(), Vec::new(), String::new())
+                    (Vec::new(), Vec::new(), String::new(), String::new())
                 }
             };
 
@@ -463,7 +465,7 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             match agents::execute_agent_turn(
                 &state, agent, &topic, round_idx, &prev_turns, &agents,
                 user_injection.as_deref(), &prev_gap_research, &briefing_summary,
-                &mode, mode_input.as_deref(), &tx, cached_web_opt,
+                &mode, mode_input.as_deref(), &tx, cached_web_opt, &comp_ctx,
             ).await {
                 Ok(turn) => {
                     dbg_debate!("[debate] << agent turn \"{}\" done conf={:.0}% evidence={} took={:.1}s", agent.name, turn.confidence * 100.0, turn.evidence.len(), t_agent.elapsed().as_secs_f32());
@@ -586,14 +588,78 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             if let Some(s) = sessions.get_mut(&session_id) {
                 // Store gap queries for dedup in future rounds
                 for gr in &round.gap_research {
-                    // Only mark gap as "done" if it was actually closed (found real data).
-                    // Unclosed gaps will be retried in the next round.
                     if gr.ingested && !s.researched_gaps.contains(&gr.gap_query) {
                         s.researched_gaps.push(gr.gap_query.clone());
                     }
                 }
                 s.rounds.push(round);
                 s.current_round = round_idx + 1;
+            }
+        }
+
+        // ── Compress context after each round ──
+        // Build raw context from: previous compressed + this round's turns + gap research
+        {
+            let raw_context = {
+                let sessions = match state.debate_sessions.read() {
+                    Ok(s) => s,
+                    Err(_) => { eprintln!("[debate] lock error in compression"); continue; },
+                };
+                if let Some(s) = sessions.get(&session_id) {
+                    let mut ctx = String::new();
+                    // Include briefing on first round only (subsequent rounds get it via compression)
+                    if round_idx == 0 {
+                        if let Some(ref b) = s.briefing {
+                            ctx.push_str(&b.summary);
+                            ctx.push_str("\n\n");
+                        }
+                    }
+                    // Previous compressed context (flat, no nesting headers)
+                    if !s.compressed_context.is_empty() {
+                        ctx.push_str(&s.compressed_context);
+                        ctx.push_str("\n\n");
+                    }
+                    // This round's turns (new data to fold in)
+                    if let Some(latest_round) = s.rounds.last() {
+                        ctx.push_str(&format!("Round {} positions:\n", round_idx + 1));
+                        for turn in &latest_round.turns {
+                            let name = s.agents.iter().find(|a| a.id == turn.agent_id)
+                                .map(|a| a.name.as_str()).unwrap_or(&turn.agent_id);
+                            // Only new claims and shifts, not full position text
+                            let position_excerpt = &turn.position[..turn.position.len().min(300)];
+                            ctx.push_str(&format!("{} (conf {:.0}%): {}\n",
+                                name, turn.confidence * 100.0, position_excerpt));
+                            if !turn.position_shift.is_empty() {
+                                ctx.push_str(&format!("  [shift: {}]\n", &turn.position_shift[..turn.position_shift.len().min(100)]));
+                            }
+                        }
+                        ctx.push('\n');
+                        // Gap research findings
+                        for gr in &latest_round.gap_research {
+                            if gr.ingested {
+                                ctx.push_str(&format!("New data: {}\n", &gr.gap_query[..gr.gap_query.len().min(80)]));
+                                for f in gr.findings.iter().take(2) {
+                                    ctx.push_str(&format!("  - {}\n", &f[..f.len().min(120)]));
+                                }
+                            }
+                        }
+                    }
+                    ctx
+                } else {
+                    String::new()
+                }
+            };
+
+            if !raw_context.is_empty() {
+                let budget = llm::context_budget_chars(&state);
+                dbg_debate!("[debate] compressing context: {} chars, budget {} chars", raw_context.len(), budget);
+                set_progress(&state, &session_id, "compressing", "Compressing debate context...", None, 0, 0);
+                let compressed = llm::compress_debate_context(&state, &raw_context, budget).await;
+                if let Ok(mut sessions) = state.debate_sessions.write() {
+                    if let Some(s) = sessions.get_mut(&session_id) {
+                        s.compressed_context = compressed;
+                    }
+                }
             }
         }
 
@@ -881,12 +947,30 @@ pub async fn debate_synthesize(
         synthesis.evolution.len(),
     );
 
-    // Store synthesis on session
+    // Store synthesis on session and prune heavy data to free memory
     {
         let mut sessions = state.debate_sessions.write().map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "lock failed"))?;
         if let Some(session) = sessions.get_mut(&session_id) {
             session.synthesis = Some(synthesis.clone());
             session.status = DebateStatus::Complete;
+            // Free memory: drop compressed context (no longer needed after synthesis)
+            session.compressed_context = String::new();
+            // Free memory: drop tool invocations and detailed evidence from all rounds
+            // (positions and metadata are kept for the GET endpoint)
+            for round in &mut session.rounds {
+                for turn in &mut round.turns {
+                    turn.tools_used.clear();
+                    turn.evidence.clear();
+                }
+                // Drop raw gap findings (summary is in the synthesis)
+                for gr in &mut round.gap_research {
+                    gr.findings.clear();
+                }
+            }
+            // Drop briefing facts (summary is in the synthesis)
+            if let Some(ref mut b) = session.briefing {
+                b.facts.clear();
+            }
         }
     }
 

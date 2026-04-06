@@ -32,6 +32,9 @@ pub struct DebateSession {
     /// Languages relevant to the topic (ISO 639-1 codes, always includes "en").
     /// Detected by LLM during briefing phase.
     pub topic_languages: Vec<String>,
+    /// Rolling compressed context: briefing + all previous rounds + gap research,
+    /// compressed by LLM after each round to stay within context budget.
+    pub compressed_context: String,
 }
 
 /// Live progress information for the frontend.
