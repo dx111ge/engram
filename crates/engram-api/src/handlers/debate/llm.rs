@@ -18,6 +18,35 @@ use crate::state::AppState;
 /// Conservative default when context window is unknown. Low enough to work everywhere.
 const DEFAULT_CONTEXT_WINDOW: u32 = 8192;
 
+/// Map ISO 639-1 codes to human-readable language names.
+pub fn language_name(code: &str) -> &str {
+    match code {
+        "de" => "German", "fr" => "French", "es" => "Spanish", "it" => "Italian",
+        "pt" => "Portuguese", "nl" => "Dutch", "ru" => "Russian", "uk" => "Ukrainian",
+        "ar" => "Arabic", "zh" => "Chinese", "ja" => "Japanese", "ko" => "Korean",
+        "pl" => "Polish", "tr" => "Turkish", "sv" => "Swedish", "da" => "Danish",
+        "no" => "Norwegian", "fi" => "Finnish", "cs" => "Czech", "ro" => "Romanian",
+        "hu" => "Hungarian", "el" => "Greek", "he" => "Hebrew", "hi" => "Hindi",
+        "th" => "Thai", "vi" => "Vietnamese", "id" => "Indonesian",
+        _ => code,
+    }
+}
+
+/// Append output language instruction to a user-facing system prompt.
+/// If `output_language` is configured and not "en", appends "Respond in {language}."
+/// Use this for all LLM calls that produce user-visible text (synthesis, chat, assessments).
+/// Do NOT use for internal calls (NER, gap detection, search query generation, agent reasoning).
+pub fn user_facing_system_prompt(state: &AppState, base_prompt: &str) -> String {
+    let lang = state.config.read().ok()
+        .and_then(|c| c.output_language.clone())
+        .unwrap_or_default();
+    if lang.is_empty() || lang == "en" {
+        return base_prompt.to_string();
+    }
+    let name = language_name(&lang);
+    format!("{}\n\nRespond in {}.", base_prompt, name)
+}
+
 /// Multiplier for reasoning models: thinking uses ~3-5x the output tokens.
 /// We need output_budget * REASONING_MULTIPLIER tokens available.
 const REASONING_MULTIPLIER: u64 = 4;

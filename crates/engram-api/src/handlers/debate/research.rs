@@ -20,10 +20,14 @@ pub async fn build_starter_plate(state: &AppState, topic: &str) -> Briefing {
     let exact_facts = gather_facts_for_question(state, topic, topic).await;
     all_facts.extend(exact_facts);
 
-    // Search each decomposed question
+    // Search each decomposed question (dedup by content to avoid 4x repeats)
     for question in &questions {
         let facts = gather_facts_for_question(state, question, topic).await;
-        all_facts.extend(facts);
+        for fact in facts {
+            if !all_facts.iter().any(|f| f.content == fact.content) {
+                all_facts.push(fact);
+            }
+        }
     }
 
     // Ingest relevant web findings via full pipeline
@@ -303,21 +307,21 @@ Return ONLY a JSON array: ["query 1", "query 2"]"#,
 
 /// Close gaps sequentially (Ollama serializes concurrent LLM calls anyway).
 /// Each gap tries URLs one by one, collects 2 answers, cross-validates, then ingests.
-pub async fn close_gaps(state: &AppState, gaps: &[String], topic: &str) -> Vec<GapResearch> {
+pub async fn close_gaps(state: &AppState, gaps: &[String], topic: &str, topic_languages: &[String]) -> Vec<GapResearch> {
     let mut results = Vec::new();
     for (i, gap_query) in gaps.iter().enumerate() {
         eprintln!("[debate] gap {}/{}: \"{}\"", i + 1, gaps.len(), &gap_query[..gap_query.len().min(60)]);
-        let result = close_single_gap(state, gap_query, topic).await;
+        let result = close_single_gap(state, gap_query, topic, topic_languages).await;
         results.push(result);
     }
     results
 }
 
 /// Close a single gap with a timeout safety net.
-pub async fn close_single_gap_with_timeout(state: &AppState, query: &str, topic: &str, timeout_secs: u64) -> GapResearch {
+pub async fn close_single_gap_with_timeout(state: &AppState, query: &str, topic: &str, timeout_secs: u64, topic_languages: &[String]) -> GapResearch {
     match tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
-        close_single_gap(state, query, topic),
+        close_single_gap(state, query, topic, topic_languages),
     ).await {
         Ok(result) => result,
         Err(_) => {
@@ -342,12 +346,13 @@ struct GapAnswer {
 /// 5. Collect 2 answers from different sources
 /// 6. Cross-validate/combine the 2 answers via LLM
 /// 7. Ingest the validated answer
-async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str) -> GapResearch {
+async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, topic_languages: &[String]) -> GapResearch {
     let mut all_findings = Vec::new();
     let mut facts_stored = 0u32;
     let mut relations_created = 0u32;
     let mut entities_stored = Vec::new();
     let mut ingested = false;
+    let blocked = resolve_blocked_domains(state);
 
     let t0 = std::time::Instant::now();
     dbg_debate!("[gap] ===== START gap: \"{}\" =====", original_query);
@@ -380,9 +385,13 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str) 
         eprintln!("[debate] gap: no sparql answer in {:.1}s", t0.elapsed().as_secs_f32());
     }
 
+    // Shorten query early — used for both Wikipedia and web search
+    let short_query = shorten_for_search(state, original_query).await;
+
     // 3. Wikipedia API (free, fast, trusted, no rate limits)
+    //    Use the shortened query — long gap questions return irrelevant Wikipedia articles
     if answers.len() < 2 {
-        if let Some(wiki_answer) = search_wikipedia(state, original_query).await {
+        if let Some(wiki_answer) = search_wikipedia(state, &short_query).await {
             all_findings.push(format!("[wikipedia] {}: {}", wiki_answer.source_title, &wiki_answer.text[..wiki_answer.text.len().min(100)]));
             eprintln!("[debate] gap: wikipedia answer from \"{}\" ({} chars) in {:.1}s",
                 wiki_answer.source_title, wiki_answer.text.len(), t0.elapsed().as_secs_f32());
@@ -392,9 +401,24 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str) 
         }
     }
 
-    // 3. Web search for second source (or first if Wikipedia had nothing)
-    let web_results = execute_web_search_structured(state, original_query).await;
-    eprintln!("[debate] gap: web_results={} in {:.1}s", web_results.len(), t0.elapsed().as_secs_f32());
+    // 4. Web search for second source (or first if Wikipedia had nothing)
+    let mut web_results = execute_web_search_structured(state, &short_query).await;
+    eprintln!("[debate] gap: web_results={} (en) in {:.1}s", web_results.len(), t0.elapsed().as_secs_f32());
+
+    // If English search returned nothing, try non-English topic languages
+    if web_results.is_empty() {
+        for lang in topic_languages.iter().filter(|l| l.as_str() != "en") {
+            dbg_debate!("[gap] retrying search in language '{}' for: {}", lang, &short_query[..short_query.len().min(50)]);
+            match crate::handlers::web_search::search_with_language(state, &short_query, lang).await {
+                Ok(results) if !results.is_empty() => {
+                    eprintln!("[debate] gap: web_results={} ({}) in {:.1}s", results.len(), lang, t0.elapsed().as_secs_f32());
+                    web_results = results;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+    }
 
     for r in web_results.iter().take(5) {
         let finding = format!("[web] {}: {}", r.title, r.snippet);
@@ -415,11 +439,23 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str) 
         urls_tried += 1;
 
         // Fetch article
-        let content = match fetch_article_content(&state.http_client, &result.url).await {
+        let content = match fetch_article_content(&state.http_client, &result.url, &blocked).await {
             Some(c) => c,
             None => continue,
         };
         urls_fetched += 1;
+
+        // Async store fetched content to doc_store (non-blocking, fire-and-forget)
+        {
+            let doc_store = state.doc_store.clone();
+            let content_bytes = content.as_bytes().to_vec();
+            tokio::spawn(async move {
+                if let Ok(mut store) = doc_store.write() {
+                    let _ = store.store(&content_bytes, engram_core::storage::doc_store::MimeType::Text);
+                }
+            });
+        }
+
         let truncated = if content.len() > 4000 { &content[..4000] } else { &content };
 
         // LLM reading comprehension on this single article
@@ -892,6 +928,27 @@ or
         Ok(j) => j,
         Err(e) => {
             dbg_debate!("[gap] << JSON parse failed for \"{}\" in {:.1}s: {} | raw({} chars): {}", &title[..title.len().min(40)], t0.elapsed().as_secs_f32(), e, raw_content.len(), &raw_content[..raw_content.len().min(500)]);
+            // Try to salvage truncated JSON: if it starts with {"found": true, "answer": "...
+            // extract the partial answer text
+            if raw_content.contains("\"found\": true") || raw_content.contains("\"found\":true") {
+                if let Some(start) = raw_content.find("\"answer\"") {
+                    let after = &raw_content[start..];
+                    // Find the opening quote of the answer value
+                    if let Some(q1) = after.find(": \"").or_else(|| after.find(":\"")) {
+                        let val_start = start + q1 + if after[q1..].starts_with(": \"") { 3 } else { 2 };
+                        // Take everything after the opening quote, trim trailing junk
+                        let partial = raw_content[val_start..].trim_end_matches(|c: char| c == '"' || c == '}' || c.is_whitespace());
+                        if partial.len() >= 40 {
+                            dbg_debate!("[gap] << salvaged truncated answer ({} chars) for \"{}\"", partial.len(), &title[..title.len().min(40)]);
+                            return Some(GapAnswer {
+                                text: partial.to_string(),
+                                source_title: title.to_string(),
+                                source_url: url.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
             return None;
         }
     };
@@ -971,46 +1028,6 @@ Instructions:
 
 
 /// Reformulate a failed search query to try a different angle.
-async fn reformulate_query(
-    state: &AppState,
-    failed_query: &str,
-    original_gap: &str,
-    topic: &str,
-) -> String {
-    let prompt = format!(
-        r#"The search query "{}" returned no relevant results for the topic "{}".
-The original gap we're trying to close is: "{}"
-
-Suggest ONE better search query that would find this specific data. Try:
-- Different keywords or phrasing
-- Adding specific data sources (e.g., WHO, World Bank, official reports)
-- Including specific years or units
-- Being more or less specific
-
-Return ONLY the new query string, nothing else."#,
-        failed_query, topic, original_gap
-    );
-
-    let request = serde_json::json!({
-        "messages": [
-            {"role": "system", "content": "You are a search query optimizer. Return ONLY the improved query string, nothing else."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.5,
-        "max_tokens": short_output_budget(state),
-        "think": false
-    });
-
-    match call_llm(state, request).await {
-        Ok(response) => {
-            extract_content(&response)
-                .map(|c| c.trim().trim_matches('"').to_string())
-                .unwrap_or_default()
-        }
-        Err(_) => String::new(),
-    }
-}
-
 // ── Moderator ───────────────────────────────────────────────────────────
 
 /// Fact-check agent claims against engram confidence scores.
@@ -1125,25 +1142,38 @@ Return ONLY a JSON array:
 
 pub use crate::handlers::web_search::WebSearchResult;
 
+/// Convert a natural-language question into a short search-engine-friendly query via LLM.
+/// Falls back to the original query on LLM failure.
+pub async fn shorten_for_search(state: &AppState, question: &str) -> String {
+    let prompt = serde_json::json!({
+        "messages": [{"role": "system", "content": format!(
+            "Convert this question into a short search engine query (max 8 words). \
+             Keep all key entities, numbers, and years. Drop filler words. \
+             Return ONLY the query, nothing else.\n\nQuestion: \"{}\"", question
+        )}],
+        "temperature": 0.1,
+        "max_tokens": 64,
+        "think": false
+    });
+    match call_llm(state, prompt).await {
+        Ok(resp) => {
+            let content = extract_content(&resp).unwrap_or_default().trim().trim_matches('"').to_string();
+            if content.len() > 5 {
+                dbg_debate!("[search] shortened \"{}\" -> \"{}\"", &question[..question.len().min(60)], content);
+                content
+            } else {
+                question.to_string()
+            }
+        }
+        Err(_) => question.to_string(),
+    }
+}
+
 /// Execute a web search and return structured results (with URLs).
 pub async fn execute_web_search_structured(state: &AppState, query: &str) -> Vec<WebSearchResult> {
-    // Truncate overly long queries -- search engines work better with shorter queries
-    let search_query = if query.len() > 120 {
-        // Take first 120 chars and try to break at a word boundary
-        let truncated = &query[..120];
-        match truncated.rfind(' ') {
-            Some(pos) if pos > 60 => &truncated[..pos],
-            _ => truncated,
-        }
-    } else {
-        query
-    };
-
     let t0 = std::time::Instant::now();
-    dbg_debate!("[search] >> query=\"{}\"{}",
-        query,
-        if search_query.len() < query.len() { format!(" (truncated to {} chars)", search_query.len()) } else { String::new() });
-    match crate::handlers::web_search::search(state, search_query).await {
+    dbg_debate!("[search] >> query=\"{}\"", query);
+    match crate::handlers::web_search::search(state, query).await {
         Ok(results) => {
             dbg_debate!("[search] << {} results in {:.1}s", results.len(), t0.elapsed().as_secs_f32());
             results
@@ -1164,26 +1194,98 @@ pub async fn execute_web_search(state: &AppState, query: &str) -> String {
         .join("\n")
 }
 
+/// Resolve blocked domains from config (user list takes priority over defaults).
+fn resolve_blocked_domains(state: &AppState) -> Vec<String> {
+    if let Ok(config) = state.config.read() {
+        if let Some(ref user_list) = config.blocked_domains {
+            return user_list.clone();
+        }
+    }
+    DEFAULT_BLOCKED_DOMAINS.iter().map(|s| s.to_string()).collect()
+}
+
 /// Public debug wrapper for fetch_article_content.
 pub async fn fetch_article_content_debug(url: &str) -> Option<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build().ok()?;
-    fetch_article_content(&client, url).await
+    let defaults: Vec<String> = DEFAULT_BLOCKED_DOMAINS.iter().map(|s| s.to_string()).collect();
+    fetch_article_content(&client, url, &defaults).await
 }
 
 /// Default domains that always block scrapers -- skip to save time.
-/// Users can override via config: web_search_blocked_domains
+/// Users can override via config: blocked_domains (replaces this list entirely).
 const DEFAULT_BLOCKED_DOMAINS: &[&str] = &[
     "studylibid.com", "studylib.net", "doczz.net",
 ];
+
+
+/// Extract text from a PDF response. Uses keyword search to find relevant paragraphs.
+/// Falls back to first + last 2000 chars (abstract + conclusion) if no keyword matches.
+#[cfg(feature = "pdf")]
+async fn extract_pdf_text(resp: reqwest::Response, url_short: &str) -> Option<String> {
+    let t0 = std::time::Instant::now();
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            dbg_debate!("[fetch] PDF body read error: {} | {}", e, url_short);
+            return None;
+        }
+    };
+
+    // Cap PDF size at 20MB
+    if bytes.len() > 20_000_000 {
+        dbg_debate!("[fetch] SKIP PDF too large ({} bytes) | {}", bytes.len(), url_short);
+        return None;
+    }
+
+    dbg_debate!("[fetch] PDF {} bytes, extracting text... | {}", bytes.len(), url_short);
+
+    let text = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || {
+            pdf_extract::extract_text_from_mem(&bytes).ok()
+        })
+    ).await {
+        Ok(Ok(Some(t))) => t,
+        Ok(_) => {
+            dbg_debate!("[fetch] PDF extraction failed | {}", url_short);
+            return None;
+        }
+        Err(_) => {
+            dbg_debate!("[fetch] PDF extraction TIMED OUT after 30s | {}", url_short);
+            return None;
+        }
+    };
+
+    let text = text.trim().to_string();
+    if text.len() < 100 {
+        dbg_debate!("[fetch] PDF extraction too short ({} chars) | {}", text.len(), url_short);
+        return None;
+    }
+
+    dbg_debate!("[fetch] PDF extracted {} chars in {:.1}s | {}", text.len(), t0.elapsed().as_secs_f32(), url_short);
+
+    // Cap at 8000 chars -- take first + last sections (abstract + conclusion often have key data)
+    let capped = if text.len() > 8000 {
+        let first = &text[..4000];
+        let last_start = text.len().saturating_sub(4000);
+        let last = &text[last_start..];
+        format!("{}\n\n[...]\n\n{}", first.trim(), last.trim())
+    } else {
+        text
+    };
+
+    Some(capped)
+}
 
 /// Detect machine-readable download links in HTML (CSV, JSON, XML, XLSX, ASCII).
 /// Scans full page for href attributes pointing to data files.
 /// Returns the first usable download URL found.
 fn find_data_download_link(html: &str, base_url: &str) -> Option<String> {
-    let extensions = [".csv", ".json", ".xml", ".xlsx", ".tsv", ".xls", ".ascii"];
+    // Only text-based data formats — skip binary (xlsx, xls) which produce garbage when read as text
+    let extensions = [".csv", ".json", ".xml", ".tsv", ".ascii"];
     let lower = html.to_lowercase();
 
     // Scan all href="..." occurrences in the page
@@ -1211,9 +1313,11 @@ fn find_data_download_link(html: &str, base_url: &str) -> Option<String> {
 
         if href.contains("javascript:") { continue; }
 
-        // Filter out false positives (favicon, manifests, opensearch, social)
+        // Filter out false positives (favicon, manifests, opensearch, feeds, social widgets)
         let skip_patterns = ["favicon", "manifest.json", "osd.xml", "opensearch",
-            "apple-touch-icon", "browserconfig", "robots.txt", "sitemap"];
+            "apple-touch-icon", "browserconfig", "robots.txt", "sitemap",
+            "wp-json", "oembed", "widget", "schema.json", "package.json",
+            ".ico", "logo", "sprite", "comments/feed"];
         if skip_patterns.iter().any(|p| href_lower.contains(p)) { continue; }
         // Skip RSS/Atom feeds from non-data sites (they're news headlines, not structured data)
         if (href_lower.ends_with(".xml") || href_lower.contains("rss"))
@@ -1320,13 +1424,13 @@ fn extract_html_tables(html: &str, max_tables: usize) -> Option<String> {
 /// Fetch article content from a URL using dom_smoothie (Mozilla Readability).
 /// For large pages: extracts tables and scans for data download links first.
 /// Returns extracted plain text, or None on failure.
-async fn fetch_article_content(client: &reqwest::Client, url: &str) -> Option<String> {
+async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_domains: &[String]) -> Option<String> {
     let url_short = &url[..url.len().min(80)];
     let t0 = std::time::Instant::now();
 
-    // Skip known-blocked domains (defaults + user config)
+    // Skip known-blocked domains (user config or defaults)
     if let Some(domain) = url.split('/').nth(2) {
-        if DEFAULT_BLOCKED_DOMAINS.iter().any(|d| domain.contains(d)) {
+        if blocked_domains.iter().any(|d| domain.contains(d.as_str())) {
             dbg_debate!("[fetch] SKIP blocked domain {} | {}", domain, url_short);
             return None;
         }
@@ -1354,15 +1458,22 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str) -> Option<St
     dbg_debate!("[fetch] HTTP {} in {:.1}s | {}", resp.status(), t0.elapsed().as_secs_f32(), url_short);
     if !resp.status().is_success() { return None; }
 
-    // Skip PDFs -- binary content, can't parse as HTML. Needs dedicated PDF extraction (future).
+    // PDF extraction: extract text and find relevant paragraphs
     let is_pdf = url.to_lowercase().ends_with(".pdf")
         || resp.headers().get("content-type")
             .and_then(|v| v.to_str().ok())
             .map(|ct| ct.contains("application/pdf"))
             .unwrap_or(false);
     if is_pdf {
-        dbg_debate!("[fetch] SKIP PDF (not yet supported) | {}", url_short);
-        return None;
+        #[cfg(feature = "pdf")]
+        {
+            return extract_pdf_text(resp, url_short).await;
+        }
+        #[cfg(not(feature = "pdf"))]
+        {
+            dbg_debate!("[fetch] SKIP PDF (pdf feature not enabled) | {}", url_short);
+            return None;
+        }
     }
 
     let html = match resp.text().await {
@@ -1395,41 +1506,58 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str) -> Option<St
         }
     }
 
+    // Timeout for all blocking parse operations (table extraction, readability)
+    const PARSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
     // For large pages (>500KB): extract tables + readability fallback
     if html.len() > 500_000 {
         dbg_debate!("[fetch] large page ({} bytes), trying table extraction | {}", html.len(), url_short);
 
-        // Extract HTML tables (preserve structure as markdown)
-        if let Some(tables) = extract_html_tables(&html[..html.len().min(2_000_000)], 5) {
+        // Extract HTML tables — run in spawn_blocking with timeout
+        let html_for_tables = html[..html.len().min(2_000_000)].to_string();
+        let table_result = tokio::time::timeout(PARSE_TIMEOUT, tokio::task::spawn_blocking(move || {
+            extract_html_tables(&html_for_tables, 5)
+        })).await;
+        if let Ok(Ok(Some(tables))) = table_result {
             if tables.len() > 200 {
                 let capped = &tables[..tables.len().min(6000)];
                 dbg_debate!("[fetch] << DONE {:.1}s result=TABLES ({} chars) | {}", t0.elapsed().as_secs_f32(), capped.len(), url_short);
                 return Some(capped.to_string());
             }
+        } else if table_result.is_err() {
+            dbg_debate!("[fetch] table extraction TIMED OUT after {}s | {}", PARSE_TIMEOUT.as_secs(), url_short);
         }
 
-        // 3. Last resort for large pages: take first 500KB through readability
+        // Last resort for large pages: take first 500KB through readability with timeout
         dbg_debate!("[fetch] large page: no tables/data links, trying readability on first 500KB | {}", url_short);
         let html_capped = html[..500_000].to_string();
-        let parse_result = tokio::task::spawn_blocking(move || {
+        let parse_result = tokio::time::timeout(PARSE_TIMEOUT, tokio::task::spawn_blocking(move || {
             let mut readability = dom_smoothie::Readability::new(html_capped, None, None).ok()?;
             let article = readability.parse().ok()?;
             let text = article.text_content.to_string().trim().to_string();
             if text.len() > 100 { Some(text) } else { None }
-        }).await.ok().flatten();
+        })).await;
+        let parse_result = match parse_result {
+            Ok(r) => r.ok().flatten(),
+            Err(_) => { dbg_debate!("[fetch] readability TIMED OUT after {}s | {}", PARSE_TIMEOUT.as_secs(), url_short); None }
+        };
         dbg_debate!("[fetch] << DONE {:.1}s result={} | {}", t0.elapsed().as_secs_f32(), if parse_result.is_some() { "OK" } else { "EMPTY" }, url_short);
         return parse_result;
     }
 
-    // Normal path for pages < 500KB: readability extraction
-    let parse_result = tokio::task::spawn_blocking(move || {
+    // Normal path for pages < 500KB: readability extraction with timeout
+    let parse_result = tokio::time::timeout(PARSE_TIMEOUT, tokio::task::spawn_blocking(move || {
         let t_parse = std::time::Instant::now();
         let mut readability = dom_smoothie::Readability::new(html, None, None).ok()?;
         let article = readability.parse().ok()?;
         let text = article.text_content.to_string().trim().to_string();
         dbg_debate!("[fetch] parsed {} chars in {:.1}s", text.len(), t_parse.elapsed().as_secs_f32());
         if text.len() > 100 { Some(text) } else { None }
-    }).await.ok().flatten();
+    })).await;
+    let parse_result = match parse_result {
+        Ok(r) => r.ok().flatten(),
+        Err(_) => { dbg_debate!("[fetch] readability TIMED OUT after {}s | {}", PARSE_TIMEOUT.as_secs(), url_short); None }
+    };
 
     dbg_debate!("[fetch] << DONE {:.1}s result={} | {}", t0.elapsed().as_secs_f32(), if parse_result.is_some() { "OK" } else { "EMPTY" }, url_short);
     parse_result
@@ -1458,45 +1586,54 @@ async fn run_ingest(state: &AppState, source_name: &str, content: &str) -> (u32,
     let source_owned = source_name.to_string();
     let dirty = state.dirty.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        let config = engram_ingest::PipelineConfig::default();
-        let mut pipeline = super::super::ingest::build_pipeline(
-            graph, config, kb_endpoints, ner_model, rel_model,
-            relation_templates, rel_threshold, coreference_enabled,
-            cached_ner, cached_rel,
-        );
-        pipeline.set_doc_store(doc_store);
-        if let (Some(ep), Some(m)) = (llm_config.0.as_ref(), llm_config.1.as_ref()) {
-            pipeline.set_llm(ep.clone(), m.clone());
-        }
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            let config = engram_ingest::PipelineConfig::default();
+            let mut pipeline = super::super::ingest::build_pipeline(
+                graph, config, kb_endpoints, ner_model, rel_model,
+                relation_templates, rel_threshold, coreference_enabled,
+                cached_ner, cached_rel,
+            );
+            pipeline.set_doc_store(doc_store);
+            if let (Some(ep), Some(m)) = (llm_config.0.as_ref(), llm_config.1.as_ref()) {
+                pipeline.set_llm(ep.clone(), m.clone());
+            }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default().as_secs() as i64;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_secs() as i64;
 
-        let items = vec![RawItem {
-            content: Content::Text(content_owned),
-            source_url: None,
-            source_name: source_owned,
-            fetched_at: now,
-            metadata: Default::default(),
-        }];
+            let items = vec![RawItem {
+                content: Content::Text(content_owned),
+                source_url: None,
+                source_name: source_owned,
+                fetched_at: now,
+                metadata: Default::default(),
+            }];
 
-        match pipeline.execute(items) {
-            Ok(r) => {
-                if r.facts_stored > 0 || r.relations_created > 0 {
-                    dirty.store(true, std::sync::atomic::Ordering::Release);
+            match pipeline.execute(items) {
+                Ok(r) => {
+                    if r.facts_stored > 0 || r.relations_created > 0 {
+                        dirty.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    (r.facts_stored, r.relations_created)
                 }
-                (r.facts_stored, r.relations_created)
+                Err(e) => {
+                    tracing::warn!("debate ingest failed: {}", e);
+                    (0, 0)
+                }
             }
-            Err(e) => {
-                tracing::warn!("debate ingest failed: {}", e);
-                (0, 0)
-            }
-        }
-    }).await;
+        })
+    ).await;
 
-    result.unwrap_or((0, 0))
+    match result {
+        Ok(r) => r.unwrap_or((0, 0)),
+        Err(_) => {
+            tracing::warn!("debate ingest TIMED OUT after 60s");
+            (0, 0)
+        }
+    }
 }
 
 #[cfg(not(feature = "ingest"))]

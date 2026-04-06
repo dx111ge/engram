@@ -115,6 +115,47 @@ pub fn SourceWizard(
                                 }).collect::<Vec<_>>()}
                             </div>
                         }.into_any(),
+                        2 if source_type.get() == "sparql" => view! {
+                            <div>
+                                <div class="form-group">
+                                    <label>"Endpoint Name"</label>
+                                    <input type="text" placeholder="e.g. Wikidata"
+                                        prop:value=name
+                                        on:input=move |ev| set_name.set(event_target_value(&ev)) />
+                                </div>
+                                <div class="form-group">
+                                    <label>"SPARQL Endpoint URL"</label>
+                                    <input type="text" placeholder="https://query.wikidata.org/sparql"
+                                        prop:value=url
+                                        on:input=move |ev| set_url.set(event_target_value(&ev)) />
+                                </div>
+                                <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.75rem;">
+                                    "Common endpoints:"
+                                </p>
+                                <div class="flex gap-sm" style="flex-wrap: wrap; margin-bottom: 1rem;">
+                                    <button class="btn btn-secondary btn-sm" on:click=move |_| {
+                                        set_name.set("Wikidata".into());
+                                        set_url.set("https://query.wikidata.org/sparql".into());
+                                    }>
+                                        <i class="fa-solid fa-database"></i>" Wikidata"
+                                    </button>
+                                    <button class="btn btn-secondary btn-sm" on:click=move |_| {
+                                        set_name.set("DBpedia".into());
+                                        set_url.set("https://dbpedia.org/sparql".into());
+                                    }>
+                                        <i class="fa-solid fa-database"></i>" DBpedia"
+                                    </button>
+                                </div>
+                                <div class="flex gap-sm">
+                                    <button class="btn btn-secondary" on:click=move |_| set_step.set(1)>
+                                        <i class="fa-solid fa-arrow-left"></i>" Back"
+                                    </button>
+                                    <button class="btn btn-primary" on:click=move |_| set_step.set(3)>
+                                        " Next" <i class="fa-solid fa-arrow-right"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        }.into_any(),
                         2 => view! {
                             <div>
                                 <div class="form-group">

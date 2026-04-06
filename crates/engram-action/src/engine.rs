@@ -68,6 +68,11 @@ impl ActionEngine {
         self.rules.iter().map(|r| r.id.as_str()).collect()
     }
 
+    /// List all rules with full details.
+    pub fn list_rules_full(&self) -> &[ActionRule] {
+        &self.rules
+    }
+
     /// Get a rule by ID.
     pub fn get_rule(&self, id: &str) -> Option<&ActionRule> {
         self.rules.iter().find(|r| r.id == id)

@@ -46,7 +46,12 @@ pub async fn get_config(
         "web_search_provider": cfg.web_search_provider,
         "web_search_url": cfg.web_search_url,
         "has_web_search_api_key": cfg.web_search_api_key.is_some(),
+        "web_search_providers": cfg.web_search_providers,
         "debate_debug": cfg.debate_debug.unwrap_or(false),
+        "blocked_domains": cfg.blocked_domains.clone().unwrap_or_else(|| vec![
+            "studylibid.com".into(), "studylib.net".into(), "doczz.net".into(),
+        ]),
+        "output_language": cfg.output_language,
     }))
 }
 

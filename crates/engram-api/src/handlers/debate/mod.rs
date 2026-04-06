@@ -112,6 +112,7 @@ pub async fn debate_start(
         mode_input: req.mode_input.clone(),
         progress: None,
         search_queries: Vec::new(),
+        topic_languages: vec!["en".to_string()],
     };
 
     // Store session
@@ -154,6 +155,7 @@ pub async fn debate_get(
         "briefing": session.briefing,
         "mode_input": session.mode_input,
         "progress": session.progress,
+        "topic_languages": session.topic_languages,
     })))
 }
 
@@ -348,6 +350,48 @@ async fn run_debate_loop(state: AppState, session_id: String) {
         }
     };
 
+    // ── Detect topic languages (once, reuse for all rounds) ──
+    {
+        let already_has = state.debate_sessions.read().ok()
+            .and_then(|s| s.get(&session_id).map(|s| s.topic_languages.len() > 1))
+            .unwrap_or(false);
+        if !already_has {
+            dbg_debate!("[debate] >> detecting topic languages");
+            let prompt = serde_json::json!({
+                "messages": [{"role": "system", "content": format!(
+                    "What 1-3 languages would be most useful for researching this topic? \
+                     Consider the countries, organizations, and primary sources involved. \
+                     Always include 'en'. Return ONLY ISO 639-1 codes separated by commas. \
+                     Example: en,ru,uk\n\nTopic: \"{}\"", topic
+                )}],
+                "temperature": 0.1,
+                "max_tokens": 32,
+                "think": false
+            });
+            let langs = match llm::call_llm(&state, prompt).await {
+                Ok(resp) => {
+                    let content = llm::extract_content(&resp).unwrap_or_default();
+                    let mut codes: Vec<String> = content.trim().split(',')
+                        .map(|s| s.trim().to_lowercase())
+                        .filter(|s| s.len() == 2 && s.chars().all(|c| c.is_ascii_lowercase()))
+                        .collect();
+                    if !codes.contains(&"en".to_string()) {
+                        codes.insert(0, "en".to_string());
+                    }
+                    codes.truncate(3); // cap at 3
+                    codes
+                }
+                Err(_) => vec!["en".to_string()],
+            };
+            dbg_debate!("[debate] << topic languages: {:?}", langs);
+            if let Ok(mut sessions) = state.debate_sessions.write() {
+                if let Some(s) = sessions.get_mut(&session_id) {
+                    s.topic_languages = langs;
+                }
+            }
+        }
+    }
+
     for round_idx in current_round..max_rounds {
         // Check if we should stop
         {
@@ -494,6 +538,11 @@ async fn run_debate_loop(state: AppState, session_id: String) {
 
                 // Close gaps sequentially (Ollama serializes anyway) with per-gap progress
                 let t_close_start = std::time::Instant::now();
+                // Read topic languages from session for multilang gap search
+                let gap_languages = state.debate_sessions.read().ok()
+                    .and_then(|s| s.get(&session_id).map(|s| s.topic_languages.clone()))
+                    .unwrap_or_else(|| vec!["en".to_string()]);
+
                 let mut gap_results = Vec::new();
                 for (gi, gq) in gap_queries.iter().enumerate() {
                     set_progress(&state, &session_id, "gap_closing",
@@ -501,7 +550,7 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                         None, gi, gap_queries.len());
                     dbg_debate!("[debate] >> gap {}/{} \"{}\"", gi + 1, gap_queries.len(), &gq[..gq.len().min(60)]);
                     let t_gap = std::time::Instant::now();
-                    let result = research::close_single_gap_with_timeout(&state, gq, &topic, 90).await;
+                    let result = research::close_single_gap_with_timeout(&state, gq, &topic, 90, &gap_languages).await;
                     dbg_debate!("[debate] << gap {}/{} ingested={} facts={} {:.1}s", gi + 1, gap_queries.len(), result.ingested, result.facts_stored, t_gap.elapsed().as_secs_f32());
                     gap_results.push(result);
                 }
@@ -742,7 +791,8 @@ pub async fn debate_synthesize(
     set_progress(&state, &session_id, "synthesizing", "Pass 1: Writing evidence-based conclusion (deep analysis)...", None, step, total_steps);
     eprintln!("[debate] synthesis: Pass 1 -- generating evidence conclusion...");
     let t0 = std::time::Instant::now();
-    let conclusion_prompt = synthesis::build_conclusion_prompt(&session_data, selection.as_ref(), llm::medium_output_budget(&state));
+    let output_lang = state.config.read().ok().and_then(|c| c.output_language.clone());
+    let conclusion_prompt = synthesis::build_conclusion_prompt(&session_data, selection.as_ref(), llm::medium_output_budget(&state), output_lang.as_deref());
     let conclusion_response = call_with_timeout(state.clone(), conclusion_prompt).await
         .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("Synthesis conclusion failed: {e}")))?;
     let conclusion_content = llm::extract_content(&conclusion_response)
@@ -1004,7 +1054,7 @@ pub async fn debate_test_gap(
     let topic = body.get("topic").and_then(|v| v.as_str()).unwrap_or("general");
     eprintln!("[test-gap] Starting: query=\"{}\"", query);
     dbg_debate!("[test-gap] query=\"{}\"", query);
-    let result = research::close_gaps(&state, &[query.to_string()], topic).await;
+    let result = research::close_gaps(&state, &[query.to_string()], topic, &["en".to_string()]).await;
     let gap = result.into_iter().next().unwrap_or_else(|| GapResearch {
         gap_query: query.to_string(), source: "test".into(), findings: Vec::new(),
         ingested: false, entities_stored: Vec::new(), facts_stored: 0, relations_created: 0,

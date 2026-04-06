@@ -149,7 +149,7 @@ Return JSON:
 // ── Pass 1: Evidence Conclusion (think=ON, prose) ──────────────────────
 
 /// Build the conclusion prompt. Returns prose, not JSON.
-pub fn build_conclusion_prompt(session: &DebateSession, selection: Option<&SelectionResult>, max_tokens: u64) -> serde_json::Value {
+pub fn build_conclusion_prompt(session: &DebateSession, selection: Option<&SelectionResult>, max_tokens: u64, output_language: Option<&str>) -> serde_json::Value {
     let context = build_condensed_context(session);
 
     let selection_note = if let Some(sel) = selection {
@@ -185,12 +185,16 @@ Write a comprehensive evidence-based conclusion that DIRECTLY ANSWERS the questi
 - Be specific and actionable, not vague
 
 Write 3-5 paragraphs of prose. No JSON, no markdown headers, just clear analytical writing.
-End with a single line: "CONFIDENCE: X.XX" (0.00-1.00) reflecting your overall assessment confidence."#,
+End with a single line: "CONFIDENCE: X.XX" (0.00-1.00) reflecting your overall assessment confidence.{lang_instruction}"#,
         topic = session.topic,
         rounds = session.rounds.len(),
         selection_note = selection_note,
         context = context,
         mode_additions = mode_additions,
+        lang_instruction = match output_language {
+            Some(lang) if !lang.is_empty() && lang != "en" => format!("\n\nRespond in {}.", super::llm::language_name(lang)),
+            _ => String::new(),
+        },
     );
 
     serde_json::json!({

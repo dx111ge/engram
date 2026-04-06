@@ -190,13 +190,28 @@ pub fn OnboardingWizard(
             let test_result = match validation {
                 Err(e) => Err(e),
                 Ok(()) => {
-                    // Save config so proxy routes correctly
+                    // Save config using new web_search_providers array
+                    let ws_provider = serde_json::json!({
+                        "name": match provider.as_str() {
+                            "searxng" => "Local SearxNG",
+                            "brave" => "Brave Search",
+                            _ => "DuckDuckGo",
+                        },
+                        "provider": &provider,
+                        "url": if url.is_empty() { None } else { Some(&url) },
+                        "enabled": true,
+                    });
                     let config = serde_json::json!({
-                        "web_search_provider": &provider,
-                        "web_search_api_key": if api_key.is_empty() { None } else { Some(&api_key) },
-                        "web_search_url": if url.is_empty() { None } else { Some(&url) },
+                        "web_search_providers": [ws_provider],
                     });
                     let _ = api.post_text("/config", &config).await;
+                    // Store API key in secrets if provided
+                    if !api_key.is_empty() {
+                        let _ = api.post_text(
+                            &format!("/secrets/{}_api_key", &provider),
+                            &serde_json::json!({"value": &api_key}),
+                        ).await;
+                    }
 
                     if provider == "duckduckgo" {
                         Ok("DuckDuckGo requires no configuration".to_string())
@@ -424,15 +439,30 @@ pub fn OnboardingWizard(
                 }
                 STEP_WEB_SEARCH => {
                     let provider = web_search_provider.get_untracked();
-                    let mut config = serde_json::json!({ "web_search_provider": provider });
                     let api_key = web_search_api_key.get_untracked();
                     let url = web_search_url.get_untracked();
-                    if provider == "brave" && !api_key.is_empty() {
-                        config["web_search_api_key"] = serde_json::json!(api_key);
-                    }
-                    if provider == "searxng" && !url.is_empty() {
-                        config["web_search_url"] = serde_json::json!(url);
-                    }
+                    let auth_key = if !api_key.is_empty() {
+                        let key_name = format!("{}_api_key", &provider);
+                        let _ = api.post_text(
+                            &format!("/secrets/{}", &key_name),
+                            &serde_json::json!({"value": &api_key}),
+                        ).await;
+                        Some(key_name)
+                    } else { None };
+                    let ws_provider = serde_json::json!({
+                        "name": match provider.as_str() {
+                            "searxng" => "Local SearxNG",
+                            "brave" => "Brave Search",
+                            _ => "DuckDuckGo",
+                        },
+                        "provider": &provider,
+                        "url": if url.is_empty() { None } else { Some(&url) },
+                        "enabled": true,
+                        "auth_secret_key": auth_key,
+                    });
+                    let config = serde_json::json!({
+                        "web_search_providers": [ws_provider],
+                    });
                     api.post_text("/config", &config).await
                 }
                 _ => Ok("ok".into()),

@@ -252,8 +252,8 @@ pub fn RulesModal(
                                             let id_del = r.id.clone();
                                             view! {
                                                 <tr>
-                                                    <td><strong>{r.name}</strong></td>
-                                                    <td>{r.description.unwrap_or_default()}</td>
+                                                    <td><strong>{r.id.clone()}</strong></td>
+                                                    <td>{r.description.clone().unwrap_or_default()}</td>
                                                     <td>
                                                         <input type="checkbox" prop:checked=enabled
                                                             on:change=move |_| {

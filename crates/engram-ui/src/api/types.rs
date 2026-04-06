@@ -591,17 +591,18 @@ pub struct GapsResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ActionRule {
     pub id: String,
-    pub name: String,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
-    pub trigger: Option<String>,
+    pub triggers: Vec<serde_json::Value>,
     #[serde(default)]
-    pub conditions: Option<serde_json::Value>,
+    pub conditions: Vec<serde_json::Value>,
     #[serde(default)]
-    pub actions: Option<serde_json::Value>,
+    pub effects: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub priority: i32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

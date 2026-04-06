@@ -26,3 +26,10 @@ tools/engram-rel/Cargo.lock
 *.brain.users
 *.brain.nodetypes
 *.nodetypes
+*.brain.docs.*
+*.brain.edge_props
+*.brain.assessments
+*.brain.rules
+*.brain.ledger
+.docs.*
+result.md

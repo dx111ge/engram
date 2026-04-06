@@ -255,8 +255,8 @@ pub async fn list_action_rules(
     State(state): State<AppState>,
 ) -> ApiResult<serde_json::Value> {
     let engine = state.action_engine.read().map_err(|_| read_lock_err())?;
-    let ids: Vec<&str> = engine.list_rules();
-    Ok(Json(serde_json::json!({ "rules": ids })))
+    let rules = engine.list_rules_full();
+    Ok(Json(serde_json::to_value(rules).unwrap_or_default()))
 }
 
 #[cfg(not(feature = "actions"))]

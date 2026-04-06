@@ -50,6 +50,27 @@ pub struct KbEndpointConfig {
 fn default_auth_none() -> String { "none".to_string() }
 fn default_true() -> bool { true }
 
+/// A web search provider in the tiered fallback chain.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct WebSearchProviderConfig {
+    /// Display name (e.g. "Local SearxNG", "Serper.dev").
+    pub name: String,
+    /// Provider type: "searxng", "serper", "google_cx", "brave", "duckduckgo".
+    pub provider: String,
+    /// Base URL (required for searxng, ignored by others).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Google Custom Search engine ID (required for google_cx).
+    #[serde(default)]
+    pub cx_id: Option<String>,
+    /// Whether this provider is active.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Key name in the secrets store for the API key (serper, google_cx, brave).
+    #[serde(default)]
+    pub auth_secret_key: Option<String>,
+}
+
 /// Runtime configuration for LLM, embedder, and pipeline settings.
 /// Persisted to a `.brain.config` JSON sidecar file.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -91,12 +112,16 @@ pub struct EngineConfig {
     pub quantization_enabled: Option<bool>,
     /// Knowledge base endpoints (SPARQL, etc.).
     pub kb_endpoints: Option<Vec<KbEndpointConfig>>,
-    /// Web search provider: "duckduckgo", "brave", "searxng"
+    /// Web search provider (DEPRECATED -- use web_search_providers).
     pub web_search_provider: Option<String>,
-    /// Web search API key (for Brave Search)
+    /// Web search API key (DEPRECATED -- use web_search_providers + secrets store).
+    #[serde(skip_serializing)]
     pub web_search_api_key: Option<String>,
-    /// Web search URL (for SearXNG self-hosted)
+    /// Web search URL (DEPRECATED -- use web_search_providers).
     pub web_search_url: Option<String>,
+    /// Ordered list of web search providers. Tried in order; first success wins.
+    /// Replaces the old web_search_provider/web_search_api_key/web_search_url fields.
+    pub web_search_providers: Option<Vec<WebSearchProviderConfig>>,
     /// Per-source-type initial trust overrides: { "web": 0.30, "x": 0.10, ... }
     /// Merged with built-in defaults. User can adjust via config API or UI.
     pub source_trust_defaults: Option<std::collections::HashMap<String, f32>>,
@@ -107,14 +132,47 @@ pub struct EngineConfig {
     /// Toggle via POST /config {"debate_debug": true}
     #[serde(default)]
     pub debate_debug: Option<bool>,
+    /// Domains to skip when fetching article content (always 403, paywalled, etc.).
+    /// Default: ["studylibid.com", "studylib.net", "doczz.net"].
+    /// Set via POST /config {"blocked_domains": ["example.com", ...]}
+    pub blocked_domains: Option<Vec<String>>,
+    /// Output language for user-facing LLM responses (ISO 639-1 code, e.g. "de", "fr").
+    /// Default: None (= English). Set via POST /config {"output_language": "de"}
+    pub output_language: Option<String>,
 }
 
 impl EngineConfig {
     /// Load config from a JSON file. Returns Default if file does not exist.
+    /// Auto-migrates old web_search_provider field to web_search_providers array.
     pub fn load(path: &PathBuf) -> Self {
-        match std::fs::read_to_string(path) {
+        let mut cfg: Self = match std::fs::read_to_string(path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Err(_) => return Self::default(),
+        };
+        cfg.migrate_web_search_providers();
+        cfg
+    }
+
+    /// Migrate old single-provider fields to web_search_providers array.
+    fn migrate_web_search_providers(&mut self) {
+        if self.web_search_providers.is_some() { return; }
+        if let Some(ref provider) = self.web_search_provider {
+            if provider.is_empty() { return; }
+            let entry = WebSearchProviderConfig {
+                name: match provider.as_str() {
+                    "searxng" => "SearXNG".into(),
+                    "brave" => "Brave Search".into(),
+                    "duckduckgo" => "DuckDuckGo".into(),
+                    other => other.to_string(),
+                },
+                provider: provider.clone(),
+                url: self.web_search_url.clone(),
+                cx_id: None,
+                enabled: true,
+                auth_secret_key: None, // old key was in web_search_api_key, not secrets store
+            };
+            self.web_search_providers = Some(vec![entry]);
+            tracing::info!("migrated web_search_provider '{}' to web_search_providers array", provider);
         }
     }
 
@@ -202,6 +260,9 @@ impl EngineConfig {
         if other.web_search_url.is_some() {
             self.web_search_url = other.web_search_url.clone();
         }
+        if other.web_search_providers.is_some() {
+            self.web_search_providers = other.web_search_providers.clone();
+        }
         if other.source_trust_defaults.is_some() {
             self.source_trust_defaults = other.source_trust_defaults.clone();
         }
@@ -215,6 +276,12 @@ impl EngineConfig {
                 other.debate_debug.unwrap_or(false),
                 std::sync::atomic::Ordering::Relaxed,
             );
+        }
+        if other.blocked_domains.is_some() {
+            self.blocked_domains = other.blocked_domains.clone();
+        }
+        if other.output_language.is_some() {
+            self.output_language = other.output_language.clone();
         }
     }
 }

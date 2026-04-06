@@ -1,33 +1,16 @@
-/// Unified web search abstraction.
+/// Unified web search abstraction with tiered fallback.
 ///
 /// All web-search callers (debate research, proxy endpoint, etc.) go through
 /// this module so provider logic, error handling, and logging live in one place.
 ///
-/// Features:
-/// - Explicit provider matching (searxng, brave, duckduckgo)
-/// - Rate limiting (min 1.5s between SearxNG calls to protect upstream engines)
-/// - Unresponsive engine reporting (SearxNG tells us which engines are blocked)
-/// - Clear error messages on misconfiguration
+/// Providers are tried in the user-defined order from `web_search_providers` config.
+/// Each provider cascades on error, timeout, or zero results.
+///
+/// Supported providers: searxng, serper, google_cx, brave, duckduckgo
 
-use crate::state::AppState;
+use crate::state::{AppState, WebSearchProviderConfig};
 use std::sync::LazyLock;
-use std::sync::RwLock as StdRwLock;
 use tokio::sync::Mutex;
-
-/// Cached pool of public SearxNG instances from searx.space
-struct SearxPool {
-    instances: Vec<String>,  // URLs sorted by quality
-    fetched_at: std::time::Instant,
-    unhealthy: std::collections::HashMap<String, std::time::Instant>,  // url -> unhealthy_since
-}
-
-static SEARX_POOL: LazyLock<StdRwLock<SearxPool>> = LazyLock::new(|| {
-    StdRwLock::new(SearxPool {
-        instances: Vec::new(),
-        fetched_at: std::time::Instant::now(),
-        unhealthy: std::collections::HashMap::new(),
-    })
-});
 
 /// A single web search result.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -44,36 +27,12 @@ const SEARXNG_MIN_INTERVAL_MS: u64 = 1500;
 static LAST_SEARCH: LazyLock<Mutex<std::time::Instant>> =
     LazyLock::new(|| Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(10)));
 
-/// Execute a structured web search using the configured provider.
+/// Execute a web search using the tiered provider chain.
 ///
-/// Returns `Ok(results)` on success (possibly empty if the query matched nothing),
-/// or `Err(message)` when the provider is misconfigured or unreachable.
+/// Tries each enabled provider in order. Cascades on error, timeout, or zero results.
+/// Returns results from the first provider that succeeds.
 pub async fn search(state: &AppState, query: &str) -> Result<Vec<WebSearchResult>, String> {
-    let (provider, api_key, search_url) = read_config(state);
-
-    if provider.is_empty() {
-        let msg = "web search not configured: web_search_provider is not set";
-        eprintln!("[web_search] {}", msg);
-        return Err(msg.to_string());
-    }
-
-    let client = &state.http_client;
-
-    let t0 = std::time::Instant::now();
-    dbg_debate!("[websearch] >> provider={} query=\"{}\"", provider, query);
-    let result = match provider.as_str() {
-        "searxng" => search_searxng(client, query, search_url.as_deref(), "").await,
-        "brave"   => search_brave(&client, query, &api_key).await,
-        "duckduckgo" => search_duckduckgo(&client, query).await,
-        other => {
-            let msg = format!("unknown web_search_provider '{}' -- supported: searxng, brave, duckduckgo", other);
-            eprintln!("[web_search] {}", msg);
-            Err(msg)
-        }
-    };
-    let count = result.as_ref().map(|r| r.len()).unwrap_or(0);
-    dbg_debate!("[websearch] << {} results in {:.1}s", count, t0.elapsed().as_secs_f32());
-    result
+    search_inner(state, query, "", "en").await
 }
 
 /// Like [`search`] but also accepts `time_range` (for the proxy endpoint).
@@ -82,42 +41,120 @@ pub async fn search_with_time_range(
     query: &str,
     time_range: &str,
 ) -> Result<Vec<WebSearchResult>, String> {
-    let (provider, api_key, search_url) = read_config(state);
+    search_inner(state, query, time_range, "en").await
+}
 
-    if provider.is_empty() {
-        let msg = "web search not configured: web_search_provider is not set";
+/// Like [`search`] but searches in a specific language (ISO 639-1 code).
+pub async fn search_with_language(
+    state: &AppState,
+    query: &str,
+    language: &str,
+) -> Result<Vec<WebSearchResult>, String> {
+    search_inner(state, query, "", language).await
+}
+
+async fn search_inner(state: &AppState, query: &str, time_range: &str, language: &str) -> Result<Vec<WebSearchResult>, String> {
+    let providers = resolve_providers(state);
+
+    if providers.is_empty() {
+        let msg = "web search not configured: no providers in web_search_providers";
         eprintln!("[web_search] {}", msg);
         return Err(msg.to_string());
     }
 
     let client = &state.http_client;
-
     let t0 = std::time::Instant::now();
-    dbg_debate!("[websearch] >> provider={} query=\"{}\" time_range={}", provider, query, time_range);
-    let result = match provider.as_str() {
-        "searxng" => search_searxng(client, query, search_url.as_deref(), time_range).await,
-        "brave"   => search_brave(&client, query, &api_key).await,
-        "duckduckgo" => search_duckduckgo(&client, query).await,
-        other => {
-            let msg = format!("unknown web_search_provider '{}' -- supported: searxng, brave, duckduckgo", other);
-            eprintln!("[web_search] {}", msg);
-            Err(msg)
+
+    for (i, provider) in providers.iter().enumerate() {
+        if !provider.enabled { continue; }
+
+        let tier = i + 1;
+        dbg_debate!("[websearch] tier {}: {} ({})", tier, provider.name, provider.provider);
+
+        let api_key = resolve_api_key(state, provider);
+
+        let lang = if language.is_empty() { "en" } else { language };
+        let result = match provider.provider.as_str() {
+            "searxng" => {
+                rate_limit_searxng().await;
+                search_searxng(client, query, provider.url.as_deref(), time_range, lang).await
+            }
+            "serper" => search_serper(client, query, &api_key, lang).await,
+            "google_cx" => search_google_cx(client, query, &api_key, provider.cx_id.as_deref().unwrap_or(""), lang).await,
+            "brave" => search_brave(client, query, &api_key).await,
+            "duckduckgo" => search_duckduckgo(client, query).await,
+            other => {
+                eprintln!("[web_search] unknown provider '{}', skipping", other);
+                continue;
+            }
+        };
+
+        match result {
+            Ok(results) if !results.is_empty() => {
+                dbg_debate!("[websearch] tier {} ({}) returned {} results in {:.1}s",
+                    tier, provider.name, results.len(), t0.elapsed().as_secs_f32());
+                return Ok(results);
+            }
+            Ok(_) => {
+                dbg_debate!("[websearch] tier {} ({}) returned 0 results, trying next", tier, provider.name);
+            }
+            Err(e) => {
+                dbg_debate!("[websearch] tier {} ({}) failed: {}, trying next", tier, provider.name, e);
+            }
         }
-    };
-    let count = result.as_ref().map(|r| r.len()).unwrap_or(0);
-    dbg_debate!("[websearch] << {} results in {:.1}s", count, t0.elapsed().as_secs_f32());
-    result
+    }
+
+    let msg = format!("all {} search providers exhausted, no results for \"{}\"",
+        providers.len(), &query[..query.len().min(60)]);
+    eprintln!("[web_search] {}", msg);
+    Err(msg)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-fn read_config(state: &AppState) -> (String, String, Option<String>) {
+/// Resolve the provider list from config, with fallback to old single-provider fields.
+fn resolve_providers(state: &AppState) -> Vec<WebSearchProviderConfig> {
     let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
-    (
-        cfg.web_search_provider.clone().unwrap_or_default(),
-        cfg.web_search_api_key.clone().unwrap_or_default(),
-        cfg.web_search_url.clone(),
-    )
+
+    // New-style: ordered provider array
+    if let Some(ref providers) = cfg.web_search_providers {
+        if !providers.is_empty() {
+            return providers.clone();
+        }
+    }
+
+    // Fallback: old single-provider field (for configs that haven't been migrated yet)
+    if let Some(ref provider) = cfg.web_search_provider {
+        if !provider.is_empty() {
+            return vec![WebSearchProviderConfig {
+                name: provider.clone(),
+                provider: provider.clone(),
+                url: cfg.web_search_url.clone(),
+                cx_id: None,
+                enabled: true,
+                auth_secret_key: None,
+            }];
+        }
+    }
+
+    Vec::new()
+}
+
+/// Resolve an API key from the secrets store, falling back to old web_search_api_key.
+fn resolve_api_key(state: &AppState, provider: &WebSearchProviderConfig) -> String {
+    // Try secrets store first
+    if let Some(ref key_name) = provider.auth_secret_key {
+        if let Ok(secrets) = state.secrets.read() {
+            if let Some(ref store) = *secrets {
+                if let Some(key) = store.get(key_name) {
+                    return key.to_string();
+                }
+            }
+        }
+    }
+    // Fallback: old config field (for brave with web_search_api_key)
+    let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
+    cfg.web_search_api_key.clone().unwrap_or_default()
 }
 
 /// Enforce minimum delay between SearxNG requests.
@@ -132,79 +169,6 @@ async fn rate_limit_searxng() {
     *last = std::time::Instant::now();
 }
 
-// ── SearxNG fallback pool (searx.space) ────────────────────────────────
-
-/// Fetch public SearxNG instances from searx.space, filter for healthy ones.
-async fn refresh_searx_pool(client: &reqwest::Client) {
-    let url = "https://searx.space/data/instances.json";
-    let resp = match client.get(url).timeout(std::time::Duration::from_secs(10)).send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => { dbg_debate!("[websearch] failed to fetch searx.space instance list"); return; }
-    };
-    let data: serde_json::Value = match resp.json().await {
-        Ok(d) => d,
-        _ => return,
-    };
-    let instances = data.get("instances").and_then(|i| i.as_object());
-    let Some(instances) = instances else { return };
-
-    let mut good: Vec<(String, f64)> = Vec::new();
-    for (url, info) in instances {
-        let status = info.pointer("/http/status_code").and_then(|s| s.as_u64()).unwrap_or(0);
-        let grade = info.pointer("/http/grade").and_then(|g| g.as_str()).unwrap_or("");
-        let timing = info.pointer("/timing/search/mean").and_then(|t| t.as_f64()).unwrap_or(99.0);
-        // Only grade A+, A, or B with status 200
-        if status == 200 && matches!(grade, "A+" | "A" | "B") {
-            let search_url = if url.ends_with('/') { format!("{}search", url) } else { format!("{}/search", url) };
-            good.push((search_url, timing));
-        }
-    }
-    // Sort by response time (fastest first)
-    good.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let urls: Vec<String> = good.into_iter().map(|(u, _)| u).collect();
-    dbg_debate!("[websearch] refreshed searx.space pool: {} healthy instances", urls.len());
-
-    if let Ok(mut pool) = SEARX_POOL.write() {
-        pool.instances = urls;
-        pool.fetched_at = std::time::Instant::now();
-    }
-}
-
-/// Get a list of healthy fallback SearxNG URLs to try.
-fn get_fallback_urls() -> Vec<String> {
-    let pool = match SEARX_POOL.read() {
-        Ok(p) => p,
-        Err(_) => return Vec::new(),
-    };
-    let now = std::time::Instant::now();
-    pool.instances.iter()
-        .filter(|url| {
-            // Skip if marked unhealthy within last 5 minutes
-            pool.unhealthy.get(*url)
-                .map(|since| now.duration_since(*since) > std::time::Duration::from_secs(300))
-                .unwrap_or(true)
-        })
-        .take(5)  // Try at most 5 fallbacks
-        .cloned()
-        .collect()
-}
-
-/// Mark an instance as unhealthy (skip for 5 minutes).
-fn mark_unhealthy(url: &str) {
-    if let Ok(mut pool) = SEARX_POOL.write() {
-        pool.unhealthy.insert(url.to_string(), std::time::Instant::now());
-    }
-}
-
-/// Check if the pool needs refreshing (older than 1 hour).
-fn pool_needs_refresh() -> bool {
-    match SEARX_POOL.read() {
-        Ok(pool) => pool.fetched_at.elapsed() > std::time::Duration::from_secs(3600) || pool.instances.is_empty(),
-        Err(_) => true,
-    }
-}
-
 // ── Provider implementations ────────────────────────────────────────────
 
 async fn search_searxng(
@@ -212,71 +176,13 @@ async fn search_searxng(
     query: &str,
     base_url: Option<&str>,
     time_range: &str,
+    language: &str,
 ) -> Result<Vec<WebSearchResult>, String> {
-    let has_local = matches!(base_url, Some(url) if !url.is_empty());
+    let base = match base_url {
+        Some(url) if !url.is_empty() => url,
+        _ => return Err("searxng: web_search_url not configured".into()),
+    };
 
-    // Try local/configured instance first (with rate limiting)
-    if has_local {
-        let base = base_url.unwrap();
-        rate_limit_searxng().await;
-        match searxng_single_request(client, base, query, time_range).await {
-            Ok(results) if !results.is_empty() => return Ok(results),
-            Ok(_) => {
-                dbg_debate!("[websearch] local searxng returned 0 results, trying fallbacks");
-            }
-            Err(e) => {
-                dbg_debate!("[websearch] local searxng failed: {}, trying fallbacks", e);
-            }
-        }
-    } else {
-        dbg_debate!("[websearch] no local searxng configured, trying fallbacks from searx.space");
-    }
-
-    // If primary failed or returned nothing, try fallbacks from searx.space pool
-    if pool_needs_refresh() {
-        refresh_searx_pool(client).await;
-    }
-    let fallbacks = get_fallback_urls();
-    if fallbacks.is_empty() {
-        let msg = if has_local {
-            "searxng: local instance returned no results and no fallbacks available".to_string()
-        } else {
-            "searxng configured but web_search_url is not set and no fallbacks available".to_string()
-        };
-        eprintln!("[web_search] {}", msg);
-        return Err(msg);
-    }
-
-    for fallback_url in &fallbacks {
-        dbg_debate!("[websearch] trying fallback: {}", fallback_url);
-        // No rate limiting for public instances -- they have their own limits
-        match searxng_single_request(client, fallback_url, query, time_range).await {
-            Ok(results) if !results.is_empty() => {
-                eprintln!("[web_search] searxng fallback: {} results from {}", results.len(), fallback_url);
-                return Ok(results);
-            }
-            Ok(_) => {
-                dbg_debate!("[websearch] fallback {} returned 0 results", fallback_url);
-            }
-            Err(e) => {
-                dbg_debate!("[websearch] fallback {} failed: {}", fallback_url, e);
-                mark_unhealthy(fallback_url);
-            }
-        }
-    }
-
-    let msg = format!("searxng: all {} fallbacks exhausted, no results", fallbacks.len());
-    eprintln!("[web_search] {}", msg);
-    Err(msg)
-}
-
-/// Execute a single SearxNG search request against one instance.
-async fn searxng_single_request(
-    client: &reqwest::Client,
-    base: &str,
-    query: &str,
-    time_range: &str,
-) -> Result<Vec<WebSearchResult>, String> {
     let time_param = if !time_range.is_empty() {
         format!("&time_range={}", urlencoding::encode(time_range))
     } else {
@@ -284,9 +190,10 @@ async fn searxng_single_request(
     };
 
     let url = format!(
-        "{}/search?q={}&format=json&language=en{}",
+        "{}/search?q={}&format=json&language={}{}",
         base.trim_end_matches('/'),
         urlencoding::encode(query),
+        language,
         time_param,
     );
 
@@ -295,25 +202,16 @@ async fn searxng_single_request(
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| {
-            let msg = format!("searxng request to {} failed: {}", base, e);
-            eprintln!("[web_search] {}", msg);
-            msg
-        })?;
+        .map_err(|e| format!("searxng request failed: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        let msg = format!("searxng returned HTTP {}: {}", status, &body[..body.len().min(200)]);
-        eprintln!("[web_search] {}", msg);
-        return Err(msg);
+        return Err(format!("searxng HTTP {}: {}", status, &body[..body.len().min(200)]));
     }
 
-    let data: serde_json::Value = resp.json().await.map_err(|e| {
-        let msg = format!("searxng response parse failed: {}", e);
-        eprintln!("[web_search] {}", msg);
-        msg
-    })?;
+    let data: serde_json::Value = resp.json().await
+        .map_err(|e| format!("searxng parse failed: {}", e))?;
 
     // Report unresponsive engines
     if let Some(unresponsive) = data.get("unresponsive_engines").and_then(|u| u.as_array()) {
@@ -342,14 +240,105 @@ async fn searxng_single_request(
         }
     }
 
-    if results.is_empty() {
-        let num_results = data.get("number_of_results").and_then(|n| n.as_u64()).unwrap_or(0);
-        eprintln!("[web_search] searxng: 0 results (number_of_results={}) for \"{}\"",
-            num_results, &query[..query.len().min(60)]);
-    } else {
-        eprintln!("[web_search] searxng: {} results for \"{}\"", results.len(), &query[..query.len().min(60)]);
+    eprintln!("[web_search] searxng: {} results for \"{}\"", results.len(), &query[..query.len().min(60)]);
+    Ok(results)
+}
+
+async fn search_serper(
+    client: &reqwest::Client,
+    query: &str,
+    api_key: &str,
+    language: &str,
+) -> Result<Vec<WebSearchResult>, String> {
+    if api_key.is_empty() {
+        return Err("serper: API key not configured (add to secrets store)".into());
     }
 
+    let body = serde_json::json!({ "q": query, "gl": language, "hl": language });
+    let resp = client.post("https://google.serper.dev/search")
+        .timeout(std::time::Duration::from_secs(10))
+        .header("X-API-KEY", api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("serper request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("serper HTTP {}: {}", status, &body[..body.len().min(200)]));
+    }
+
+    let data: serde_json::Value = resp.json().await
+        .map_err(|e| format!("serper parse failed: {}", e))?;
+
+    let mut results = Vec::new();
+    if let Some(arr) = data.get("organic").and_then(|r| r.as_array()) {
+        for r in arr.iter().take(10) {
+            let title = r.get("title").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+            let snippet = r.get("snippet").and_then(|s| s.as_str()).unwrap_or_default().to_string();
+            let url = r.get("link").and_then(|u| u.as_str()).unwrap_or_default().to_string();
+            if !title.is_empty() {
+                results.push(WebSearchResult { url, title, snippet });
+            }
+        }
+    }
+
+    eprintln!("[web_search] serper: {} results for \"{}\"", results.len(), &query[..query.len().min(60)]);
+    Ok(results)
+}
+
+async fn search_google_cx(
+    client: &reqwest::Client,
+    query: &str,
+    api_key: &str,
+    cx_id: &str,
+    language: &str,
+) -> Result<Vec<WebSearchResult>, String> {
+    if api_key.is_empty() {
+        return Err("google_cx: API key not configured (add to secrets store)".into());
+    }
+    if cx_id.is_empty() {
+        return Err("google_cx: cx_id not configured".into());
+    }
+
+    let url = format!(
+        "https://www.googleapis.com/customsearch/v1?key={}&cx={}&q={}&lr=lang_{}",
+        urlencoding::encode(api_key),
+        urlencoding::encode(cx_id),
+        urlencoding::encode(query),
+        language,
+    );
+
+    let resp = client.get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("google_cx request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("google_cx HTTP {}: {}", status, &body[..body.len().min(200)]));
+    }
+
+    let data: serde_json::Value = resp.json().await
+        .map_err(|e| format!("google_cx parse failed: {}", e))?;
+
+    let mut results = Vec::new();
+    if let Some(arr) = data.get("items").and_then(|r| r.as_array()) {
+        for r in arr.iter().take(10) {
+            let title = r.get("title").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+            let snippet = r.get("snippet").and_then(|s| s.as_str()).unwrap_or_default().to_string();
+            let url = r.get("link").and_then(|u| u.as_str()).unwrap_or_default().to_string();
+            if !title.is_empty() {
+                results.push(WebSearchResult { url, title, snippet });
+            }
+        }
+    }
+
+    eprintln!("[web_search] google_cx: {} results for \"{}\"", results.len(), &query[..query.len().min(60)]);
     Ok(results)
 }
 
@@ -359,9 +348,7 @@ async fn search_brave(
     api_key: &str,
 ) -> Result<Vec<WebSearchResult>, String> {
     if api_key.is_empty() {
-        let msg = "brave configured but web_search_api_key is not set";
-        eprintln!("[web_search] {}", msg);
-        return Err(msg.to_string());
+        return Err("brave: API key not configured".into());
     }
 
     let url = format!(
@@ -375,25 +362,16 @@ async fn search_brave(
         .header("X-Subscription-Token", api_key)
         .send()
         .await
-        .map_err(|e| {
-            let msg = format!("brave search request failed: {}", e);
-            eprintln!("[web_search] {}", msg);
-            msg
-        })?;
+        .map_err(|e| format!("brave request failed: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        let msg = format!("brave returned HTTP {}: {}", status, &body[..body.len().min(200)]);
-        eprintln!("[web_search] {}", msg);
-        return Err(msg);
+        return Err(format!("brave HTTP {}: {}", status, &body[..body.len().min(200)]));
     }
 
-    let data: serde_json::Value = resp.json().await.map_err(|e| {
-        let msg = format!("brave response parse failed: {}", e);
-        eprintln!("[web_search] {}", msg);
-        msg
-    })?;
+    let data: serde_json::Value = resp.json().await
+        .map_err(|e| format!("brave parse failed: {}", e))?;
 
     let mut results = Vec::new();
     if let Some(arr) = data.pointer("/web/results").and_then(|r| r.as_array()) {
@@ -425,25 +403,16 @@ async fn search_duckduckgo(
         .header("User-Agent", "engram/1.1")
         .send()
         .await
-        .map_err(|e| {
-            let msg = format!("duckduckgo request failed: {}", e);
-            eprintln!("[web_search] {}", msg);
-            msg
-        })?;
+        .map_err(|e| format!("duckduckgo request failed: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        let msg = format!("duckduckgo returned HTTP {}: {}", status, &body[..body.len().min(200)]);
-        eprintln!("[web_search] {}", msg);
-        return Err(msg);
+        return Err(format!("duckduckgo HTTP {}: {}", status, &body[..body.len().min(200)]));
     }
 
-    let data: serde_json::Value = resp.json().await.map_err(|e| {
-        let msg = format!("duckduckgo response parse failed: {}", e);
-        eprintln!("[web_search] {}", msg);
-        msg
-    })?;
+    let data: serde_json::Value = resp.json().await
+        .map_err(|e| format!("duckduckgo parse failed: {}", e))?;
 
     let mut results = Vec::new();
 

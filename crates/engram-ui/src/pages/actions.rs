@@ -90,7 +90,7 @@ pub fn ActionsPage() -> impl IntoView {
                                     view! {
                                         <tr>
                                             <td><code>{rule.id.clone()}</code></td>
-                                            <td>{rule.name.clone()}</td>
+                                            <td>{rule.description.clone().unwrap_or_default()}</td>
                                             <td>{enabled_badge}</td>
                                         </tr>
                                     }

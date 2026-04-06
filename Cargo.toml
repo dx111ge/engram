@@ -32,7 +32,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-all = ["mesh", "llm", "grpc", "ingest", "actions", "reason", "assess", "onnx", "gliner2", "https"]
+all = ["mesh", "llm", "grpc", "ingest", "actions", "reason", "assess", "onnx", "gliner2", "https", "pdf"]
 https = ["engram-core/https"]
 mesh = ["engram-api/mesh", "engram-mesh"]
 llm = ["engram-api/llm"]
@@ -43,6 +43,7 @@ actions = ["engram-api/actions", "engram-action"]
 reason = ["engram-api/reason", "engram-reason"]
 assess = ["engram-api/assess", "engram-assess"]
 gliner2 = ["engram-api/gliner2", "ingest"]
+pdf = ["engram-api/pdf"]
 
 [dependencies]
 engram-core = { path = "crates/engram-core" }
@@ -83,6 +84,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 axum = "0.8"
+pdf-extract = { version = "0.7" }
 
 
 [profile.release]

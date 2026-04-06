@@ -522,6 +522,9 @@ pub fn GraphPage() -> impl IntoView {
                 <button class="btn btn-secondary" on:click=move |_| set_crud_open.set(true)>
                     <i class="fa-solid fa-plus"></i>" New"
                 </button>
+                <a href="/ingest" class="btn btn-secondary">
+                    <i class="fa-solid fa-file-import"></i>" Ingest"
+                </a>
             </div>
         </div>
 

@@ -71,12 +71,9 @@ pub fn Nav() -> impl IntoView {
                 <i class="fa-solid fa-bars"></i>
             </button>
             <ul class=nav_class>
-                <li><A href="/" on:click=close_nav><i class="fa-solid fa-house"></i>" Home"</A></li>
-                <li><A href="/graph" on:click=close_nav><i class="fa-solid fa-compass"></i>" Explore"</A></li>
+                <li><A href="/" on:click=close_nav><i class="fa-solid fa-brain"></i>" Knowledge"</A></li>
                 <li><A href="/insights" on:click=close_nav><i class="fa-solid fa-chart-line"></i>" Insights"</A></li>
-                <li><A href="/facts" on:click=close_nav><i class="fa-solid fa-check-double"></i>" Facts"</A></li>
                 <li><A href="/debate" on:click=close_nav><i class="fa-solid fa-comments"></i>" Debate"</A></li>
-                <li><A href="/security" on:click=close_nav><i class="fa-solid fa-shield-halved"></i>" Security"</A></li>
                 <li><A href="/system" on:click=close_nav><i class="fa-solid fa-sliders"></i>" System"</A></li>
             </ul>
             <div class="nav-status">

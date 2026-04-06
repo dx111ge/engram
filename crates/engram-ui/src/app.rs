@@ -74,7 +74,13 @@ pub fn App() -> impl IntoView {
                         <Nav />
                         <main id="content">
                             <Routes fallback=|| view! { <pages::not_found::NotFound /> }>
-                                <Route path=path!("/") view=pages::dashboard::Dashboard />
+                                // ── Primary nav pages ──
+                                <Route path=path!("/") view=pages::graph::GraphPage />
+                                <Route path=path!("/insights") view=pages::insights::InsightsPage />
+                                <Route path=path!("/debate") view=pages::debate::DebatePage />
+                                <Route path=path!("/system") view=pages::system::SystemPage />
+                                // ── Sub-pages (accessed from within main pages) ──
+                                <Route path=path!("/knowledge") view=pages::graph::GraphPage />
                                 <Route path=path!("/graph") view=pages::graph::GraphPage />
                                 <Route path=path!("/search") view=pages::search::SearchPage />
                                 <Route path=path!("/nl") view=pages::nl::NlPage />
@@ -85,12 +91,10 @@ pub fn App() -> impl IntoView {
                                 <Route path=path!("/actions") view=pages::actions::ActionsPage />
                                 <Route path=path!("/gaps") view=pages::gaps::GapsPage />
                                 <Route path=path!("/mesh") view=pages::mesh::MeshPage />
-                                <Route path=path!("/system") view=pages::system::SystemPage />
-                                <Route path=path!("/security") view=pages::security::SecurityPage />
                                 <Route path=path!("/node/:label") view=pages::node::NodePage />
-                                <Route path=path!("/insights") view=pages::insights::InsightsPage />
+                                // ── Backward compat (absorbed into other pages) ──
                                 <Route path=path!("/facts") view=pages::facts::FactReviewPage />
-                                <Route path=path!("/debate") view=pages::debate::DebatePage />
+                                <Route path=path!("/security") view=pages::security::SecurityPage />
                             </Routes>
                         </main>
                         <OnboardingWizard open=wizard_open on_complete=on_wizard_complete />

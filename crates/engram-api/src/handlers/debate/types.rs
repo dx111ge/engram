@@ -29,6 +29,9 @@ pub struct DebateSession {
     /// LLM-generated short search queries derived from the topic.
     /// Generated once at briefing, reused for all agent web searches.
     pub search_queries: Vec<String>,
+    /// Languages relevant to the topic (ISO 639-1 codes, always includes "en").
+    /// Detected by LLM during briefing phase.
+    pub topic_languages: Vec<String>,
 }
 
 /// Live progress information for the frontend.

@@ -5,6 +5,8 @@ mod ner;
 mod secrets;
 mod database;
 pub mod rules;
+mod security_tab;
+mod add_provider;
 
 use leptos::prelude::*;
 
@@ -12,7 +14,7 @@ use crate::api::ApiClient;
 use crate::api::types::{
     ComputeResponse, ConfigResponse,
     MeshAuditEntry, PeerInfo, SecretListItem,
-    StatsResponse,
+    SourceInfo, KbEndpointInfo, StatsResponse,
 };
 
 use presets::*;
@@ -61,13 +63,54 @@ pub fn SystemPage() -> impl IntoView {
     let api_secrets = api.clone();
     let secrets = LocalResource::new(move || {
         let api = api_secrets.clone();
-        async move { api.get::<Vec<SecretListItem>>("/secrets").await.ok().unwrap_or_default() }
+        async move {
+            // API returns {"keys": ["key1", "key2"]}, not Vec<SecretListItem>
+            #[derive(serde::Deserialize)]
+            struct SecretsResponse { #[serde(default)] keys: Vec<String> }
+            api.get::<SecretsResponse>("/secrets").await.ok()
+                .map(|r| r.keys.into_iter().map(|k| SecretListItem { key: k }).collect())
+                .unwrap_or_default()
+        }
     });
 
     let api_identity = api.clone();
     let mesh_identity = LocalResource::new(move || {
         let api = api_identity.clone();
         async move { api.get_text("/mesh/identity").await.ok().unwrap_or_default() }
+    });
+
+    let api_sources = api.clone();
+    let sources = LocalResource::new(move || {
+        let api = api_sources.clone();
+        async move { api.get::<Vec<SourceInfo>>("/sources").await.ok().unwrap_or_default() }
+    });
+
+    let api_kb = api.clone();
+    let kb_endpoints = LocalResource::new(move || {
+        let api = api_kb.clone();
+        async move {
+            #[derive(Clone, Debug, serde::Deserialize)]
+            struct KbResponse { #[serde(default)] endpoints: Vec<KbEndpointInfo> }
+            api.get::<KbResponse>("/config/kb").await.ok().map(|r| r.endpoints).unwrap_or_default()
+        }
+    });
+
+    // ── Rule counts ──
+    let api_inf_rules = api.clone();
+    let inference_rule_count = LocalResource::new(move || {
+        let api = api_inf_rules.clone();
+        async move {
+            #[derive(serde::Deserialize)]
+            struct RuleNamesResp { #[serde(default)] names: Vec<String> }
+            api.get::<RuleNamesResp>("/rules").await.ok().map(|r| r.names.len()).unwrap_or(0)
+        }
+    });
+    let api_act_rules = api.clone();
+    let action_rule_count = LocalResource::new(move || {
+        let api = api_act_rules.clone();
+        async move {
+            api.get::<Vec<serde_json::Value>>("/actions/rules").await.ok().map(|v| v.len()).unwrap_or(0)
+        }
     });
 
     // ── Section 2: Embedding ──
@@ -275,22 +318,27 @@ pub fn SystemPage() -> impl IntoView {
     let embed_status: Signal<String> = Signal::derive(move || {
         let ep = embed_endpoint.get();
         let model_cfg = embed_model.get();
+        // Match presets by checking if endpoint contains the preset URL (handles trailing path differences)
         let provider_name = EMBED_PRESETS.iter()
-            .find(|p| p.endpoint == ep)
+            .find(|p| ep.contains(p.endpoint) || p.endpoint.contains(&*ep))
             .map(|p| p.name)
             .unwrap_or("");
-        let model_from_compute = compute.get().flatten().and_then(|c| c.embedder_model);
-        let model_name = model_from_compute.as_deref()
-            .or_else(|| if !model_cfg.is_empty() { Some(model_cfg.as_str()) } else { None });
+        // Prefer config model over compute model (compute can be stale from previous config)
+        let model_name = if !model_cfg.is_empty() {
+            Some(model_cfg.as_str().to_string())
+        } else {
+            compute.get().flatten().and_then(|c| c.embedder_model)
+        };
         if ep.starts_with("onnx://") {
             match model_name {
                 Some(m) => format!("ONNX Local | {m}"),
                 None => "ONNX Local".into(),
             }
         } else if !ep.is_empty() {
+            let label = if provider_name.is_empty() { "" } else { provider_name };
             match model_name {
-                Some(m) => format!("{} | {m}", provider_name),
-                None => provider_name.to_string(),
+                Some(m) => if label.is_empty() { m } else { format!("{label} | {m}") },
+                None => if label.is_empty() { "configured".into() } else { label.to_string() },
             }
         } else {
             "not configured".into()
@@ -321,7 +369,7 @@ pub fn SystemPage() -> impl IntoView {
     });
 
     let secrets_status: Signal<String> = Signal::derive(move || {
-        let count = secrets.get().map(|v| v.len()).unwrap_or(0);
+        let count = secrets.get().map(|v: Vec<SecretListItem>| v.len()).unwrap_or(0);
         if count > 0 { format!("{count} keys") } else { "No secrets".into() }
     });
 
@@ -346,15 +394,36 @@ pub fn SystemPage() -> impl IntoView {
                 on:click=move |_| set_active_tab.set("system".into())>
                 <i class="fa-solid fa-sliders"></i>" System"
             </button>
+            <button class=move || if active_tab.get() == "security" { "system-tab active" } else { "system-tab" }
+                on:click=move |_| set_active_tab.set("security".into())>
+                <i class="fa-solid fa-shield-halved"></i>" Security"
+            </button>
             <button class=move || if active_tab.get() == "mesh" { "system-tab active" } else { "system-tab" }
                 on:click=move |_| set_active_tab.set("mesh".into())>
                 <i class="fa-solid fa-share-nodes"></i>" Mesh"
             </button>
         </div>
 
-        // ── System tab: 3x2 card grid ──
+        // ── System tab: card grid ──
         <div style=move || if active_tab.get() == "system" { "" } else { "display:none" }>
             <div class="system-grid">
+                // ── Card: Hardware ──
+                <div class="system-card" on:click=move |_| set_modal_open.set("hardware".into())>
+                    <div class="system-card-header">
+                        <span class="system-card-icon"><i class="fa-solid fa-server"></i></span>
+                        <span class="system-card-title">"Hardware"</span>
+                    </div>
+                    <div class="system-card-status">{move || {
+                        let txt = compute.get().flatten().map(|c| {
+                            let cores = c.cpu_cores.map(|n| format!("{n} cores")).unwrap_or_default();
+                            let gpu = if c.gpu_available {
+                                c.gpu_name.clone().unwrap_or_else(|| "GPU".into())
+                            } else { "No GPU".into() };
+                            format!("{cores} | {gpu}")
+                        }).unwrap_or_else(|| "Loading...".into());
+                        view! { <span class="status-dot green"></span>{txt} }
+                    }}</div>
+                </div>
                 // ── Card: Embeddings ──
                 <div class="system-card" on:click=move |_| set_modal_open.set("embedding".into())>
                     <div class="system-card-header">
@@ -421,10 +490,251 @@ pub fn SystemPage() -> impl IntoView {
                         <span class="system-card-icon"><i class="fa-solid fa-gavel"></i></span>
                         <span class="system-card-title">"Rules"</span>
                     </div>
-                    <div class="system-card-status">
-                        <span class="status-dot green"></span>"Inference & Action"
-                    </div>
+                    <div class="system-card-status">{move || {
+                        let inf_count = inference_rule_count.get().unwrap_or(0);
+                        let act_count = action_rule_count.get().unwrap_or(0);
+                        let txt = if inf_count == 0 && act_count == 0 {
+                            "No rules loaded".into()
+                        } else {
+                            format!("{inf_count} inference, {act_count} action")
+                        };
+                        let dot = if inf_count > 0 || act_count > 0 { "status-dot green" } else { "status-dot gray" };
+                        view! { <span class={dot}></span>{txt} }
+                    }}</div>
                 </div>
+                // ── Card: Blocked Domains ──
+                <div class="system-card" on:click=move |_| set_modal_open.set("websearch".into())>
+                    <div class="system-card-header">
+                        <span class="system-card-icon"><i class="fa-solid fa-ban"></i></span>
+                        <span class="system-card-title">"Blocked Domains"</span>
+                    </div>
+                    <div class="system-card-status">{move || {
+                        let blocked_count = config.get().flatten()
+                            .and_then(|c| c.data.get("blocked_domains").and_then(|v| v.as_array().map(|a| a.len())))
+                            .unwrap_or(0);
+                        let txt = format!("{blocked_count} blocked");
+                        view! { <span class="status-dot green"></span>{txt} }
+                    }}</div>
+                </div>
+                // ── Card: Language ──
+                <div class="system-card" on:click=move |_| set_modal_open.set("language".into())>
+                    <div class="system-card-header">
+                        <span class="system-card-icon"><i class="fa-solid fa-language"></i></span>
+                        <span class="system-card-title">"Language"</span>
+                    </div>
+                    <div class="system-card-status">{move || {
+                        let lang = config.get().flatten()
+                            .and_then(|c| c.data.get("output_language").and_then(|v| v.as_str().map(|s| s.to_string())))
+                            .unwrap_or_default();
+                        let display = if lang.is_empty() || lang == "en" { "English (default)".into() } else { lang.to_uppercase() };
+                        view! { <span class="status-dot green"></span>{display} }
+                    }}</div>
+                </div>
+            </div>
+
+            // ── Sources & Integrations (expanded section) ──
+            <div class="card" style="margin-top: 1.5rem;">
+                <h3 style="margin-bottom: 1rem;"><i class="fa-solid fa-plug" style="color: var(--accent-bright);"></i>" Sources & Integrations"</h3>
+
+                // ── Web Search Providers ──
+                {
+                    let api = api.clone();
+                    let (ws_open, set_ws_open) = signal(true);
+                    let (kb_open, set_kb_open) = signal(true);
+                    let (ig_open, set_ig_open) = signal(true);
+                    view! { <div>
+                <div style="margin-bottom: 1.5rem;">
+                    <h4 style="margin-bottom: 0.5rem; cursor: pointer; user-select: none;" on:click=move |_| set_ws_open.update(|v| *v = !*v)>
+                        <i class=move || if ws_open.get() { "fa-solid fa-chevron-down" } else { "fa-solid fa-chevron-right" } style="margin-right: 0.4rem; opacity: 0.7; font-size: 0.8rem;"></i>
+                        <i class="fa-solid fa-magnifying-glass" style="margin-right: 0.4rem; opacity: 0.7;"></i>"Web Search Providers"
+                        <span class="text-secondary" style="font-size: 0.75rem; font-weight: normal; margin-left: 0.5rem;">"(order = fallback priority)"</span>
+                    </h4>
+                    <div style=move || if ws_open.get() { "" } else { "display:none" }>
+                    {move || {
+                        let raw_providers: Vec<serde_json::Value> = config.get().flatten()
+                            .and_then(|c| c.data.get("web_search_providers").and_then(|v| v.as_array()).cloned())
+                            .unwrap_or_default();
+                        let providers: Vec<(String, String, bool, usize)> = raw_providers.iter()
+                            .enumerate()
+                            .map(|(i, p)| {
+                                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                                let provider = p.get("provider").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let enabled = p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                                (name, provider, enabled, i)
+                            })
+                            .collect();
+                        let count = providers.len();
+                        if providers.is_empty() {
+                            view! {
+                                <p class="text-muted" style="font-size: 0.85rem;">"No web search providers configured. Add one below."</p>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <table class="data-table" style="margin-bottom: 0.5rem;">
+                                    <thead><tr><th>"#"</th><th>"Name"</th><th>"Provider"</th><th>"Enabled"</th><th style="width: 5rem;">"Order"</th><th></th></tr></thead>
+                                    <tbody>
+                                        {providers.iter().map(|(name, provider, enabled, idx)| {
+                                            let tier = idx + 1;
+                                            let badge = if *enabled { "badge badge-success" } else { "badge badge-muted" };
+                                            let status = if *enabled { "Active" } else { "Disabled" };
+                                            let idx_val = *idx;
+                                            let show_up = idx_val > 0;
+                                            let show_down = idx_val < count - 1;
+                                            let raw_up = raw_providers.clone();
+                                            let raw_down = raw_providers.clone();
+                                            let raw_del = raw_providers.clone();
+                                            let api_up = api.clone();
+                                            let api_down = api.clone();
+                                            let api_del = api.clone();
+                                            view! {
+                                                <tr>
+                                                    <td>{tier.to_string()}</td>
+                                                    <td><strong>{name.clone()}</strong></td>
+                                                    <td class="text-secondary">{provider.clone()}</td>
+                                                    <td><span class={badge}>{status}</span></td>
+                                                    <td>
+                                                        {show_up.then(|| {
+                                                            let api = api_up.clone();
+                                                            let mut arr = raw_up.clone();
+                                                            arr.swap(idx_val, idx_val - 1);
+                                                            view! {
+                                                                <button class="btn btn-secondary btn-sm" style="padding: 0.1rem 0.4rem; margin-right: 0.2rem;"
+                                                                    on:click=move |_| {
+                                                                        let api = api.clone();
+                                                                        let providers = arr.clone();
+                                                                        wasm_bindgen_futures::spawn_local(async move {
+                                                                            let _ = api.post_text("/config", &serde_json::json!({"web_search_providers": providers})).await;
+                                                                            if let Some(w) = web_sys::window() { let _ = w.location().reload(); }
+                                                                        });
+                                                                    }>
+                                                                    <i class="fa-solid fa-arrow-up"></i>
+                                                                </button>
+                                                            }
+                                                        })}
+                                                        {show_down.then(|| {
+                                                            let api = api_down.clone();
+                                                            let mut arr = raw_down.clone();
+                                                            arr.swap(idx_val, idx_val + 1);
+                                                            view! {
+                                                                <button class="btn btn-secondary btn-sm" style="padding: 0.1rem 0.4rem;"
+                                                                    on:click=move |_| {
+                                                                        let api = api.clone();
+                                                                        let providers = arr.clone();
+                                                                        wasm_bindgen_futures::spawn_local(async move {
+                                                                            let _ = api.post_text("/config", &serde_json::json!({"web_search_providers": providers})).await;
+                                                                            if let Some(w) = web_sys::window() { let _ = w.location().reload(); }
+                                                                        });
+                                                                    }>
+                                                                    <i class="fa-solid fa-arrow-down"></i>
+                                                                </button>
+                                                            }
+                                                        })}
+                                                    </td>
+                                                    <td>
+                                                        {
+                                                            let api = api_del.clone();
+                                                            let mut arr = raw_del.clone();
+                                                            arr.remove(idx_val);
+                                                            view! {
+                                                                <button class="btn btn-sm" style="padding: 0.1rem 0.4rem; color: var(--danger);"
+                                                                    on:click=move |_| {
+                                                                        let api = api.clone();
+                                                                        let providers = arr.clone();
+                                                                        wasm_bindgen_futures::spawn_local(async move {
+                                                                            let _ = api.post_text("/config", &serde_json::json!({"web_search_providers": providers})).await;
+                                                                            if let Some(w) = web_sys::window() { let _ = w.location().reload(); }
+                                                                        });
+                                                                    }>
+                                                                    <i class="fa-solid fa-trash"></i>
+                                                                </button>
+                                                            }
+                                                        }
+                                                    </td>
+                                                </tr>
+                                            }
+                                        }).collect::<Vec<_>>()}
+                                    </tbody>
+                                </table>
+                            }.into_any()
+                        }
+                    }}
+                    <button class="btn btn-primary btn-sm" on:click=move |_| set_modal_open.set("add_provider".into())>
+                        <i class="fa-solid fa-plus"></i>" Add Provider"
+                    </button>
+                    </div> // ws_open
+                </div>
+
+                // ── Knowledge Bases (SPARQL) ──
+                <div style="margin-bottom: 1.5rem;">
+                    <h4 style="margin-bottom: 0.5rem; cursor: pointer; user-select: none;" on:click=move |_| set_kb_open.update(|v| *v = !*v)>
+                        <i class=move || if kb_open.get() { "fa-solid fa-chevron-down" } else { "fa-solid fa-chevron-right" } style="margin-right: 0.4rem; opacity: 0.7; font-size: 0.8rem;"></i>
+                        <i class="fa-solid fa-database" style="margin-right: 0.4rem; opacity: 0.7;"></i>"Knowledge Bases"
+                    </h4>
+                    <div style=move || if kb_open.get() { "" } else { "display:none" }>
+                    {move || {
+                        let endpoints = kb_endpoints.get().unwrap_or_default();
+                        let active: Vec<_> = endpoints.iter().filter(|k| k.enabled).collect();
+                        if active.is_empty() {
+                            view! {
+                                <p class="text-muted" style="font-size: 0.85rem;">"No SPARQL endpoints configured."</p>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <table class="data-table" style="margin-bottom: 0.5rem;">
+                                    <thead><tr><th>"Name"</th><th>"Type"</th><th>"Status"</th></tr></thead>
+                                    <tbody>
+                                        {active.iter().map(|k| view! {
+                                            <tr>
+                                                <td><strong>{k.name.clone()}</strong></td>
+                                                <td class="text-secondary">"SPARQL"</td>
+                                                <td><span class="badge badge-success">"Active"</span></td>
+                                            </tr>
+                                        }).collect::<Vec<_>>()}
+                                    </tbody>
+                                </table>
+                            }.into_any()
+                        }
+                    }}
+                    </div> // kb_open
+                </div>
+
+                // ── Ingestion Sources ──
+                <div>
+                    <h4 style="margin-bottom: 0.5rem; cursor: pointer; user-select: none;" on:click=move |_| set_ig_open.update(|v| *v = !*v)>
+                        <i class=move || if ig_open.get() { "fa-solid fa-chevron-down" } else { "fa-solid fa-chevron-right" } style="margin-right: 0.4rem; opacity: 0.7; font-size: 0.8rem;"></i>
+                        <i class="fa-solid fa-download" style="margin-right: 0.4rem; opacity: 0.7;"></i>"Ingestion Sources"
+                    </h4>
+                    <div style=move || if ig_open.get() { "" } else { "display:none" }>
+                    {move || {
+                        let src = sources.get().unwrap_or_default();
+                        if src.is_empty() {
+                            view! {
+                                <p class="text-muted" style="font-size: 0.85rem;">"No ingestion sources configured."</p>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <table class="data-table" style="margin-bottom: 0.5rem;">
+                                    <thead><tr><th>"Name"</th><th>"Type"</th><th>"Status"</th></tr></thead>
+                                    <tbody>
+                                        {src.iter().map(|s| view! {
+                                            <tr>
+                                                <td><strong>{s.name.clone()}</strong></td>
+                                                <td class="text-secondary">{s.source_type.clone().unwrap_or_default()}</td>
+                                                <td><span class="badge badge-success">{s.status.clone().unwrap_or_else(|| "Active".into())}</span></td>
+                                            </tr>
+                                        }).collect::<Vec<_>>()}
+                                    </tbody>
+                                </table>
+                            }.into_any()
+                        }
+                    }}
+                    <a href="/sources" class="btn btn-secondary btn-sm">
+                        <i class="fa-solid fa-plus"></i>" Add Ingestion Source"
+                    </a>
+                    </div> // ig_open
+                </div>
+                </div> } // view! + block for collapsible signals
+                }
             </div>
         </div>
 
@@ -438,6 +748,11 @@ pub fn SystemPage() -> impl IntoView {
                 </p>
                 <span class="badge badge-archival" style="margin-top: 1rem;">"Coming Soon"</span>
             </div>
+        </div>
+
+        // ── Security tab ──
+        <div style=move || if active_tab.get() == "security" { "" } else { "display:none" }>
+            <security_tab::SecurityTab />
         </div>
 
         // ══════════════════════════════════════
@@ -691,6 +1006,53 @@ pub fn SystemPage() -> impl IntoView {
             }}
         </div> // hidden mesh section
 
+        // ── Modal: Hardware ──
+        <div class=move || if modal_open.get() == "hardware" { "modal-overlay active" } else { "modal-overlay" }
+            on:click=move |_| set_modal_open.set(String::new())>
+            <div class="wizard-modal" on:click=|e| e.stop_propagation()>
+                <div class="wizard-modal-header">
+                    <h3><i class="fa-solid fa-server"></i>" Hardware"</h3>
+                    <button class="btn btn-secondary btn-sm" on:click=move |_| set_modal_open.set(String::new())>
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+                <div class="wizard-modal-body">
+                    {move || {
+                        let c = compute.get().flatten();
+                        match c {
+                            None => view! { <p class="text-muted">"Loading..."</p> }.into_any(),
+                            Some(c) => {
+                                let cpu = format!("{} cores", c.cpu_cores.unwrap_or(0));
+                                let gpu_name = c.gpu_name.clone().unwrap_or_else(|| "None".into());
+                                let gpu_avail = if c.gpu_available { "Yes" } else { "No" };
+                                let gpu_backend = c.gpu_backend.clone().unwrap_or_else(|| "N/A".into());
+                                let avx2 = if c.has_avx2.unwrap_or(false) { "Yes" } else { "No" };
+                                let npu = if c.npu_available { c.npu_name.clone().unwrap_or_else(|| "Available".into()) } else { "Not available".into() };
+                                let embed_dim = c.embedder_dim.map(|d| format!("{}D", d)).unwrap_or_else(|| "N/A".into());
+                                let embed_ep = c.embedder_endpoint.clone().unwrap_or_else(|| "N/A".into());
+                                let embedder = c.embedder_model.clone().unwrap_or_else(|| "Not configured".into());
+                                view! {
+                                    <table style="width: 100%;">
+                                        <tbody>
+                                            <tr><td class="text-secondary" style="width: 40%;">"CPU Cores"</td><td>{cpu}</td></tr>
+                                            <tr><td class="text-secondary">"AVX2 + FMA"</td><td>{avx2}</td></tr>
+                                            <tr><td class="text-secondary">"GPU"</td><td>{gpu_name}</td></tr>
+                                            <tr><td class="text-secondary">"GPU Available"</td><td>{gpu_avail}</td></tr>
+                                            <tr><td class="text-secondary">"GPU Backend"</td><td>{gpu_backend}</td></tr>
+                                            <tr><td class="text-secondary">"NPU"</td><td>{npu}</td></tr>
+                                            <tr><td class="text-secondary">"Embedder Model"</td><td>{embedder}</td></tr>
+                                            <tr><td class="text-secondary">"Embedder Dimensions"</td><td>{embed_dim}</td></tr>
+                                            <tr><td class="text-secondary">"Embedder Endpoint"</td><td>{embed_ep}</td></tr>
+                                        </tbody>
+                                    </table>
+                                }.into_any()
+                            }
+                        }
+                    }}
+                </div>
+            </div>
+        </div>
+
         // ── Modal: Secrets ──
         <div class=move || if modal_open.get() == "secrets" { "modal-overlay active" } else { "modal-overlay" }>
             <div class="wizard-modal">
@@ -734,5 +1096,257 @@ pub fn SystemPage() -> impl IntoView {
             set_modal_open
             set_status_msg
         />
+
+        // ── Modal: Add Web Search Provider ──
+        <div class=move || if modal_open.get() == "add_provider" { "modal-overlay active" } else { "modal-overlay" }
+            on:click=move |_| set_modal_open.set(String::new())>
+            <div class="wizard-modal" on:click=|e| e.stop_propagation()>
+                <div class="wizard-modal-header">
+                    <h3><i class="fa-solid fa-plus"></i>" Add Web Search Provider"</h3>
+                    <button class="btn btn-secondary btn-sm" on:click=move |_| set_modal_open.set(String::new())>
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+                <div class="wizard-modal-body">
+                    {add_provider::render_add_provider_modal(api.clone(), config, set_status_msg, set_modal_open)}
+                </div>
+            </div>
+        </div>
+
+        // ── Modal: Blocked Domains ──
+        <div class=move || if modal_open.get() == "websearch" { "modal-overlay active" } else { "modal-overlay" }>
+            <div class="wizard-modal">
+                <div class="wizard-modal-header">
+                    <h3><i class="fa-solid fa-ban"></i>" Blocked Domains"</h3>
+                    <button class="btn btn-secondary btn-sm" on:click=move |_| set_modal_open.set(String::new())>
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+                <div class="wizard-modal-body">
+                    <WebSearchModal api=api.clone() config set_status_msg />
+                </div>
+            </div>
+        </div>
+
+        // ── Modal: Language ──
+        <div class=move || if modal_open.get() == "language" { "modal-overlay active" } else { "modal-overlay" }>
+            <div class="wizard-modal">
+                <div class="wizard-modal-header">
+                    <h3><i class="fa-solid fa-language"></i>" Language & Localization"</h3>
+                    <button class="btn btn-secondary btn-sm" on:click=move |_| set_modal_open.set(String::new())>
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+                <div class="wizard-modal-body">
+                    <LanguageModal api=api.clone() config set_status_msg />
+                </div>
+            </div>
+        </div>
+    }
+}
+
+/// Language & Localization modal: output language selector.
+#[component]
+fn LanguageModal(
+    api: ApiClient,
+    config: LocalResource<Option<ConfigResponse>>,
+    set_status_msg: WriteSignal<String>,
+) -> impl IntoView {
+    let (selected, set_selected) = signal(String::new());
+    let (saving, set_saving) = signal(false);
+
+    // Sync from config
+    Effect::new(move |_| {
+        if let Some(cfg) = config.get().flatten() {
+            let lang = cfg.data.get("output_language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            set_selected.set(lang);
+        }
+    });
+
+    let api_save = api.clone();
+    let do_save = Action::new_local(move |lang: &String| {
+        let api = api_save.clone();
+        let lang = lang.clone();
+        async move {
+            set_saving.set(true);
+            let val = if lang.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(lang) };
+            let body = serde_json::json!({ "output_language": val });
+            let result = api.post::<serde_json::Value, serde_json::Value>("/config", &body).await;
+            set_saving.set(false);
+            match result {
+                Ok(_) => {
+                    set_status_msg.set("Output language saved.".into());
+                    config.refetch();
+                }
+                Err(e) => set_status_msg.set(format!("Failed to save: {e}")),
+            }
+        }
+    });
+
+    let languages = vec![
+        ("", "English (default)"),
+        ("de", "Deutsch (German)"),
+        ("fr", "Francais (French)"),
+        ("es", "Espanol (Spanish)"),
+        ("it", "Italiano (Italian)"),
+        ("pt", "Portugues (Portuguese)"),
+        ("nl", "Nederlands (Dutch)"),
+        ("ru", "Russkij (Russian)"),
+        ("uk", "Ukrainska (Ukrainian)"),
+        ("ar", "Arabiya (Arabic)"),
+        ("zh", "Zhongwen (Chinese)"),
+        ("ja", "Nihongo (Japanese)"),
+        ("ko", "Hangugeo (Korean)"),
+        ("pl", "Polski (Polish)"),
+        ("tr", "Turkce (Turkish)"),
+    ];
+
+    view! {
+        <div>
+            <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 1rem;">
+                "Set the language for user-facing LLM output: debate synthesis, chat responses, assessments. "
+                "Internal reasoning (agent debate, NER, search queries) always stays in English."
+            </p>
+            <div class="form-group">
+                <label>"Output Language"</label>
+                <select class="form-control"
+                    prop:value=selected
+                    on:change=move |ev| {
+                        let val = event_target_value(&ev);
+                        set_selected.set(val.clone());
+                        do_save.dispatch(val);
+                    }
+                >
+                    {languages.into_iter().map(|(code, label)| {
+                        let code_str = code.to_string();
+                        view! {
+                            <option value={code_str}>{label}</option>
+                        }
+                    }).collect::<Vec<_>>()}
+                </select>
+            </div>
+            {move || saving.get().then(|| view! {
+                <p class="text-secondary mt-1" style="font-size: 0.85rem;">
+                    <span class="spinner"></span>" Saving..."
+                </p>
+            })}
+        </div>
+    }
+}
+
+/// Web Search configuration modal: blocked domains editor.
+#[component]
+fn WebSearchModal(
+    api: ApiClient,
+    config: LocalResource<Option<ConfigResponse>>,
+    set_status_msg: WriteSignal<String>,
+) -> impl IntoView {
+    let (new_domain, set_new_domain) = signal(String::new());
+    let (saving, set_saving) = signal(false);
+
+    // Derive current blocked domains from config
+    let blocked_domains = Memo::new(move |_| {
+        config.get().flatten()
+            .and_then(|c| c.data.get("blocked_domains")
+                .and_then(|v| v.as_array().map(|arr|
+                    arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>()
+                )))
+            .unwrap_or_else(|| vec!["studylibid.com".into(), "studylib.net".into(), "doczz.net".into()])
+    });
+
+    let api_save = api.clone();
+    let save_domains = Action::new_local(move |domains: &Vec<String>| {
+        let api = api_save.clone();
+        let domains = domains.clone();
+        async move {
+            set_saving.set(true);
+            let body = serde_json::json!({ "blocked_domains": domains });
+            let result = api.post::<serde_json::Value, serde_json::Value>("/config", &body).await;
+            set_saving.set(false);
+            match result {
+                Ok(_) => {
+                    set_status_msg.set("Blocked domains saved.".into());
+                    config.refetch();
+                }
+                Err(e) => set_status_msg.set(format!("Failed to save: {e}")),
+            }
+        }
+    });
+
+    let do_add = move || {
+        let d = new_domain.get().trim().to_lowercase().to_string();
+        if d.is_empty() { return; }
+        let mut current = blocked_domains.get();
+        if !current.contains(&d) {
+            current.push(d);
+            save_domains.dispatch(current);
+        }
+        set_new_domain.set(String::new());
+    };
+
+    view! {
+        <div>
+            <p class="text-secondary" style="font-size: 0.85rem; margin-bottom: 1rem;">
+                "Domains in this list will be skipped when fetching article content during debates and gap-closing. "
+                "Add domains that always block scrapers (403), require login, or return unusable content."
+            </p>
+            <div class="flex gap-sm" style="margin-bottom: 1rem;">
+                <input type="text" class="form-control" placeholder="example.com"
+                    style="flex: 1;"
+                    prop:value=new_domain
+                    on:input=move |ev| set_new_domain.set(event_target_value(&ev))
+                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                        if ev.key() == "Enter" { do_add(); }
+                    }
+                />
+                <button class="btn btn-primary btn-sm"
+                    disabled=move || saving.get() || new_domain.get().trim().is_empty()
+                    on:click=move |_| do_add()
+                >
+                    <i class="fa-solid fa-plus"></i>" Add"
+                </button>
+            </div>
+            <div style="max-height: 300px; overflow-y: auto;">
+                {move || {
+                    let domains = blocked_domains.get();
+                    if domains.is_empty() {
+                        view! { <p class="text-secondary">"No blocked domains. All sites will be fetched."</p> }.into_any()
+                    } else {
+                        let items = domains.iter().cloned().collect::<Vec<_>>();
+                        view! {
+                            <div class="tag-list">
+                                {items.into_iter().map(|d| {
+                                    let d_clone = d.clone();
+                                    let d_display = d.clone();
+                                    view! {
+                                        <span class="tag tag-secondary" style="display: inline-flex; align-items: center; gap: 0.4rem; margin: 0.2rem;">
+                                            {d_display}
+                                            <button class="btn-icon-tiny"
+                                                title="Remove"
+                                                disabled=move || saving.get()
+                                                on:click=move |_| {
+                                                    let mut current = blocked_domains.get();
+                                                    current.retain(|x| x != &d_clone);
+                                                    save_domains.dispatch(current);
+                                                }
+                                            >
+                                                <i class="fa-solid fa-xmark"></i>
+                                            </button>
+                                        </span>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            </div>
+                        }.into_any()
+                    }
+                }}
+            </div>
+            <p class="text-secondary" style="font-size: 0.8rem; margin-top: 1rem;">
+                <i class="fa-solid fa-info-circle"></i>
+                " Default: studylibid.com, studylib.net, doczz.net (always 403). Clear all to fetch from any domain."
+            </p>
+        </div>
     }
 }
