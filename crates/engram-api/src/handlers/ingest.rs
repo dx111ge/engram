@@ -965,7 +965,10 @@ async fn reprocess_docs_background(
 
     match result {
         Ok(Ok(r)) => {
-            // Mark processed documents as ner_complete
+            // Mark original documents as ner_complete.
+            // The pipeline may have created new Doc nodes with different hashes
+            // (if content changed). Mark the originals anyway so they aren't
+            // re-queued. The new Doc nodes are already marked by the pipeline.
             if let Ok(mut g) = state.graph.write() {
                 for (doc_label, _) in &docs_to_process {
                     let _ = g.set_property(doc_label, "ner_complete", "true");

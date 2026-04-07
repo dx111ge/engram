@@ -1221,8 +1221,16 @@ impl Pipeline {
         prov: &engram_core::graph::Provenance,
         now_ts: i64,
     ) {
-        // Skip if already exists
+        // If already exists, update content_hash and content_length (reprocess case)
         if graph.find_node_id(doc_label).ok().flatten().is_some() {
+            let _ = graph.set_property(doc_label, "content_hash", &doc_ctx.content_hash_hex);
+            let _ = graph.set_property(
+                doc_label, "content_length", &doc_ctx.full_text.len().to_string(),
+            );
+            let _ = graph.set_property(doc_label, "ner_complete", "true");
+            if let Some(ref orig_lang) = doc_ctx.original_language {
+                let _ = graph.set_property(doc_label, "original_language", orig_lang);
+            }
             return;
         }
         if graph.store_with_confidence(doc_label, 0.80, prov).is_err() {

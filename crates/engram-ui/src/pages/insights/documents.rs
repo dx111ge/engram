@@ -1,4 +1,6 @@
 use leptos::prelude::*;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::api::ApiClient;
 use crate::api::types::{DocumentsResponse, ReprocessResponse};
@@ -11,21 +13,94 @@ pub fn DocumentsZone(
 
     let (processing, set_processing) = signal(false);
     let (result_msg, set_result_msg) = signal(Option::<String>::None);
+    let (progress_msg, set_progress_msg) = signal(Option::<String>::None);
+    let (refresh_trigger, set_refresh_trigger) = signal(0u32);
 
     let api_docs = api.clone();
     let docs = LocalResource::new(move || {
         let api = api_docs.clone();
+        let _ = refresh_trigger.get(); // re-fetch when trigger changes
         async move {
             let body = serde_json::json!({ "limit": 100 });
             api.post::<_, DocumentsResponse>("/documents", &body).await.ok()
         }
     });
 
+    // SSE subscription for ingest_progress events
+    {
+        let base_url = api.base_url.clone();
+        Effect::new(move |_| {
+            if !processing.get() {
+                return;
+            }
+
+            let url = format!("{}/events/stream?topics=ingest_progress", base_url);
+            let source = match web_sys::EventSource::new(&url) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+
+            let set_prog = set_progress_msg;
+            let set_proc = set_processing;
+            let set_refresh = set_refresh_trigger;
+
+            let on_event = Closure::wrap(Box::new(move |evt: web_sys::MessageEvent| {
+                if let Some(data) = evt.data().as_string() {
+                    // Parse the stage from the SSE data
+                    let stage = data.clone();
+                    set_prog.set(Some(stage.clone()));
+
+                    // Check if processing is complete
+                    if data.contains("complete") || data.contains("error") {
+                        set_proc.set(false);
+                        set_refresh.update(|c| *c += 1);
+                    }
+                }
+            }) as Box<dyn FnMut(web_sys::MessageEvent)>);
+
+            // Listen for the typed "ingest_progress" event
+            let _ = source.add_event_listener_with_callback(
+                "ingest_progress",
+                on_event.as_ref().unchecked_ref(),
+            );
+            on_event.forget();
+
+            // Also listen for generic messages (fallback)
+            let set_prog2 = set_progress_msg;
+            let set_proc2 = set_processing;
+            let set_refresh2 = set_refresh_trigger;
+            let on_msg = Closure::wrap(Box::new(move |evt: web_sys::MessageEvent| {
+                if let Some(data) = evt.data().as_string() {
+                    if data.contains("IngestProgress") || data.contains("ingest_progress") {
+                        set_prog2.set(Some(data.clone()));
+                        if data.contains("complete") || data.contains("error") {
+                            set_proc2.set(false);
+                            set_refresh2.update(|c| *c += 1);
+                        }
+                    }
+                }
+            }) as Box<dyn FnMut(web_sys::MessageEvent)>);
+            source.set_onmessage(Some(on_msg.as_ref().unchecked_ref()));
+            on_msg.forget();
+
+            // Close after 5 minutes max to avoid leaking connections
+            let source_clone = source.clone();
+            let timeout = Closure::wrap(Box::new(move || {
+                source_clone.close();
+            }) as Box<dyn FnMut()>);
+            let _ = web_sys::window().unwrap().set_timeout_with_callback_and_timeout_and_arguments_0(
+                timeout.as_ref().unchecked_ref(), 300_000,
+            );
+            timeout.forget();
+        });
+    }
+
     let api_reprocess = api.clone();
     let do_reprocess = Action::new_local(move |_: &()| {
         let api = api_reprocess.clone();
         set_processing.set(true);
         set_result_msg.set(None);
+        set_progress_msg.set(None);
         async move {
             let body = serde_json::json!({ "batch_size": 20 });
             match api.post::<_, ReprocessResponse>("/ingest/reprocess-docs", &body).await {
@@ -37,8 +112,8 @@ pub fn DocumentsZone(
                     set_result_msg.set(Some(msg));
                     if r.status == "complete" {
                         set_processing.set(false);
+                        set_refresh_trigger.update(|c| *c += 1);
                     }
-                    // Keep spinner if background processing started
                 }
                 Err(e) => {
                     set_result_msg.set(Some(format!("Error: {e}")));
@@ -68,6 +143,14 @@ pub fn DocumentsZone(
             {move || result_msg.get().map(|m| view! {
                 <div class="card" style="padding: 0.5rem; margin-top: 0.75rem; margin-bottom: 0.5rem; background: var(--bg-tertiary);">
                     <i class="fa-solid fa-info-circle" style="color: var(--accent-bright);"></i>
+                    " " {m}
+                </div>
+            })}
+
+            // Live progress from SSE
+            {move || progress_msg.get().map(|m| view! {
+                <div style="padding: 0.25rem 0.5rem; font-size: 0.8rem; color: var(--text-secondary);">
+                    <i class="fa-solid fa-signal" style="color: var(--accent-bright);"></i>
                     " " {m}
                 </div>
             })}

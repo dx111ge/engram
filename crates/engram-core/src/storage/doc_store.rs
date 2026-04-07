@@ -238,6 +238,16 @@ impl DocStore {
         self.index.len()
     }
 
+    /// Return all stored content hashes (for iteration/diagnostics).
+    pub fn hashes(&self) -> Vec<ContentHash> {
+        self.index.keys().copied().collect()
+    }
+
+    /// Return all stored content hashes with their MIME types.
+    pub fn hashes_with_mime(&self) -> Vec<(ContentHash, MimeType)> {
+        self.index.iter().map(|(h, e)| (*h, e.mime_type)).collect()
+    }
+
     /// Compute SHA-256 hash of content.
     pub fn hash_content(content: &[u8]) -> ContentHash {
         let mut hasher = Sha256::new();
