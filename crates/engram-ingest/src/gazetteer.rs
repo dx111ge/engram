@@ -161,6 +161,26 @@ impl GraphGazetteer {
         self.entries.is_empty()
     }
 
+    /// Returns true if the text contains at least one known entity surface form.
+    /// Uses multi-word window scanning (4/3/2/1 words) with early exit on first match.
+    pub fn contains_known_entity(&self, text: &str) -> bool {
+        if self.entries.is_empty() {
+            return false;
+        }
+        let lower = text.to_lowercase();
+        let words: Vec<&str> = lower.split_whitespace().collect();
+        // Scan with decreasing window sizes (longest match first)
+        for window_size in (1..=4.min(words.len())).rev() {
+            for window in words.windows(window_size) {
+                let span = window.join(" ");
+                if !self.lookup_exact(&span).is_empty() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Add a single entry (e.g. from a GraphEvent). Maintains sort order.
     pub fn insert(&mut self, entry: GazetteerEntry) {
         let key = entry.surface.clone();

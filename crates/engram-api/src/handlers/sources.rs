@@ -62,6 +62,23 @@ pub struct SourceConfig {
     pub total_ingested: u64,
     #[serde(default)]
     pub error_count: u32,
+    /// Last N poll results for dashboard display.
+    #[serde(default)]
+    pub poll_history: Vec<PollResult>,
+}
+
+/// Result of a single source poll cycle.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct PollResult {
+    pub timestamp: i64,
+    pub items_fetched: u32,
+    pub items_deduped: u32,
+    pub items_filtered: u32,
+    pub items_ingested: u32,
+    pub facts_stored: u64,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 fn default_active() -> String { "active".into() }
@@ -148,9 +165,31 @@ pub async fn list_sources(
     let persisted = load_sources(&state);
     let runtime = state.source_registry.list_info();
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    // Read scheduler state for schedule info
+    let sched_data: std::collections::HashMap<String, serde_json::Value> = state.scheduler.read()
+        .map(|sched| {
+            persisted.iter().filter_map(|s| {
+                sched.get_schedule(&s.name).map(|ss| {
+                    let next_in = std::cmp::max(0, (ss.last_fetch + ss.interval_secs as i64) - now);
+                    (s.name.clone(), serde_json::json!({
+                        "interval_secs": ss.interval_secs,
+                        "paused": ss.paused,
+                        "last_fetch": ss.last_fetch,
+                        "next_poll_in_secs": next_in,
+                    }))
+                })
+            }).collect()
+        })
+        .unwrap_or_default();
+
     // Merge: persisted sources first, then runtime-only sources
     let mut sources: Vec<serde_json::Value> = persisted.iter().map(|s| {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "name": s.name,
             "source_type": s.source_type,
             "url": s.url,
@@ -159,7 +198,12 @@ pub async fn list_sources(
             "last_run": s.last_run,
             "error_count": s.error_count,
             "refresh_interval": s.refresh_interval,
-        })
+            "poll_history": s.poll_history,
+        });
+        if let Some(schedule) = sched_data.get(&s.name) {
+            v["schedule"] = schedule.clone();
+        }
+        v
     }).collect();
 
     // Add runtime sources not in persisted list
@@ -223,6 +267,7 @@ pub async fn create_source(
         last_run: None,
         total_ingested: 0,
         error_count: 0,
+        poll_history: Vec::new(),
     };
 
     sources.push(config.clone());
@@ -333,7 +378,7 @@ pub async fn run_source(
         .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("source '{}' not found", name)))?
         .clone();
 
-    let result = run_source_impl(&state, &src).await;
+    let result = run_source_impl(&state, &src, None).await;
 
     // Update stats in persisted config
     let mut sources = load_sources(&state);
@@ -388,19 +433,68 @@ pub async fn test_source() -> impl axum::response::IntoResponse {
      Json(super::ErrorResponse { error: "ingest feature not enabled".into() }))
 }
 
+/// POST /sources/{name}/pause -- toggle pause/resume.
+#[cfg(feature = "ingest")]
+pub async fn toggle_pause(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let mut sources = load_sources(&state);
+    let src = sources.iter_mut().find(|s| s.name == name)
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("source '{}' not found", name)))?;
+
+    // Toggle scheduler pause state
+    let new_paused = {
+        let mut sched = state.scheduler.write().map_err(|_| {
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "scheduler lock poisoned")
+        })?;
+        sched.register(&name);
+        let currently_paused = sched.get_schedule(&name)
+            .map(|s| s.paused)
+            .unwrap_or(false);
+        if currently_paused {
+            sched.resume(&name);
+        } else {
+            sched.pause(&name);
+        }
+        !currently_paused
+    };
+
+    // Update source config status
+    src.status = if new_paused { "paused".into() } else { "active".into() };
+    save_sources(&state, &sources)
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state.save_schedules();
+
+    Ok(Json(serde_json::json!({
+        "name": name,
+        "paused": new_paused,
+        "status": if new_paused { "paused" } else { "active" },
+    })))
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn toggle_pause() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(super::ErrorResponse { error: "ingest feature not enabled".into() }))
+}
+
 // ── Implementation helpers ──
 
 #[cfg(feature = "ingest")]
 async fn run_source_impl(
     state: &AppState,
     src: &SourceConfig,
+    gaz: Option<&engram_ingest::GraphGazetteer>,
 ) -> Result<serde_json::Value, String> {
     match src.source_type.as_str() {
+        // folder/file: user-provided content, no entity filtering
         "folder" => run_folder_source(state, src).await,
         "file" => run_file_source(state, src).await,
-        "web" => run_web_source(state, src).await,
-        "rss" => run_rss_source(state, src).await,
-        "api" => run_api_source(state, src).await,
+        // web/rss/api: apply entity-aware filtering via gazetteer
+        "web" => run_web_source(state, src, gaz).await,
+        "rss" => run_rss_source(state, src, gaz).await,
+        "api" => run_api_source(state, src, gaz).await,
         "sparql" => Ok(serde_json::json!({ "message": "SPARQL sources are managed via /kb/add" })),
         "paste" => Ok(serde_json::json!({ "message": "paste sources have no URL to fetch" })),
         other => Err(format!("unsupported source type: {other}")),
@@ -477,6 +571,7 @@ async fn run_file_source(
 async fn run_web_source(
     state: &AppState,
     src: &SourceConfig,
+    gaz: Option<&engram_ingest::GraphGazetteer>,
 ) -> Result<serde_json::Value, String> {
     let url = src.url.as_deref()
         .ok_or_else(|| "web source requires a URL".to_string())?;
@@ -515,6 +610,21 @@ async fn run_web_source(
         .unwrap_or_default()
         .as_secs() as i64;
 
+    // Dedup: skip if content hash already seen
+    let hash = engram_ingest::SearchLedger::content_hash(text.as_bytes());
+    if let Ok(ledger) = state.ledger.read() {
+        if ledger.has_content(&src.name, hash) {
+            return Ok(serde_json::json!({ "message": "content unchanged (deduped)", "facts_stored": 0 }));
+        }
+    }
+
+    // Entity filter: skip if no known entities mentioned
+    if let Some(g) = gaz {
+        if !g.is_empty() && !g.contains_known_entity(&text) {
+            return Ok(serde_json::json!({ "message": "no known entities found (filtered)", "facts_stored": 0 }));
+        }
+    }
+
     let items = vec![engram_ingest::RawItem {
         content: engram_ingest::Content::Text(text),
         source_url: Some(url.to_string()),
@@ -523,13 +633,23 @@ async fn run_web_source(
         metadata: Default::default(),
     }];
 
-    run_ingest_items(state, items, &src.name).await
+    let result = run_ingest_items(state, items, &src.name).await;
+
+    if result.is_ok() {
+        if let Ok(mut ledger) = state.ledger.write() {
+            ledger.record(&src.name, url, hash, None, 1);
+            let _ = ledger.save();
+        }
+    }
+
+    result
 }
 
 #[cfg(feature = "ingest")]
 async fn run_rss_source(
     state: &AppState,
     src: &SourceConfig,
+    gaz: Option<&engram_ingest::GraphGazetteer>,
 ) -> Result<serde_json::Value, String> {
     let url = src.url.as_deref()
         .ok_or_else(|| "RSS source requires a URL".to_string())?;
@@ -567,7 +687,22 @@ async fn run_rss_source(
         };
 
         if text.len() > 20 {
-            items.push(engram_ingest::RawItem {
+            // Dedup: skip if content hash already seen
+            let hash = engram_ingest::SearchLedger::content_hash(text.as_bytes());
+            if let Ok(ledger) = state.ledger.read() {
+                if ledger.has_content(&src.name, hash) {
+                    continue;
+                }
+            }
+
+            // Entity filter: skip if no known entities mentioned
+            if let Some(g) = gaz {
+                if !g.is_empty() && !g.contains_known_entity(&text) {
+                    continue;
+                }
+            }
+
+            items.push((hash, engram_ingest::RawItem {
                 content: engram_ingest::Content::Text(text),
                 source_url: link,
                 source_name: src.name.clone(),
@@ -575,26 +710,41 @@ async fn run_rss_source(
                 metadata: std::collections::HashMap::from([
                     ("title".into(), title),
                 ]),
-            });
+            }));
         }
     }
 
     if items.is_empty() {
-        return Ok(serde_json::json!({ "message": "no RSS items found", "facts_stored": 0 }));
+        return Ok(serde_json::json!({ "message": "no new RSS items (all deduped)", "facts_stored": 0 }));
     }
 
     let item_count = items.len();
-    run_ingest_items(state, items, &src.name).await
-        .map(|mut v| {
-            v["rss_items"] = serde_json::json!(item_count);
-            v
-        })
+    let hashes: Vec<u64> = items.iter().map(|(h, _)| *h).collect();
+    let raw_items: Vec<engram_ingest::RawItem> = items.into_iter().map(|(_, i)| i).collect();
+
+    let result = run_ingest_items(state, raw_items, &src.name).await;
+
+    // Record accepted items in ledger after successful ingest
+    if result.is_ok() {
+        if let Ok(mut ledger) = state.ledger.write() {
+            for hash in &hashes {
+                ledger.record(&src.name, url, *hash, None, 1);
+            }
+            let _ = ledger.save();
+        }
+    }
+
+    result.map(|mut v| {
+        v["rss_items"] = serde_json::json!(item_count);
+        v
+    })
 }
 
 #[cfg(feature = "ingest")]
 async fn run_api_source(
     state: &AppState,
     src: &SourceConfig,
+    gaz: Option<&engram_ingest::GraphGazetteer>,
 ) -> Result<serde_json::Value, String> {
     let url = src.url.as_deref()
         .ok_or_else(|| "API source requires a URL".to_string())?;
@@ -639,6 +789,21 @@ async fn run_api_source(
         .unwrap_or_default()
         .as_secs() as i64;
 
+    // Dedup: skip if content hash already seen
+    let hash = engram_ingest::SearchLedger::content_hash(body.as_bytes());
+    if let Ok(ledger) = state.ledger.read() {
+        if ledger.has_content(&src.name, hash) {
+            return Ok(serde_json::json!({ "message": "content unchanged (deduped)", "facts_stored": 0 }));
+        }
+    }
+
+    // Entity filter: skip if no known entities mentioned
+    if let Some(g) = gaz {
+        if !g.is_empty() && !g.contains_known_entity(&body) {
+            return Ok(serde_json::json!({ "message": "no known entities found (filtered)", "facts_stored": 0 }));
+        }
+    }
+
     let items = vec![engram_ingest::RawItem {
         content: engram_ingest::Content::Text(body),
         source_url: Some(url.to_string()),
@@ -647,7 +812,16 @@ async fn run_api_source(
         metadata: Default::default(),
     }];
 
-    run_ingest_items(state, items, &src.name).await
+    let result = run_ingest_items(state, items, &src.name).await;
+
+    if result.is_ok() {
+        if let Ok(mut ledger) = state.ledger.write() {
+            ledger.record(&src.name, url, hash, None, 1);
+            let _ = ledger.save();
+        }
+    }
+
+    result
 }
 
 /// Run ingest pipeline on a batch of items.
@@ -873,15 +1047,39 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
 
 /// Background source polling task.
 /// Spawns a tokio task that checks sources on their configured intervals.
+/// Uses `state.scheduler` for persistent interval tracking across restarts.
 #[cfg(feature = "ingest")]
 pub fn spawn_source_poller(state: AppState) {
+    // state.scheduler is already loaded from .brain.schedules at startup (main.rs)
     tokio::spawn(async move {
-        let mut scheduler = engram_ingest::AdaptiveScheduler::new(
-            engram_ingest::SchedulerConfig::default(),
-        );
-
+        let mut cycle_count = 0u64;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            cycle_count += 1;
+
+            // Build gazetteer once per cycle for entity-aware filtering
+            let gaz = {
+                if let Ok(g) = state.graph.read() {
+                    let brain_path = g.path().to_path_buf();
+                    let mut gaz = engram_ingest::GraphGazetteer::new(&brain_path, 0.3);
+                    gaz.build_from_graph(&g);
+                    Some(gaz)
+                } else {
+                    None
+                }
+            };
+
+            // Periodic ledger pruning (every ~50 min)
+            if cycle_count % 100 == 0 {
+                if let Ok(mut ledger) = state.ledger.write() {
+                    let thirty_days_ago = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64 - 30 * 86400;
+                    ledger.prune_before(thirty_days_ago);
+                    let _ = ledger.save();
+                }
+            }
 
             let sources = load_sources(&state);
             for src in &sources {
@@ -889,28 +1087,42 @@ pub fn spawn_source_poller(state: AppState) {
                     continue;
                 }
 
-                // Register if new
-                scheduler.register(&src.name);
-
-                // Override interval from source config
-                if let Some(interval) = src.refresh_interval {
-                    scheduler.set_interval(&src.name, interval);
+                // Register + set interval using shared scheduler
+                {
+                    let mut sched = match state.scheduler.write() {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    sched.register(&src.name);
+                    if let Some(interval) = src.refresh_interval {
+                        sched.set_interval(&src.name, interval);
+                    }
                 }
 
-                if !scheduler.is_due(&src.name) {
+                // Check if due (read lock)
+                let is_due = state.scheduler.read()
+                    .map(|s| s.is_due(&src.name))
+                    .unwrap_or(false);
+
+                if !is_due {
                     continue;
                 }
 
                 tracing::info!(source = %src.name, source_type = %src.source_type, "polling source");
 
-                let result = run_source_impl(&state, src).await;
+                let result = run_source_impl(&state, src, gaz.as_ref()).await;
                 let yield_count = match &result {
                     Ok(v) => v["facts_stored"].as_u64().unwrap_or(0) as u32,
                     Err(_) => 0,
                 };
-                scheduler.report_yield(&src.name, yield_count);
 
-                // Update stats
+                // Report yield to shared scheduler + persist
+                if let Ok(mut sched) = state.scheduler.write() {
+                    sched.report_yield(&src.name, yield_count);
+                }
+                state.save_schedules();
+
+                // Update source stats + poll history
                 let mut all = load_sources(&state);
                 if let Some(s) = all.iter_mut().find(|s| s.name == src.name) {
                     let now = std::time::SystemTime::now()
@@ -918,15 +1130,44 @@ pub fn spawn_source_poller(state: AppState) {
                         .unwrap_or_default()
                         .as_secs() as i64;
                     s.last_run = Some(now);
-                    match result {
+
+                    let poll_result = match &result {
                         Ok(v) => {
-                            s.total_ingested += v["facts_stored"].as_u64().unwrap_or(0);
+                            let facts = v["facts_stored"].as_u64().unwrap_or(0);
+                            s.total_ingested += facts;
+                            PollResult {
+                                timestamp: now,
+                                items_fetched: v["rss_items"].as_u64().unwrap_or(1) as u32,
+                                items_deduped: 0,
+                                items_filtered: 0,
+                                items_ingested: v["facts_stored"].as_u64().unwrap_or(0) as u32,
+                                facts_stored: facts,
+                                duration_ms: v["duration_ms"].as_u64().unwrap_or(0),
+                                error: None,
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(source = %src.name, error = %e, "source poll failed");
                             s.error_count += 1;
+                            PollResult {
+                                timestamp: now,
+                                items_fetched: 0,
+                                items_deduped: 0,
+                                items_filtered: 0,
+                                items_ingested: 0,
+                                facts_stored: 0,
+                                duration_ms: 0,
+                                error: Some(e.to_string()),
+                            }
                         }
+                    };
+
+                    s.poll_history.push(poll_result);
+                    // Keep last 10 entries
+                    if s.poll_history.len() > 10 {
+                        s.poll_history.remove(0);
                     }
+
                     let _ = save_sources(&state, &all);
                 }
             }

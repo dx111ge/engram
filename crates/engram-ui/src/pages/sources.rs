@@ -1,8 +1,39 @@
 use leptos::prelude::*;
 
 use crate::api::ApiClient;
-use crate::api::types::{SourceInfo, AnalyzeRequest, AnalyzeResponse, IngestRequest, IngestItem, IngestResponse};
+use crate::api::types::{SourceInfo, PollResultInfo, AnalyzeRequest, AnalyzeResponse, IngestRequest, IngestItem, IngestResponse};
 use crate::components::source_wizard::SourceWizard;
+
+/// Format seconds as human-readable interval (e.g. "5m", "1h 30m", "2d").
+fn format_interval(secs: u64) -> String {
+    if secs == 0 { return "now".into(); }
+    if secs < 60 { return format!("{}s", secs); }
+    if secs < 3600 { return format!("{}m", secs / 60); }
+    if secs < 86400 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        return if m > 0 { format!("{}h {}m", h, m) } else { format!("{}h", h) };
+    }
+    format!("{}d", secs / 86400)
+}
+
+/// Compute yield trend icon from poll history.
+fn compute_trend(history: &[PollResultInfo]) -> &'static str {
+    if history.len() < 2 { return ""; }
+    let recent: Vec<u32> = history.iter().rev().take(3).map(|p| p.items_ingested).collect();
+    if recent.len() < 2 { return ""; }
+    if recent[0] > recent[1] { return "\u{25B2}"; } // up triangle
+    if recent[0] < recent[1] { return "\u{25BC}"; } // down triangle
+    ""
+}
+
+/// Format unix timestamp as HH:MM.
+fn format_timestamp(ts: i64) -> String {
+    let secs = ts % 86400;
+    let h = (secs / 3600) % 24;
+    let m = (secs % 3600) / 60;
+    format!("{:02}:{:02}", h, m)
+}
 
 #[component]
 pub fn SourcesPage() -> impl IntoView {
@@ -112,8 +143,8 @@ pub fn SourcesPage() -> impl IntoView {
                                         <th>"Type"</th>
                                         <th>"Status"</th>
                                         <th>"Ingested"</th>
-                                        <th>"Last Run"</th>
-                                        <th>"Errors"</th>
+                                        <th>"Next Poll"</th>
+                                        <th>"Interval"</th>
                                         <th></th>
                                     </tr>
                                 </thead>
@@ -126,12 +157,26 @@ pub fn SourcesPage() -> impl IntoView {
                                             "error" => "badge badge-archival",
                                             _ => "badge badge-active",
                                         };
+                                        // Schedule info
+                                        let interval_display = s.schedule.as_ref()
+                                            .map(|sc| format_interval(sc.interval_secs))
+                                            .unwrap_or_else(|| "-".into());
+                                        let next_poll_display = s.schedule.as_ref()
+                                            .map(|sc| if sc.paused { "paused".into() } else { format_interval(sc.next_poll_in_secs as u64) })
+                                            .unwrap_or_else(|| "-".into());
+                                        let is_paused = s.schedule.as_ref().map(|sc| sc.paused).unwrap_or(false);
+                                        // Yield trend from poll history
+                                        let trend_icon = compute_trend(&s.poll_history);
+                                        let history = s.poll_history.clone();
+
                                         let name_test = s.name.clone();
                                         let name_run = s.name.clone();
                                         let name_del = s.name.clone();
+                                        let name_pause = s.name.clone();
                                         let api_test = api.clone();
                                         let api_run = api.clone();
                                         let api_del = api.clone();
+                                        let api_pause = api.clone();
                                         let (test_msg, set_test_msg) = signal(Option::<String>::None);
                                         let set_rc = set_refresh_counter;
                                         let do_test = Action::new_local(move |_: &()| {
@@ -169,23 +214,52 @@ pub fn SourcesPage() -> impl IntoView {
                                                 }
                                             }
                                         });
+                                        let do_pause = Action::new_local(move |_: &()| {
+                                            let api = api_pause.clone();
+                                            let name = name_pause.clone();
+                                            async move {
+                                                match api.post_text(&format!("/sources/{}/pause", name), &()).await {
+                                                    Ok(_) => set_rc.update(|c| *c += 1),
+                                                    Err(e) => set_test_msg.set(Some(format!("Error: {e}"))),
+                                                }
+                                            }
+                                        });
+                                        let (show_history, set_show_history) = signal(false);
                                         view! {
                                             <tr>
                                                 <td>{s.name.clone()}</td>
                                                 <td class="text-secondary">{s.source_type.clone().unwrap_or_default()}</td>
                                                 <td><span class=status_class>{status}</span></td>
                                                 <td>{s.total_ingested.unwrap_or(0).to_string()}</td>
-                                                <td class="text-muted">{s.last_run.clone().unwrap_or_else(|| "never".into())}</td>
-                                                <td>{s.error_count.unwrap_or(0).to_string()}</td>
+                                                <td class="text-muted" title="Next poll">
+                                                    <i class="fa-solid fa-clock" style="opacity: 0.5; margin-right: 0.25rem;"></i>
+                                                    {next_poll_display}
+                                                </td>
+                                                <td class="text-muted" title="Poll interval">
+                                                    <i class="fa-solid fa-gauge-high" style="opacity: 0.5; margin-right: 0.25rem;"></i>
+                                                    {interval_display}
+                                                    " "
+                                                    <span style="font-size: 0.8rem;">{trend_icon}</span>
+                                                </td>
                                                 <td style="white-space: nowrap;">
-                                                    <button class="btn btn-sm btn-secondary" title="Test connectivity"
+                                                    <button class="btn btn-sm btn-secondary" title={if is_paused { "Resume" } else { "Pause" }}
+                                                        on:click=move |_| { let _ = do_pause.dispatch(()); }>
+                                                        <i class={if is_paused { "fa-solid fa-play" } else { "fa-solid fa-pause" }}></i>
+                                                    </button>
+                                                    " "
+                                                    <button class="btn btn-sm btn-secondary" title="Test"
                                                         on:click=move |_| { let _ = do_test.dispatch(()); }>
                                                         <i class="fa-solid fa-plug-circle-check"></i>
                                                     </button>
                                                     " "
                                                     <button class="btn btn-sm btn-primary" title="Run now"
                                                         on:click=move |_| { let _ = do_run.dispatch(()); }>
-                                                        <i class="fa-solid fa-play"></i>
+                                                        <i class="fa-solid fa-bolt"></i>
+                                                    </button>
+                                                    " "
+                                                    <button class="btn btn-sm btn-secondary" title="History"
+                                                        on:click=move |_| set_show_history.update(|v| *v = !*v)>
+                                                        <i class="fa-solid fa-clock-rotate-left"></i>
                                                     </button>
                                                     " "
                                                     <button class="btn btn-sm btn-danger" title="Delete"
@@ -200,6 +274,58 @@ pub fn SourcesPage() -> impl IntoView {
                                                         <code>{m}</code>
                                                     </td>
                                                 </tr>
+                                            })}
+                                            // Poll history expandable row
+                                            {move || show_history.get().then(|| {
+                                                let h = history.clone();
+                                                view! {
+                                                    <tr>
+                                                        <td colspan="7" style="padding: 0.5rem; background: var(--bg-secondary); font-size: 0.8rem;">
+                                                            {if h.is_empty() {
+                                                                view! { <span class="text-muted">"No poll history yet"</span> }.into_any()
+                                                            } else {
+                                                                view! {
+                                                                    <table class="data-table" style="margin: 0; font-size: 0.75rem;">
+                                                                        <thead><tr>
+                                                                            <th>"Time"</th>
+                                                                            <th>"Fetched"</th>
+                                                                            <th>"Deduped"</th>
+                                                                            <th>"Filtered"</th>
+                                                                            <th>"Ingested"</th>
+                                                                            <th>"Facts"</th>
+                                                                            <th>"Duration"</th>
+                                                                            <th>"Status"</th>
+                                                                        </tr></thead>
+                                                                        <tbody>
+                                                                            {h.iter().rev().map(|p| {
+                                                                                let time = format_timestamp(p.timestamp);
+                                                                                let dur = format!("{:.1}s", p.duration_ms as f64 / 1000.0);
+                                                                                let status = if let Some(ref e) = p.error {
+                                                                                    e.clone()
+                                                                                } else {
+                                                                                    "ok".into()
+                                                                                };
+                                                                                let status_style = if p.error.is_some() { "color: var(--danger);" } else { "color: var(--success);" };
+                                                                                view! {
+                                                                                    <tr>
+                                                                                        <td>{time}</td>
+                                                                                        <td>{p.items_fetched}</td>
+                                                                                        <td>{p.items_deduped}</td>
+                                                                                        <td>{p.items_filtered}</td>
+                                                                                        <td>{p.items_ingested}</td>
+                                                                                        <td>{p.facts_stored}</td>
+                                                                                        <td>{dur}</td>
+                                                                                        <td style=status_style>{status}</td>
+                                                                                    </tr>
+                                                                                }
+                                                                            }).collect::<Vec<_>>()}
+                                                                        </tbody>
+                                                                    </table>
+                                                                }.into_any()
+                                                            }}
+                                                        </td>
+                                                    </tr>
+                                                }
                                             })}
                                         }
                                     }).collect::<Vec<_>>()}

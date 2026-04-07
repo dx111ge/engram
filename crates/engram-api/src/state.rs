@@ -473,6 +473,9 @@ pub struct AppState {
     /// Path to `.brain.schedules` sidecar file.
     #[cfg(feature = "ingest")]
     pub schedules_path: Option<PathBuf>,
+    /// Search ledger for dedup (content hash tracking per source).
+    #[cfg(feature = "ingest")]
+    pub ledger: Arc<RwLock<engram_ingest::SearchLedger>>,
     /// Cached NER backend (loaded once, invalidated on config change).
     #[cfg(feature = "ingest")]
     pub cached_ner: Arc<RwLock<Option<Arc<dyn engram_ingest::Extractor>>>>,
@@ -540,6 +543,8 @@ impl AppState {
             #[cfg(feature = "ingest")]
             schedules_path: None,
             #[cfg(feature = "ingest")]
+            ledger: Arc::new(RwLock::new(engram_ingest::SearchLedger::empty())),
+            #[cfg(feature = "ingest")]
             cached_ner: Arc::new(RwLock::new(None)),
             #[cfg(feature = "ingest")]
             cached_rel: Arc::new(RwLock::new(None)),
@@ -549,6 +554,17 @@ impl AppState {
             seed_sessions: Arc::new(RwLock::new(HashMap::new())),
             ingest_sessions: Arc::new(RwLock::new(HashMap::new())),
             debate_sessions: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Open the search ledger for dedup tracking.
+    #[cfg(feature = "ingest")]
+    pub fn open_ledger(&mut self, brain_path: &std::path::Path) {
+        let ledger = engram_ingest::SearchLedger::open(brain_path);
+        let count = ledger.len();
+        self.ledger = Arc::new(RwLock::new(ledger));
+        if count > 0 {
+            println!("SearchLedger: {} entries", count);
         }
     }
 

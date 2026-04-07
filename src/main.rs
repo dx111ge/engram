@@ -294,6 +294,10 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Open document content store
     state.open_doc_store(&path);
 
+    // Open search ledger for source dedup tracking
+    #[cfg(feature = "ingest")]
+    state.open_ledger(&path);
+
     // Load config sidecar if it exists
     let config_path = {
         let mut p = path.as_os_str().to_owned();

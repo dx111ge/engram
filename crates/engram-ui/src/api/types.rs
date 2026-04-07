@@ -537,6 +537,42 @@ pub struct SourceInfo {
     pub last_run: Option<String>,
     #[serde(default)]
     pub error_count: Option<u32>,
+    #[serde(default)]
+    pub poll_history: Vec<PollResultInfo>,
+    #[serde(default)]
+    pub schedule: Option<ScheduleInfo>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PollResultInfo {
+    #[serde(default)]
+    pub timestamp: i64,
+    #[serde(default)]
+    pub items_fetched: u32,
+    #[serde(default)]
+    pub items_deduped: u32,
+    #[serde(default)]
+    pub items_filtered: u32,
+    #[serde(default)]
+    pub items_ingested: u32,
+    #[serde(default)]
+    pub facts_stored: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ScheduleInfo {
+    #[serde(default)]
+    pub interval_secs: u64,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub last_fetch: i64,
+    #[serde(default)]
+    pub next_poll_in_secs: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]

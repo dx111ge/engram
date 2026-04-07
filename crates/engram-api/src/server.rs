@@ -73,6 +73,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/sources/{name}", delete(handlers::sources::delete_source))
         .route("/sources/{name}/run", post(handlers::sources::run_source))
         .route("/sources/{name}/test", post(handlers::sources::test_source))
+        .route("/sources/{name}/pause", post(handlers::sources::toggle_pause))
         .route("/sources/{name}/usage", get(handlers::source_usage))
         .route("/sources/{name}/ledger", get(handlers::source_ledger))
         // Action engine (available when compiled with `actions` feature)

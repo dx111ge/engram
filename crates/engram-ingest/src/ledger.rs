@@ -42,6 +42,16 @@ pub struct SearchLedger {
 }
 
 impl SearchLedger {
+    /// Create an empty ledger with no path (placeholder, must call open later).
+    pub fn empty() -> Self {
+        Self {
+            path: PathBuf::new(),
+            entries: Vec::new(),
+            hash_index: HashMap::new(),
+            cursor_index: HashMap::new(),
+        }
+    }
+
     /// Create a new ledger, loading from disk if the file exists.
     pub fn open(brain_path: &Path) -> Self {
         let path = brain_path.with_extension("ledger");
