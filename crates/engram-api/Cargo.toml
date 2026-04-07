@@ -16,7 +16,7 @@ reason = ["engram-reason"]
 assess = ["engram-assess"]
 grpc = ["tonic", "prost"]
 onnx = ["engram-core/onnx"]
-pdf = ["dep:pdf-extract"]
+pdf = ["dep:pdf-extract", "engram-ingest?/pdf"]
 
 [dependencies]
 engram-core = { path = "../engram-core" }

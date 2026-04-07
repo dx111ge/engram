@@ -245,6 +245,38 @@ impl Pipeline {
             })
             .collect();
 
+        // Stage 2.5: Translate non-English text to English via LLM
+        let lang_segments: Vec<(ParsedSegment, DetectedLanguage)> = if self.config.stages.translate
+            && self.llm_endpoint.is_some()
+        {
+            lang_segments
+                .into_iter()
+                .map(|(mut seg, lang)| {
+                    if lang.code != "en" && lang.confidence > 0.5 {
+                        if let Some(translated) = self.translate_to_english(&seg.text, &lang.code) {
+                            tracing::info!(
+                                from_lang = %lang.code,
+                                original_len = seg.text.len(),
+                                translated_len = translated.len(),
+                                "translated segment to English"
+                            );
+                            seg.text = translated;
+                            // Update doc_context with translated text and original language
+                            if let Some(ref mut dc) = seg.doc_context {
+                                if let Some(dc_mut) = std::sync::Arc::get_mut(dc) {
+                                    dc_mut.full_text = seg.text.clone();
+                                    dc_mut.original_language = Some(lang.code.clone());
+                                }
+                            }
+                        }
+                    }
+                    (seg, lang)
+                })
+                .collect()
+        } else {
+            lang_segments
+        };
+
         // Stage 3: Extract entities via NER (cascade through extractors)
         let mut facts: Vec<ProcessedFact> = Vec::new();
 
@@ -819,6 +851,63 @@ impl Pipeline {
         }
     }
 
+    /// Translate text to English via the configured LLM endpoint.
+    /// Returns `None` if translation fails or LLM is unavailable.
+    fn translate_to_english(&self, text: &str, source_lang: &str) -> Option<String> {
+        let endpoint = self.llm_endpoint.as_ref()?;
+        let model = self.llm_model.as_deref().unwrap_or("default");
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .ok()?;
+
+        // Chunk large texts to stay within LLM context limits
+        let chunks = crate::fact_extract::chunk_text(text, 3000);
+        let mut translated_parts = Vec::with_capacity(chunks.len());
+
+        for chunk in &chunks {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a professional translator. Translate the text to English. Preserve all names, dates, numbers, and technical terms exactly as they appear. Return ONLY the translation, no commentary or explanations."
+                    },
+                    {
+                        "role": "user",
+                        "content": format!("Translate the following {} text to English:\n\n{}", source_lang, chunk)
+                    }
+                ],
+                "temperature": 0.1,
+                "max_tokens": 4096
+            });
+
+            let resp = client
+                .post(endpoint)
+                .json(&body)
+                .send()
+                .ok()?;
+
+            let json: serde_json::Value = resp.json().ok()?;
+            if let Some(content) = json.pointer("/choices/0/message/content")
+                .and_then(|v| v.as_str())
+            {
+                translated_parts.push(content.to_string());
+            } else {
+                tracing::warn!("LLM translation failed for chunk, using original");
+                translated_parts.push(chunk.clone());
+            }
+        }
+
+        let result = translated_parts.join("\n\n");
+        if result.trim().is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
     /// Run extractors in cascade: first extractor that produces results wins.
     fn run_extractors(
         &self,
@@ -1158,6 +1247,12 @@ impl Pipeline {
         }
         if let Some(ref date) = doc_ctx.doc_date {
             let _ = graph.set_property(doc_label, "doc_date", date);
+        }
+        // Mark as fully processed by the NER/RE pipeline
+        let _ = graph.set_property(doc_label, "ner_complete", "true");
+        // Track original language if translated
+        if let Some(ref orig_lang) = doc_ctx.original_language {
+            let _ = graph.set_property(doc_label, "original_language", orig_lang);
         }
         // Edge: Document -> Publisher (published_by)
         let publisher_label = if let Some(ref url) = doc_ctx.url {

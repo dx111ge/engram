@@ -55,6 +55,8 @@ pub struct DocumentListItem {
     pub content_length: String,
     pub publisher: String,
     pub fact_count: usize,
+    pub ner_complete: bool,
+    pub original_language: String,
 }
 
 #[derive(serde::Serialize)]
@@ -152,6 +154,8 @@ pub async fn documents(
             content_length: props.get("content_length").cloned().unwrap_or_default(),
             publisher,
             fact_count,
+            ner_complete: props.get("ner_complete").is_some_and(|v| v == "true"),
+            original_language: props.get("original_language").cloned().unwrap_or_default(),
         });
         if docs.len() >= limit {
             break;

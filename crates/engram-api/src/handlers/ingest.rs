@@ -40,6 +40,10 @@ pub(crate) fn build_pipeline(
 
     let mut pipeline = engram_ingest::Pipeline::new(graph.clone(), config);
 
+    // Register PDF parser (if pdf feature enabled)
+    #[cfg(feature = "pdf")]
+    pipeline.add_parser(Box::new(engram_ingest::pdf::PdfParser));
+
     // Build a MergeAll NER chain: run ALL backends, merge + dedup results.
     // This ensures gazetteer resolved_to IDs are preserved AND GLiNER finds
     // new entities the gazetteer doesn't know about yet.
@@ -510,22 +514,44 @@ pub async fn ingest_file(
     let rel_cache = state.cached_rel.clone();
     let doc_store = state.doc_store.clone();
 
-    // Try to parse body as UTF-8 text
-    let text = String::from_utf8(body.to_vec())
-        .map_err(|_| api_err(StatusCode::BAD_REQUEST, "file body is not valid UTF-8"))?;
-
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
 
-    let items = vec![engram_ingest::types::RawItem {
-        content: engram_ingest::types::Content::Text(text),
-        source_url: None,
-        source_name: source,
-        fetched_at: now,
-        metadata: Default::default(),
-    }];
+    // Detect PDF: check ?mime= param or %PDF- magic bytes
+    let mime_hint = params.get("mime").cloned().unwrap_or_default();
+    let is_pdf = mime_hint.contains("pdf")
+        || (body.len() >= 5 && &body[..5] == b"%PDF-");
+
+    let items = if is_pdf {
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(title) = params.get("title") {
+            metadata.insert("title".into(), title.clone());
+        }
+        vec![engram_ingest::types::RawItem {
+            content: engram_ingest::types::Content::Bytes {
+                data: body.to_vec(),
+                mime: "application/pdf".into(),
+            },
+            source_url: params.get("url").cloned(),
+            source_name: source,
+            fetched_at: now,
+            metadata,
+        }]
+    } else {
+        // Parse as UTF-8 text (existing behavior)
+        let text = String::from_utf8(body.to_vec())
+            .map_err(|_| api_err(StatusCode::BAD_REQUEST,
+                "file body is not valid UTF-8 (hint: pass ?mime=application/pdf for PDFs)"))?;
+        vec![engram_ingest::types::RawItem {
+            content: engram_ingest::types::Content::Text(text),
+            source_url: params.get("url").cloned(),
+            source_name: source,
+            fetched_at: now,
+            metadata: Default::default(),
+        }]
+    };
 
     // Run build_pipeline + execute in spawn_blocking to avoid tokio runtime panic
     let parallel = params.get("parallel").is_some_and(|v| v == "true" || v == "1");
@@ -533,6 +559,10 @@ pub async fn ingest_file(
         let mut pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
             relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
         pipeline.set_doc_store(doc_store.clone());
+        // Wire LLM for translation + fact extraction
+        if let (Some(ep), Some(m)) = (llm_endpoint.as_ref(), llm_model.as_ref()) {
+            pipeline.set_llm(ep.clone(), m.clone());
+        }
         if parallel {
             pipeline.execute_parallel(items)
         } else {
@@ -623,22 +653,6 @@ pub async fn ingest_configure() -> impl axum::response::IntoResponse {
      Json(ErrorResponse { error: "ingest feature not enabled -- rebuild with --features ingest".into() }))
 }
 
-// ── GET /sources -- list registered sources (stub) ──
-
-#[cfg(feature = "ingest")]
-pub async fn list_sources(
-    State(state): State<AppState>,
-) -> ApiResult<serde_json::Value> {
-    let sources = state.source_registry.list_info();
-    Ok(Json(serde_json::json!({ "sources": sources })))
-}
-
-#[cfg(not(feature = "ingest"))]
-pub async fn list_sources() -> impl axum::response::IntoResponse {
-    (StatusCode::NOT_IMPLEMENTED,
-     Json(ErrorResponse { error: "ingest feature not enabled".into() }))
-}
-
 // ── GET /sources/{name}/usage ──
 
 #[cfg(feature = "ingest")]
@@ -685,6 +699,314 @@ pub async fn source_ledger(
 
 #[cfg(not(feature = "ingest"))]
 pub async fn source_ledger() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "ingest feature not enabled".into() }))
+}
+
+// ── Reprocess existing documents ─────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct ReprocessRequest {
+    /// Max documents to process in this batch (default 10).
+    #[serde(default)]
+    pub batch_size: Option<usize>,
+    /// Re-process even docs marked ner_complete=true.
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ReprocessResponse {
+    pub documents_found: usize,
+    pub status: String,
+    pub message: String,
+}
+
+/// POST /ingest/reprocess-docs -- run full NER/RE on existing Document nodes.
+/// Returns immediately. Processing runs in background with SSE progress events.
+/// Subscribe to `/events/stream?topics=ingest_progress` for updates.
+#[cfg(feature = "ingest")]
+pub async fn reprocess_docs(
+    State(state): State<AppState>,
+    Json(req): Json<ReprocessRequest>,
+) -> ApiResult<ReprocessResponse> {
+    let batch_size = req.batch_size.unwrap_or(10);
+    let force = req.force.unwrap_or(false);
+
+    // Find Document nodes that need processing
+    let docs_to_process: Vec<(String, std::collections::HashMap<String, String>)> = {
+        let g = state.graph.read().map_err(|_| read_lock_err())?;
+        let all_nodes = g.all_nodes()
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        all_nodes.iter()
+            .filter(|n| {
+                let nt = g.get_node_type(&n.label).unwrap_or_default();
+                nt == "Document"
+            })
+            .filter(|n| {
+                if force { return true; }
+                let props = g.get_properties(&n.label)
+                    .unwrap_or_default().unwrap_or_default();
+                props.get("ner_complete").map(|v| v != "true").unwrap_or(true)
+            })
+            .take(batch_size)
+            .filter_map(|n| {
+                let props = g.get_properties(&n.label)
+                    .unwrap_or_default().unwrap_or_default();
+                Some((n.label.clone(), props))
+            })
+            .collect()
+    };
+
+    let docs_found = docs_to_process.len();
+    if docs_found == 0 {
+        return Ok(Json(ReprocessResponse {
+            documents_found: 0,
+            status: "complete".into(),
+            message: "no documents need processing".into(),
+        }));
+    }
+
+    // Spawn background task for actual processing
+    let bg_state = state.clone();
+    tokio::spawn(async move {
+        reprocess_docs_background(bg_state, docs_to_process).await;
+    });
+
+    Ok(Json(ReprocessResponse {
+        documents_found: docs_found,
+        status: "started".into(),
+        message: format!("processing {} documents in background -- subscribe to /events/stream?topics=ingest_progress", docs_found),
+    }))
+}
+
+/// Background worker for document reprocessing.
+/// Emits IngestProgress events via the event bus.
+#[cfg(feature = "ingest")]
+async fn reprocess_docs_background(
+    state: AppState,
+    docs_to_process: Vec<(String, std::collections::HashMap<String, String>)>,
+) {
+    use engram_core::events::GraphEvent;
+
+    let total = docs_to_process.len() as u32;
+
+    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold,
+         coreference_enabled, llm_endpoint, llm_model) = {
+        let c = state.config.read().unwrap();
+        (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
+         c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled,
+         c.llm_endpoint.clone(), c.llm_model.clone())
+    };
+
+    let http_client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("engram/1.1")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("reprocess: HTTP client failed: {e}");
+            state.event_bus.publish(GraphEvent::IngestProgress {
+                operation: "reprocess".into(),
+                document: "".into(),
+                processed: 0, total,
+                stage: format!("error: HTTP client: {e}").into(),
+            });
+            return;
+        }
+    };
+
+    let mut items: Vec<engram_ingest::RawItem> = Vec::new();
+    let mut processed_count = 0u32;
+
+    for (doc_label, props) in &docs_to_process {
+        processed_count += 1;
+        let url = props.get("url");
+        let title = props.get("title").cloned();
+        let doc_date = props.get("doc_date").cloned();
+        let content_hash = props.get("content_hash");
+
+        state.event_bus.publish(GraphEvent::IngestProgress {
+            operation: "reprocess".into(),
+            document: doc_label.as_str().into(),
+            processed: processed_count, total,
+            stage: "fetching".into(),
+        });
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // Strategy 1: Re-fetch from URL
+        if let Some(u) = url {
+            match http_client.get(u).send().await {
+                Ok(resp) => {
+                    let ct = resp.headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let is_pdf = u.to_lowercase().ends_with(".pdf") || ct.contains("pdf");
+
+                    if let Ok(bytes) = resp.bytes().await {
+                        let content = if is_pdf {
+                            engram_ingest::Content::Bytes {
+                                data: bytes.to_vec(),
+                                mime: "application/pdf".into(),
+                            }
+                        } else {
+                            let text = String::from_utf8(bytes.to_vec())
+                                .unwrap_or_else(|_| "[binary content]".to_string());
+                            let text = if ct.contains("html") {
+                                dom_smoothie::Readability::new(text.clone(), None, None)
+                                    .ok()
+                                    .and_then(|mut r| r.parse().ok())
+                                    .map(|a| a.text_content.to_string())
+                                    .unwrap_or(text)
+                            } else {
+                                text
+                            };
+                            engram_ingest::Content::Text(text)
+                        };
+
+                        let mut metadata = std::collections::HashMap::new();
+                        if let Some(t) = title.clone() { metadata.insert("title".into(), t); }
+                        if let Some(d) = doc_date.clone() { metadata.insert("doc_date".into(), d); }
+
+                        items.push(engram_ingest::RawItem {
+                            content,
+                            source_url: Some(u.clone()),
+                            source_name: format!("reprocess:{doc_label}"),
+                            fetched_at: now,
+                            metadata,
+                        });
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(doc = %doc_label, error = %e, "reprocess: fetch failed");
+                }
+            }
+        }
+
+        // Strategy 2: Load from DocStore (fallback)
+        if let Some(hash_hex) = content_hash {
+            let hash_bytes: Vec<u8> = (0..hash_hex.len())
+                .step_by(2)
+                .filter_map(|i| u8::from_str_radix(&hash_hex[i..i+2], 16).ok())
+                .collect();
+
+            if hash_bytes.len() == 32 {
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&hash_bytes);
+
+                if let Ok(store) = state.doc_store.read() {
+                    if let Ok((content_bytes, _mime)) = store.load(&hash) {
+                        if let Ok(text) = String::from_utf8(content_bytes) {
+                            let mut metadata = std::collections::HashMap::new();
+                            if let Some(t) = title { metadata.insert("title".into(), t); }
+                            if let Some(d) = doc_date { metadata.insert("doc_date".into(), d); }
+
+                            items.push(engram_ingest::RawItem {
+                                content: engram_ingest::Content::Text(text),
+                                source_url: url.cloned(),
+                                source_name: format!("reprocess:{doc_label}"),
+                                fetched_at: now,
+                                metadata,
+                            });
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::warn!(doc = %doc_label, "reprocess: no URL and no cached content");
+    }
+
+    if items.is_empty() {
+        state.event_bus.publish(GraphEvent::IngestProgress {
+            operation: "reprocess".into(),
+            document: "".into(),
+            processed: total, total,
+            stage: "complete (no fetchable content)".into(),
+        });
+        return;
+    }
+
+    // Run pipeline
+    state.event_bus.publish(GraphEvent::IngestProgress {
+        operation: "reprocess".into(),
+        document: "".into(),
+        processed: total, total,
+        stage: "running NER/RE pipeline".into(),
+    });
+
+    let graph = state.graph.clone();
+    let ner_cache = state.cached_ner.clone();
+    let rel_cache = state.cached_rel.clone();
+    let doc_store = state.doc_store.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let mut pipeline = build_pipeline(graph, engram_ingest::PipelineConfig {
+            name: "reprocess-docs".into(),
+            ..Default::default()
+        }, kb_endpoints, ner_model, rel_model,
+           relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+        pipeline.set_doc_store(doc_store);
+        if let (Some(ep), Some(m)) = (llm_endpoint.as_ref(), llm_model.as_ref()) {
+            pipeline.set_llm(ep.clone(), m.clone());
+        }
+        pipeline.execute(items)
+    }).await;
+
+    match result {
+        Ok(Ok(r)) => {
+            // Mark processed documents as ner_complete
+            if let Ok(mut g) = state.graph.write() {
+                for (doc_label, _) in &docs_to_process {
+                    let _ = g.set_property(doc_label, "ner_complete", "true");
+                }
+            }
+            state.mark_dirty();
+
+            state.event_bus.publish(GraphEvent::IngestProgress {
+                operation: "reprocess".into(),
+                document: "".into(),
+                processed: total, total,
+                stage: format!("complete: {} facts, {} relations", r.facts_stored, r.relations_created).into(),
+            });
+            tracing::info!(
+                facts = r.facts_stored, relations = r.relations_created,
+                duration_ms = r.duration_ms, "reprocess-docs complete"
+            );
+        }
+        Ok(Err(e)) => {
+            state.event_bus.publish(GraphEvent::IngestProgress {
+                operation: "reprocess".into(),
+                document: "".into(),
+                processed: total, total,
+                stage: format!("error: {e}").into(),
+            });
+            tracing::error!("reprocess-docs pipeline error: {e}");
+        }
+        Err(e) => {
+            state.event_bus.publish(GraphEvent::IngestProgress {
+                operation: "reprocess".into(),
+                document: "".into(),
+                processed: total, total,
+                stage: format!("error: task join: {e}").into(),
+            });
+            tracing::error!("reprocess-docs task join error: {e}");
+        }
+    }
+}
+
+#[cfg(not(feature = "ingest"))]
+pub async fn reprocess_docs() -> impl axum::response::IntoResponse {
     (StatusCode::NOT_IMPLEMENTED,
      Json(ErrorResponse { error: "ingest feature not enabled".into() }))
 }
@@ -952,5 +1274,6 @@ fn event_type_name(event: &engram_core::events::GraphEvent) -> &'static str {
         GraphEvent::SeedFactProgress { .. } => "seed_fact_progress",
         GraphEvent::SeedComplete { .. } => "seed_complete",
         GraphEvent::SeedProgress { .. } => "seed_progress",
+        GraphEvent::IngestProgress { .. } => "ingest_progress",
     }
 }

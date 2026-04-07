@@ -1,4 +1,5 @@
 mod assessments;
+mod documents;
 mod gaps;
 
 use leptos::prelude::*;
@@ -6,6 +7,7 @@ use leptos::prelude::*;
 use crate::api::ApiClient;
 use crate::api::types::StatsResponse;
 use assessments::AssessmentsZone;
+use documents::DocumentsZone;
 use gaps::GapsZone;
 
 #[component]
@@ -59,10 +61,13 @@ pub fn InsightsPage() -> impl IntoView {
             </p>
         </div>
 
-        // Zone A: Assessments (primary)
+        // Zone A: Documents (pending/processed)
+        <DocumentsZone set_status_msg />
+
+        // Zone B: Assessments (primary)
         <AssessmentsZone set_status_msg />
 
-        // Zone B: Intelligence Gaps (secondary)
+        // Zone C: Intelligence Gaps (secondary)
         <GapsZone set_status_msg />
     }
 }

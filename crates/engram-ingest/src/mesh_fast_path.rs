@@ -45,6 +45,7 @@ pub fn mesh_pipeline_config(mesh_config: &MeshFastPathConfig) -> PipelineConfig 
             confidence_calc: false, // we apply peer trust multiplier instead
             relation_extract: false, // mesh sync uses fast path, skip RE
             fact_extract: false, // mesh sync doesn't need LLM facts
+            translate: false, // mesh data is already in target language
         },
         ..Default::default()
     }

@@ -1270,8 +1270,8 @@ const DEFAULT_BLOCKED_DOMAINS: &[&str] = &[
 ];
 
 
-/// Extract text from a PDF response. Uses keyword search to find relevant paragraphs.
-/// Falls back to first + last 2000 chars (abstract + conclusion) if no keyword matches.
+/// Extract text from a PDF response. Delegates to shared `engram_ingest::pdf`
+/// utility, then caps at 8000 chars for debate fast-path.
 #[cfg(feature = "pdf")]
 async fn extract_pdf_text(resp: reqwest::Response, url_short: &str) -> Option<String> {
     let t0 = std::time::Instant::now();
@@ -1283,7 +1283,7 @@ async fn extract_pdf_text(resp: reqwest::Response, url_short: &str) -> Option<St
         }
     };
 
-    // Cap PDF size at 20MB
+    // Cap PDF size at 20MB for debate fast-path
     if bytes.len() > 20_000_000 {
         dbg_debate!("[fetch] SKIP PDF too large ({} bytes) | {}", bytes.len(), url_short);
         return None;
@@ -1291,15 +1291,20 @@ async fn extract_pdf_text(resp: reqwest::Response, url_short: &str) -> Option<St
 
     dbg_debate!("[fetch] PDF {} bytes, extracting text... | {}", bytes.len(), url_short);
 
+    let bytes_vec = bytes.to_vec();
     let text = match tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::task::spawn_blocking(move || {
-            pdf_extract::extract_text_from_mem(&bytes).ok()
+            engram_ingest::pdf::extract_text_from_pdf(&bytes_vec)
         })
     ).await {
-        Ok(Ok(Some(t))) => t,
-        Ok(_) => {
-            dbg_debate!("[fetch] PDF extraction failed | {}", url_short);
+        Ok(Ok(Ok(t))) => t,
+        Ok(Ok(Err(e))) => {
+            dbg_debate!("[fetch] PDF extraction failed: {} | {}", e, url_short);
+            return None;
+        }
+        Ok(Err(e)) => {
+            dbg_debate!("[fetch] PDF extraction task failed: {} | {}", e, url_short);
             return None;
         }
         Err(_) => {
@@ -1308,25 +1313,10 @@ async fn extract_pdf_text(resp: reqwest::Response, url_short: &str) -> Option<St
         }
     };
 
-    let text = text.trim().to_string();
-    if text.len() < 100 {
-        dbg_debate!("[fetch] PDF extraction too short ({} chars) | {}", text.len(), url_short);
-        return None;
-    }
-
     dbg_debate!("[fetch] PDF extracted {} chars in {:.1}s | {}", text.len(), t0.elapsed().as_secs_f32(), url_short);
 
-    // Cap at 8000 chars -- take first + last sections (abstract + conclusion often have key data)
-    let capped = if text.len() > 8000 {
-        let first = &text[..4000];
-        let last_start = text.len().saturating_sub(4000);
-        let last = &text[last_start..];
-        format!("{}\n\n[...]\n\n{}", first.trim(), last.trim())
-    } else {
-        text
-    };
-
-    Some(capped)
+    // Cap at 8000 chars for debate fast-path
+    Some(engram_ingest::pdf::cap_text(&text, 8000))
 }
 
 /// Detect machine-readable download links in HTML (CSV, JSON, XML, XLSX, ASCII).

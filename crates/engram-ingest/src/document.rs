@@ -30,6 +30,7 @@ pub fn build_doc_context(item: &RawItem, full_text: &str) -> Arc<DocumentContext
         doc_date: item.metadata.get("doc_date").cloned()
             .or_else(|| item.metadata.get("date").cloned()),
         fetched_at: item.fetched_at,
+        original_language: None,
     })
 }
 

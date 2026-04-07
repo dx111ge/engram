@@ -1,6 +1,6 @@
 /// HTTP server setup — routes, middleware, startup.
 
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
@@ -65,7 +65,14 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/ingest/analyze", post(handlers::ingest_analyze))
         .route("/ingest/file", post(handlers::ingest_file))
         .route("/ingest/configure", post(handlers::ingest_configure))
-        .route("/sources", get(handlers::list_sources))
+        .route("/ingest/reprocess-docs", post(handlers::reprocess_docs))
+        .route("/sources", get(handlers::sources::list_sources))
+        .route("/sources", post(handlers::sources::create_source))
+        .route("/sources/{name}", get(handlers::sources::get_source))
+        .route("/sources/{name}", put(handlers::sources::update_source))
+        .route("/sources/{name}", delete(handlers::sources::delete_source))
+        .route("/sources/{name}/run", post(handlers::sources::run_source))
+        .route("/sources/{name}/test", post(handlers::sources::test_source))
         .route("/sources/{name}/usage", get(handlers::source_usage))
         .route("/sources/{name}/ledger", get(handlers::source_ledger))
         // Action engine (available when compiled with `actions` feature)
@@ -390,6 +397,10 @@ pub async fn serve_with_frontend(state: AppState, addr: &str, frontend_dir: Opti
             }
         }
     });
+
+    // Source polling background task (checks configured sources on their intervals)
+    #[cfg(feature = "ingest")]
+    handlers::sources::spawn_source_poller(state.clone());
 
     // Assessment auto-evaluation subscriber (listens for FactStored events)
     #[cfg(feature = "assess")]

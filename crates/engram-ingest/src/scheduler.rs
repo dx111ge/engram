@@ -80,6 +80,13 @@ impl AdaptiveScheduler {
         });
     }
 
+    /// Set a specific interval for a source (overrides adaptive adjustment).
+    pub fn set_interval(&mut self, source: &str, interval_secs: u64) {
+        if let Some(schedule) = self.schedules.get_mut(source) {
+            schedule.interval_secs = interval_secs;
+        }
+    }
+
     /// Check if a source is due for a fetch.
     pub fn is_due(&self, source: &str) -> bool {
         let schedule = match self.schedules.get(source) {

@@ -114,6 +114,7 @@ pub fn SourcesPage() -> impl IntoView {
                                         <th>"Ingested"</th>
                                         <th>"Last Run"</th>
                                         <th>"Errors"</th>
+                                        <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -125,6 +126,49 @@ pub fn SourcesPage() -> impl IntoView {
                                             "error" => "badge badge-archival",
                                             _ => "badge badge-active",
                                         };
+                                        let name_test = s.name.clone();
+                                        let name_run = s.name.clone();
+                                        let name_del = s.name.clone();
+                                        let api_test = api.clone();
+                                        let api_run = api.clone();
+                                        let api_del = api.clone();
+                                        let (test_msg, set_test_msg) = signal(Option::<String>::None);
+                                        let set_rc = set_refresh_counter;
+                                        let do_test = Action::new_local(move |_: &()| {
+                                            let api = api_test.clone();
+                                            let name = name_test.clone();
+                                            async move {
+                                                set_test_msg.set(Some("testing...".into()));
+                                                match api.post_text(&format!("/sources/{}/test", name), &()).await {
+                                                    Ok(r) => set_test_msg.set(Some(r)),
+                                                    Err(e) => set_test_msg.set(Some(format!("Error: {e}"))),
+                                                }
+                                            }
+                                        });
+                                        let do_run = Action::new_local(move |_: &()| {
+                                            let api = api_run.clone();
+                                            let name = name_run.clone();
+                                            async move {
+                                                set_test_msg.set(Some("running...".into()));
+                                                match api.post_text(&format!("/sources/{}/run", name), &()).await {
+                                                    Ok(r) => {
+                                                        set_test_msg.set(Some(r));
+                                                        set_rc.update(|c| *c += 1);
+                                                    }
+                                                    Err(e) => set_test_msg.set(Some(format!("Error: {e}"))),
+                                                }
+                                            }
+                                        });
+                                        let do_delete = Action::new_local(move |_: &()| {
+                                            let api = api_del.clone();
+                                            let name = name_del.clone();
+                                            async move {
+                                                match api.delete(&format!("/sources/{}", name)).await {
+                                                    Ok(_) => set_rc.update(|c| *c += 1),
+                                                    Err(e) => set_test_msg.set(Some(format!("Error: {e}"))),
+                                                }
+                                            }
+                                        });
                                         view! {
                                             <tr>
                                                 <td>{s.name.clone()}</td>
@@ -133,7 +177,30 @@ pub fn SourcesPage() -> impl IntoView {
                                                 <td>{s.total_ingested.unwrap_or(0).to_string()}</td>
                                                 <td class="text-muted">{s.last_run.clone().unwrap_or_else(|| "never".into())}</td>
                                                 <td>{s.error_count.unwrap_or(0).to_string()}</td>
+                                                <td style="white-space: nowrap;">
+                                                    <button class="btn btn-sm btn-secondary" title="Test connectivity"
+                                                        on:click=move |_| { let _ = do_test.dispatch(()); }>
+                                                        <i class="fa-solid fa-plug-circle-check"></i>
+                                                    </button>
+                                                    " "
+                                                    <button class="btn btn-sm btn-primary" title="Run now"
+                                                        on:click=move |_| { let _ = do_run.dispatch(()); }>
+                                                        <i class="fa-solid fa-play"></i>
+                                                    </button>
+                                                    " "
+                                                    <button class="btn btn-sm btn-danger" title="Delete"
+                                                        on:click=move |_| { let _ = do_delete.dispatch(()); }>
+                                                        <i class="fa-solid fa-trash"></i>
+                                                    </button>
+                                                </td>
                                             </tr>
+                                            {move || test_msg.get().map(|m| view! {
+                                                <tr>
+                                                    <td colspan="7" style="font-size: 0.8rem; padding: 0.25rem 0.5rem; background: var(--bg-tertiary);">
+                                                        <code>{m}</code>
+                                                    </td>
+                                                </tr>
+                                            })}
                                         }
                                     }).collect::<Vec<_>>()}
                                 </tbody>

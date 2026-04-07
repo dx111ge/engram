@@ -36,6 +36,8 @@ pub mod learned_trust;
 pub mod llm_ner;
 pub mod mesh_fast_path;
 pub mod ner_chain;
+#[cfg(feature = "pdf")]
+pub mod pdf;
 pub mod pipeline;
 pub mod rel_chain;
 pub mod rel_gazetteer;

@@ -174,6 +174,22 @@ pub enum GraphEvent {
         total: u32,             // total items in phase
         elapsed_secs: u32,      // seconds since enrichment started
     },
+
+    // ── Ingest progress events ──
+
+    /// Progress update for long-running ingest operations (reprocess, folder scan).
+    IngestProgress {
+        /// Operation type: "reprocess", "file-ingest", "folder-scan"
+        operation: Arc<str>,
+        /// Document label or filename being processed.
+        document: Arc<str>,
+        /// Documents processed so far.
+        processed: u32,
+        /// Total documents to process.
+        total: u32,
+        /// Current stage: "fetching", "translating", "extracting", "ner", "complete"
+        stage: Arc<str>,
+    },
 }
 
 /// Direction of a confidence threshold crossing.

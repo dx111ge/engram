@@ -146,6 +146,8 @@ pub struct DocumentContext {
     pub doc_date: Option<String>,
     /// When the content was fetched (unix seconds).
     pub fetched_at: i64,
+    /// Original language code if translated (e.g. "de", "fr"). None if originally English.
+    pub original_language: Option<String>,
 }
 
 // ── Provenance ──
@@ -215,6 +217,8 @@ pub struct StageConfig {
     pub relation_extract: bool,
     /// LLM-based semantic fact extraction (Layer 2). Requires LLM config.
     pub fact_extract: bool,
+    /// Translate non-English text to English via LLM before NER.
+    pub translate: bool,
 }
 
 impl Default for StageConfig {
@@ -229,6 +233,7 @@ impl Default for StageConfig {
             confidence_calc: true,
             relation_extract: true,
             fact_extract: true,
+            translate: true,
         }
     }
 }
@@ -266,6 +271,7 @@ impl StageConfig {
                 "conflict" | "conflict_check" => self.conflict_check = false,
                 "confidence" | "confidence_calc" => self.confidence_calc = false,
                 "relation" | "rel" | "relation_extract" => self.relation_extract = false,
+                "translate" | "translation" => self.translate = false,
                 _ => unknown.push(trimmed.to_string()),
             }
         }
@@ -283,6 +289,7 @@ impl StageConfig {
         if self.conflict_check { stages.push("conflict"); }
         if self.confidence_calc { stages.push("confidence"); }
         if self.relation_extract { stages.push("relation"); }
+        if self.translate { stages.push("translate"); }
         stages
     }
 
@@ -297,6 +304,7 @@ impl StageConfig {
         if !self.conflict_check { stages.push("conflict"); }
         if !self.confidence_calc { stages.push("confidence"); }
         if !self.relation_extract { stages.push("relation"); }
+        if !self.translate { stages.push("translate"); }
         stages
     }
 }

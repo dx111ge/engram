@@ -481,6 +481,47 @@ pub struct AssessmentHistory {
     pub reason: Option<String>,
 }
 
+// ── Documents ──
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DocumentListItem {
+    pub label: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub doc_date: String,
+    #[serde(default)]
+    pub ingested_at: String,
+    #[serde(default)]
+    pub content_length: String,
+    #[serde(default)]
+    pub publisher: String,
+    #[serde(default)]
+    pub fact_count: usize,
+    #[serde(default)]
+    pub ner_complete: bool,
+    #[serde(default)]
+    pub original_language: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DocumentsResponse {
+    pub count: usize,
+    pub documents: Vec<DocumentListItem>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReprocessResponse {
+    #[serde(default)]
+    pub documents_found: usize,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub message: String,
+}
+
 // ── Sources ──
 
 #[derive(Clone, Debug, Deserialize)]

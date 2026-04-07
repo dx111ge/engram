@@ -12,6 +12,7 @@ gliner2 = ["dep:ort", "dep:ndarray", "dep:tokenizers"]  # GLiNER2 in-process NER
 spacy = []                       # Feature-gated SpaCy HTTP sidecar integration
 llm-ner = []                    # Feature-gated LLM fallback NER
 file-source = ["dep:notify"]    # File watching source with notify crate
+pdf = ["dep:pdf-extract"]       # PDF text extraction via pdf-extract
 
 [dependencies]
 engram-core = { path = "../engram-core" }
@@ -28,6 +29,7 @@ whatlang = { version = "0.18", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "cookies"] }
 dom_smoothie = "0.17"
 notify = { version = "7", optional = true }
+pdf-extract = { version = "0.7", optional = true }
 ort = { version = "=2.0.0-rc.12", optional = true }
 ndarray = { version = "0.17", optional = true }
 tokenizers = { version = "0.22", default-features = false, features = ["onig"], optional = true }

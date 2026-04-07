@@ -36,6 +36,7 @@ impl Default for FileSourceConfig {
             extensions: vec![
                 "txt".into(), "json".into(), "csv".into(),
                 "ndjson".into(), "jsonl".into(), "md".into(),
+                "pdf".into(),
             ],
             recursive: true,
             name: "file".into(),
@@ -121,6 +122,7 @@ impl FileSource {
             "json" => self.read_json(path, &source_url, modified),
             "ndjson" | "jsonl" => self.read_ndjson(path, &source_url, modified),
             "csv" => self.read_csv(path, &source_url, modified),
+            "pdf" => self.read_pdf(path, &source_url, modified),
             _ => self.read_text(path, &source_url, modified),
         }
     }
@@ -207,6 +209,32 @@ impl FileSource {
             })
             .collect();
         Ok(items)
+    }
+
+    /// Read a PDF file as raw bytes for pipeline processing.
+    #[cfg(feature = "pdf")]
+    fn read_pdf(&self, path: &Path, source_url: &str, fetched_at: i64) -> Result<Vec<RawItem>, IngestError> {
+        let bytes = std::fs::read(path).map_err(IngestError::Io)?;
+        Ok(vec![RawItem {
+            content: Content::Bytes {
+                data: bytes,
+                mime: "application/pdf".into(),
+            },
+            source_url: Some(source_url.to_string()),
+            source_name: self.config.name.clone(),
+            fetched_at,
+            metadata: HashMap::from([
+                ("file".into(), path.file_name().unwrap_or_default().to_string_lossy().to_string()),
+                ("file_path".into(), path.to_string_lossy().to_string()),
+            ]),
+        }])
+    }
+
+    /// Fallback when pdf feature is disabled.
+    #[cfg(not(feature = "pdf"))]
+    fn read_pdf(&self, path: &Path, _source_url: &str, _fetched_at: i64) -> Result<Vec<RawItem>, IngestError> {
+        tracing::warn!(path = %path.display(), "PDF support not enabled, skipping");
+        Ok(vec![])
     }
 
     fn json_to_item(&self, value: serde_json::Value, source_url: &str, fetched_at: i64) -> Option<RawItem> {
