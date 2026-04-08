@@ -657,6 +657,15 @@ impl Graph {
         self.node_type_names.get(node.node_type as usize).cloned()
     }
 
+    /// Count nodes of a given type using the type bitmap (O(1) lookup + bitmap scan).
+    pub fn count_nodes_of_type(&self, type_name: &str) -> usize {
+        let type_id = match self.node_type_names.iter().position(|t| t == type_name) {
+            Some(id) => id as u32,
+            None => return 0,
+        };
+        self.type_bitmap.slots_for(type_id).len()
+    }
+
     /// List all known node type names.
     pub fn all_node_types(&self) -> Vec<String> {
         self.node_type_names.iter()

@@ -122,7 +122,7 @@ pub async fn documents(
     Json(req): Json<DocumentsRequest>,
 ) -> ApiResult<DocumentsResponse> {
     let g = state.graph.read().map_err(|_| read_lock_err())?;
-    let limit = req.limit.unwrap_or(20);
+    let limit = req.limit.unwrap_or(500);
 
     let all_nodes = g.all_nodes()
         .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -155,7 +155,7 @@ pub async fn documents(
             publisher,
             fact_count,
             ner_complete: props.get("ner_complete").is_some_and(|v| v == "true"),
-            original_language: props.get("original_language").cloned().unwrap_or_default(),
+            original_language: props.get("original_language").or_else(|| props.get("language")).cloned().unwrap_or_default(),
         });
         if docs.len() >= limit {
             break;
@@ -273,4 +273,55 @@ pub async fn document_passage(
         content,
         mime_type: mime.as_str().to_string(),
     }))
+}
+
+/// DELETE /documents/{label} -- delete a Document node and its edges.
+pub async fn delete_document(
+    State(state): State<AppState>,
+    axum::extract::Path(label): axum::extract::Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let label = urlencoding::decode(&label).unwrap_or(std::borrow::Cow::Borrowed(&label)).to_string();
+
+    let mut g = state.graph.write().map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "lock failed"))?;
+
+    // Check node exists and is a Document
+    let node_type = g.get_node_type(&label).unwrap_or_default();
+    if node_type != "Document" {
+        return Err(api_err(StatusCode::NOT_FOUND, format!("{} is not a Document node", label)));
+    }
+
+    // Grab content_hash before deleting the node so we can clean up the doc store
+    let content_hash_hex = g.get_properties(&label)
+        .ok().flatten()
+        .and_then(|p| p.get("content_hash").cloned());
+
+    let prov = engram_core::graph::Provenance {
+        source_type: engram_core::graph::SourceType::User,
+        source_id: "ui-delete".to_string(),
+    };
+    let deleted = g.delete(&label, &prov)
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Remove cached content from doc store if no other Document references this hash
+    let mut doc_store_cleaned = false;
+    if let Some(hex) = content_hash_hex {
+        let hash_bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .filter_map(|i| u8::from_str_radix(&hex[i..i+2], 16).ok())
+            .collect();
+        if hash_bytes.len() == 32 {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&hash_bytes);
+            if let Ok(mut store) = state.doc_store.write() {
+                store.remove(&hash);
+                doc_store_cleaned = true;
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "deleted": label,
+        "success": deleted,
+        "doc_store_cleaned": doc_store_cleaned,
+    })))
 }

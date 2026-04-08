@@ -560,6 +560,7 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
             Some(&result.title),
             &fetched.mime_type,
             fetched.text.len(),
+            topic_languages.first().map(|s| s.as_str()),
         );
 
         let content = fetched.text;
@@ -1788,6 +1789,7 @@ fn create_pending_document_node(
     title: Option<&str>,
     mime_type: &str,
     content_length: usize,
+    language: Option<&str>,
 ) {
     let short = if content_hash_hex.len() >= 8 { &content_hash_hex[..8] } else { content_hash_hex };
     let doc_label = format!("Doc:{short}");
@@ -1820,9 +1822,18 @@ fn create_pending_document_node(
     let _ = g.set_property(&doc_label, "content_length", &content_length.to_string());
     let _ = g.set_property(&doc_label, "ner_complete", "false");
     if let Some(u) = url {
-        let _ = g.set_property(&doc_label, "url", u);
+        if !u.is_empty() {
+            let _ = g.set_property(&doc_label, "url", u);
+        }
     }
     if let Some(t) = title {
-        let _ = g.set_property(&doc_label, "title", t);
+        if !t.is_empty() {
+            let _ = g.set_property(&doc_label, "title", t);
+        }
+    }
+    if let Some(lang) = language {
+        if !lang.is_empty() {
+            let _ = g.set_property(&doc_label, "language", lang);
+        }
     }
 }

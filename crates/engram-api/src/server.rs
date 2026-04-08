@@ -217,6 +217,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/documents", post(handlers::document::documents))
         .route("/documents/content", post(handlers::document::document_content))
         .route("/documents/passage", post(handlers::document::document_passage))
+        .route("/documents/{label}", axum::routing::delete(handlers::document::delete_document))
         // Chat tool endpoints (intelligence analyst workbench)
         .route("/chat/temporal_query", post(handlers::chat::temporal_query))
         .route("/chat/timeline", post(handlers::chat::timeline))

@@ -16,13 +16,18 @@ pub fn DocumentsZone(
     let (result_msg, set_result_msg) = signal(Option::<String>::None);
     let (progress_msg, set_progress_msg) = signal(Option::<String>::None);
     let (refresh_trigger, set_refresh_trigger) = signal(0u32);
+    let (page, set_page) = signal(0usize);
+    let (pending_page, set_pending_page) = signal(0usize);
+    let page_size: usize = 25;
+    // Custom confirm dialog state: holds label to delete
+    let (confirm_delete, set_confirm_delete) = signal(Option::<String>::None);
 
     let api_docs = api.clone();
     let docs = LocalResource::new(move || {
         let api = api_docs.clone();
         let _ = refresh_trigger.get(); // re-fetch when trigger changes
         async move {
-            let body = serde_json::json!({ "limit": 100 });
+            let body = serde_json::json!({ "limit": 500 });
             api.post::<_, DocumentsResponse>("/documents", &body).await.ok()
         }
     });
@@ -130,6 +135,8 @@ pub fn DocumentsZone(
         }
     });
 
+    let api_confirm = api.clone();
+
     view! {
         <div class="card mt-2">
             <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -207,6 +214,15 @@ pub fn DocumentsZone(
                                             <i class="fa-solid fa-clock" style="color: var(--warning);"></i>
                                             " Pending ("{pending_count}")"
                                         </summary>
+                                        {
+                                            let pending_total_pages = (pending_count + page_size - 1) / page_size;
+                                            let pending_cp = pending_page.get().min(pending_total_pages.saturating_sub(1));
+                                            let pending_items: Vec<_> = pending.into_iter()
+                                                .skip(pending_cp * page_size)
+                                                .take(page_size)
+                                                .collect();
+                                            view! {
+                                        <div>
                                         <table class="data-table">
                                             <thead><tr>
                                                 <th>"Label"</th>
@@ -216,9 +232,10 @@ pub fn DocumentsZone(
                                                 <th></th>
                                             </tr></thead>
                                             <tbody>
-                                                {pending.into_iter().map(|d| {
+                                                {pending_items.into_iter().map(|d| {
                                                     let label = d.label.clone();
                                                     let label_for_btn = d.label.clone();
+                                                    let label_for_del = d.label.clone();
                                                     let title = if d.title.is_empty() { "-".to_string() } else { d.title.clone() };
                                                     let url = if d.url.is_empty() { "-".to_string() } else { d.url.clone() };
                                                     let lang = if d.original_language.is_empty() { "-".to_string() } else { d.original_language.clone() };
@@ -246,14 +263,22 @@ pub fn DocumentsZone(
                                                         <tr>
                                                             <td><code style="font-size: 0.8rem;">{label}</code></td>
                                                             <td>{title}</td>
-                                                            <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{url}</td>
+                                                            <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                                                {if url == "-" {
+                                                                    view! { <span>"-"</span> }.into_any()
+                                                                } else {
+                                                                    let href = url.clone();
+                                                                    view! { <a href=href target="_blank" rel="noopener" style="color: var(--accent-bright);">{url}</a> }.into_any()
+                                                                }}
+                                                            </td>
                                                             <td>{lang}</td>
-                                                            <td>
+                                                            <td style="white-space: nowrap;">
                                                                 <button
-                                                                    class="btn btn-sm btn-primary"
+                                                                    class="btn-icon"
                                                                     title="Process this document"
                                                                     disabled=move || processing.get()
                                                                     on:click=move |_| { let _ = do_process_single.dispatch(()); }
+                                                                    style="color: var(--success);"
                                                                 >
                                                                     {move || {
                                                                         let is_this = processing_label.get().as_deref() == Some(&label_check);
@@ -264,12 +289,52 @@ pub fn DocumentsZone(
                                                                         }
                                                                     }}
                                                                 </button>
+                                                                {
+                                                                    let del_label = label_for_del.clone();
+                                                                    view! {
+                                                                        <button
+                                                                            class="btn-icon icon-danger"
+                                                                            title="Delete this document"
+                                                                            style="margin-left: 0.25rem;"
+                                                                            disabled=move || processing.get()
+                                                                            on:click=move |_| {
+                                                                                set_confirm_delete.set(Some(del_label.clone()));
+                                                                            }
+                                                                        >
+                                                                            <i class="fa-solid fa-trash"></i>
+                                                                        </button>
+                                                                    }
+                                                                }
                                                             </td>
                                                         </tr>
                                                     }
                                                 }).collect::<Vec<_>>()}
                                             </tbody>
                                         </table>
+                                        // Pending pagination
+                                        {(pending_total_pages > 1).then(|| {
+                                            let pcp = pending_cp;
+                                            let ptp = pending_total_pages;
+                                            let is_last_pending = move || pending_page.get() + 1 >= ptp;
+                                            view! {
+                                                <div style="display: flex; justify-content: center; gap: 0.5rem; margin-top: 0.5rem; align-items: center;">
+                                                    <button class="btn btn-sm"
+                                                        disabled=move || pending_page.get() == 0
+                                                        on:click=move |_| set_pending_page.update(|p| *p = p.saturating_sub(1))>
+                                                        <i class="fa-solid fa-chevron-left"></i>
+                                                    </button>
+                                                    <span style="font-size: 0.8rem;">{format!("Page {} of {}", pcp + 1, ptp)}</span>
+                                                    <button class="btn btn-sm"
+                                                        disabled=is_last_pending
+                                                        on:click=move |_| set_pending_page.update(|p| *p += 1)>
+                                                        <i class="fa-solid fa-chevron-right"></i>
+                                                    </button>
+                                                </div>
+                                            }
+                                        })}
+                                        </div>
+                                        }
+                                        }
                                     </details>
                                 })
                             } else { None }}
@@ -281,30 +346,82 @@ pub fn DocumentsZone(
                                             <i class="fa-solid fa-check-circle" style="color: var(--success);"></i>
                                             " Processed ("{processed_count}")"
                                         </summary>
-                                        <table class="data-table">
-                                            <thead><tr>
-                                                <th>"Label"</th>
-                                                <th>"Title"</th>
-                                                <th>"Facts"</th>
-                                                <th>"Lang"</th>
-                                            </tr></thead>
-                                            <tbody>
-                                                {processed.into_iter().map(|d| {
-                                                    let label = d.label.clone();
-                                                    let title = if d.title.is_empty() { "-".to_string() } else { d.title.clone() };
-                                                    let facts = d.fact_count;
-                                                    let lang = if d.original_language.is_empty() { "en".to_string() } else { d.original_language.clone() };
+                                        {
+                                            let total_pages = (processed_count + page_size - 1) / page_size;
+                                            let current_page = page.get().min(total_pages.saturating_sub(1));
+                                            let page_items: Vec<_> = processed.into_iter()
+                                                .skip(current_page * page_size)
+                                                .take(page_size)
+                                                .collect();
+                                            view! {
+                                                <table class="data-table">
+                                                    <thead><tr>
+                                                        <th>"Label"</th>
+                                                        <th>"Title"</th>
+                                                        <th>"URL"</th>
+                                                        <th>"Facts"</th>
+                                                        <th>"Lang"</th>
+                                                        <th></th>
+                                                    </tr></thead>
+                                                    <tbody>
+                                                        {page_items.into_iter().map(|d| {
+                                                            let label = d.label.clone();
+                                                            let title = if d.title.is_empty() { "-".to_string() } else { d.title.clone() };
+                                                            let url = if d.url.is_empty() { "-".to_string() } else { d.url.clone() };
+                                                            let facts = d.fact_count;
+                                                            let lang = if d.original_language.is_empty() { "en".to_string() } else { d.original_language.clone() };
+                                                            let del_label = label.clone();
+                                                            view! {
+                                                                <tr>
+                                                                    <td><code style="font-size: 0.8rem;">{label}</code></td>
+                                                                    <td>{title}</td>
+                                                                    <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                                                        {if url == "-" {
+                                                                            view! { <span>"-"</span> }.into_any()
+                                                                        } else {
+                                                                            let href = url.clone();
+                                                                            view! { <a href=href target="_blank" rel="noopener" style="color: var(--accent-bright);">{url}</a> }.into_any()
+                                                                        }}
+                                                                    </td>
+                                                                    <td>{facts}</td>
+                                                                    <td>{lang}</td>
+                                                                    <td>
+                                                                        <button class="btn-icon icon-danger" title="Delete"
+                                                                            on:click=move |_| {
+                                                                                set_confirm_delete.set(Some(del_label.clone()));
+                                                                            }
+                                                                        >
+                                                                            <i class="fa-solid fa-trash"></i>
+                                                                        </button>
+                                                                    </td>
+                                                                </tr>
+                                                            }
+                                                        }).collect::<Vec<_>>()}
+                                                    </tbody>
+                                                </table>
+                                                // Pagination controls
+                                                {(total_pages > 1).then(|| {
+                                                    let cp = current_page;
+                                                    let tp = total_pages;
+                                                    let is_last_proc = move || page.get() + 1 >= tp;
                                                     view! {
-                                                        <tr>
-                                                            <td><code style="font-size: 0.8rem;">{label}</code></td>
-                                                            <td>{title}</td>
-                                                            <td>{facts}</td>
-                                                            <td>{lang}</td>
-                                                        </tr>
+                                                        <div style="display: flex; justify-content: center; gap: 0.5rem; margin-top: 0.5rem; align-items: center;">
+                                                            <button class="btn btn-sm"
+                                                                disabled=move || page.get() == 0
+                                                                on:click=move |_| set_page.update(|p| *p = p.saturating_sub(1))>
+                                                                <i class="fa-solid fa-chevron-left"></i>
+                                                            </button>
+                                                            <span style="font-size: 0.8rem;">{format!("Page {} of {}", cp + 1, tp)}</span>
+                                                            <button class="btn btn-sm"
+                                                                disabled=is_last_proc
+                                                                on:click=move |_| set_page.update(|p| *p += 1)>
+                                                                <i class="fa-solid fa-chevron-right"></i>
+                                                            </button>
+                                                        </div>
                                                     }
-                                                }).collect::<Vec<_>>()}
-                                            </tbody>
-                                        </table>
+                                                })}
+                                            }
+                                        }
                                     </details>
                                 })
                             } else { None }}
@@ -312,6 +429,51 @@ pub fn DocumentsZone(
                     }
                 }
             }}
+
+            // Custom styled confirm dialog for delete
+            {
+                let api_confirm = api_confirm.clone();
+                move || confirm_delete.get().map(|label| {
+                let label_for_action = label.clone();
+                let api_del = api_confirm.clone();
+                let do_confirmed_delete = Action::new_local(move |_: &()| {
+                    let api = api_del.clone();
+                    let lbl = label_for_action.clone();
+                    let encoded = js_sys::encode_uri_component(&lbl).as_string().unwrap_or(lbl.clone());
+                    async move {
+                        match api.delete(&format!("/documents/{}", encoded)).await {
+                            Ok(_) => set_refresh_trigger.update(|c| *c += 1),
+                            Err(e) => set_result_msg.set(Some(format!("Delete error: {e}"))),
+                        }
+                        set_confirm_delete.set(None);
+                    }
+                });
+                view! {
+                    <div class="modal-overlay" style="position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.6); z-index: 9999; display: flex; align-items: center; justify-content: center;">
+                        <div class="card" style="min-width: 360px; max-width: 480px; padding: 1.5rem; border: 1px solid var(--border-light);">
+                            <h4 style="margin-bottom: 1rem;">
+                                <i class="fa-solid fa-triangle-exclamation" style="color: var(--warning);"></i>
+                                " Confirm Delete"
+                            </h4>
+                            <p style="margin-bottom: 1rem; color: var(--text-secondary);">
+                                "Delete document " <code>{label.clone()}</code> "? Facts extracted from this document will be kept."
+                            </p>
+                            <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
+                                <button class="btn btn-secondary"
+                                    on:click=move |_| set_confirm_delete.set(None)>
+                                    "Cancel"
+                                </button>
+                                <button class="btn btn-danger"
+                                    on:click=move |_| { let _ = do_confirmed_delete.dispatch(()); }>
+                                    <i class="fa-solid fa-trash"></i>" Delete"
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                }
+            })
+            }
         </div>
     }
 }
+

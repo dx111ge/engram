@@ -14,9 +14,7 @@ pub async fn health() -> Json<HealthResponse> {
 pub async fn stats(State(state): State<AppState>) -> ApiResult<StatsResponse> {
     let g = state.graph.read().map_err(|_| read_lock_err())?;
     let (nodes, edges) = g.stats();
-    let documents = state.doc_store.read()
-        .map(|ds| ds.entry_count() as u64)
-        .unwrap_or(0);
+    let documents = g.count_nodes_of_type("Document") as u64;
     Ok(Json(StatsResponse { nodes, edges, documents }))
 }
 

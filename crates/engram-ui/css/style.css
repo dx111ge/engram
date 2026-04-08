@@ -28,6 +28,7 @@
   --success: #00b894;
   --warning: #fdcb6e;
   --error: #d63031;
+  --danger: #e74c3c;
   --border: #2a3a5c;
   --border-light: #3a4a6c;
   --shadow: rgba(0, 0, 0, 0.3);
@@ -223,6 +224,9 @@ h1, h2, h3, h4 {
 .btn-icon:hover {
   color: var(--text-primary);
   background: var(--bg-hover);
+}
+.btn-icon.icon-danger:hover {
+  color: var(--danger);
 }
 .btn:disabled {
   opacity: 0.5;

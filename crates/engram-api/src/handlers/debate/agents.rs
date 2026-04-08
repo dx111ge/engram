@@ -753,17 +753,10 @@ pub async fn execute_agent_turn(
             });
         }
 
-        // If there's a user injection, search for that too
+        // User injection is passed as moderator context in the LLM prompt,
+        // not as a web search query (votes, instructions, etc. are not searchable).
         if let Some(injection) = user_injection {
-            let inj_result = execute_web_search(state, injection).await;
-            if !inj_result.is_empty() {
-                research_summary.push_str(&format!("\n[Web search for \"{}\"]:\n{}\n", injection, inj_result));
-                all_tool_invocations.push(ToolInvocation {
-                    tool_name: "web_search".into(),
-                    arguments: serde_json::json!({"query": injection}),
-                    result_summary: format!("{} chars", inj_result.len()),
-                });
-            }
+            research_summary.push_str(&format!("\n[Moderator note]: {}\n", injection));
         }
     }
 
