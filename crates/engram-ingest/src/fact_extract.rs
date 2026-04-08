@@ -109,11 +109,11 @@ pub fn extract_claims(
 ) -> Vec<ExtractedClaim> {
     let entity_list = entity_names.join(", ");
 
-    // Detect if chunk contains pipe tables (lines starting with |)
+    // Detect if chunk contains pipe tables (lines starting with |) or [Table N] markers
     let has_table = chunk.lines().filter(|l| {
         let t = l.trim();
         t.starts_with('|') && t.ends_with('|') && t.matches('|').count() >= 3
-    }).count() >= 2;
+    }).count() >= 2 || chunk.contains("[Table ");
 
     let table_instruction = if has_table {
         "\n- This text contains TABULAR DATA with column headers. \

@@ -1485,9 +1485,8 @@ pub(crate) fn extract_html_tables(html: &str, max_tables: usize) -> Option<Strin
         search_from = table_end;
 
         let table_html = &html[table_start..table_end];
-        // Only extract tables that look like they have data (numbers)
-        let has_numbers = table_html.chars().filter(|c| c.is_ascii_digit()).count() > 5;
-        if !has_numbers { continue; }
+        // Skip tiny tables (likely navigation/layout, not data)
+        if table_html.len() < 50 { continue; }
 
         // Simple extraction: strip tags, preserve rows
         let mut rows: Vec<Vec<String>> = Vec::new();
@@ -1530,9 +1529,18 @@ pub(crate) fn extract_html_tables(html: &str, max_tables: usize) -> Option<Strin
         if rows.len() >= 2 {
             tables_found += 1;
             result.push_str(&format!("\n[Table {}]\n", tables_found));
-            for row in &rows {
+            for (ri, row) in rows.iter().enumerate() {
+                result.push_str("| ");
                 result.push_str(&row.join(" | "));
-                result.push('\n');
+                result.push_str(" |\n");
+                // Add markdown header separator after first row
+                if ri == 0 {
+                    result.push_str("|");
+                    for _ in row {
+                        result.push_str(" --- |");
+                    }
+                    result.push('\n');
+                }
             }
         }
     }
