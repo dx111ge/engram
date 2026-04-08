@@ -722,6 +722,37 @@ pub struct ReprocessResponse {
     pub message: String,
 }
 
+/// POST /ingest/reprocess-doc/{label} -- run full NER/RE on a single Document node.
+/// Returns immediately. Processing runs in background with SSE progress events.
+#[cfg(feature = "ingest")]
+pub async fn reprocess_single_doc(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+) -> ApiResult<ReprocessResponse> {
+    let label = urlencoding::decode(&label).unwrap_or(std::borrow::Cow::Borrowed(&label)).to_string();
+
+    let doc = {
+        let g = state.graph.read().map_err(|_| read_lock_err())?;
+        let nt = g.get_node_type(&label).unwrap_or_default();
+        if nt != "Document" {
+            return Err(api_err(StatusCode::NOT_FOUND, format!("{label} is not a Document node")));
+        }
+        let props = g.get_properties(&label).unwrap_or_default().unwrap_or_default();
+        (label.clone(), props)
+    };
+
+    let bg_state = state.clone();
+    tokio::spawn(async move {
+        reprocess_docs_background(bg_state, vec![doc]).await;
+    });
+
+    Ok(Json(ReprocessResponse {
+        documents_found: 1,
+        status: "started".into(),
+        message: format!("processing {label} in background"),
+    }))
+}
+
 /// POST /ingest/reprocess-docs -- run full NER/RE on existing Document nodes.
 /// Returns immediately. Processing runs in background with SSE progress events.
 /// Subscribe to `/events/stream?topics=ingest_progress` for updates.
@@ -1222,24 +1253,28 @@ pub async fn list_relation_types(
     drop(cfg);
 
     // Default type templates
-    let defaults = engram_ingest::rel_type_templates::default_type_templates();
-    for rels in defaults.values() {
-        for r in rels {
-            if !types.contains(r) {
-                types.push(r.clone());
+    #[cfg(feature = "ingest")]
+    {
+        let defaults = engram_ingest::rel_type_templates::default_type_templates();
+        for rels in defaults.values() {
+            for r in rels {
+                if !types.contains(r) {
+                    types.push(r.clone());
+                }
             }
         }
     }
 
     // Learned from graph's relation gazetteer
+    #[cfg(feature = "ingest")]
     if let Some(ref config_path) = state.config_path {
         let brain_path = config_path.with_extension("");
         let relgaz_path = brain_path.with_extension("relgaz");
         if relgaz_path.exists() {
             if let Ok(gaz) = engram_ingest::RelationGazetteer::load(&brain_path) {
                 for rt in gaz.known_relation_types() {
-                    if !types.contains(rt) {
-                        types.push(rt.clone());
+                    if !types.contains(&rt.to_string()) {
+                        types.push(rt.to_string());
                     }
                 }
             }

@@ -7,27 +7,43 @@ use crate::state::AppState;
 use super::types::*;
 use super::llm::{call_llm, extract_content, parse_json_from_llm, short_output_budget, medium_output_budget};
 
+/// Safely truncate a string at a char boundary, avoiding panics on multi-byte UTF-8.
+pub(crate) fn safe_truncate(s: &str, max_chars: usize) -> &str {
+    s.char_indices().nth(max_chars).map(|(i, _)| &s[..i]).unwrap_or(s)
+}
+
 // ── Starter Plate ───────────────────────────────────────────────────────
 
 /// Build the starter plate briefing: decompose topic, gather facts, ingest, assemble.
-pub async fn build_starter_plate(state: &AppState, topic: &str) -> Briefing {
+pub async fn build_starter_plate(state: &AppState, topic: &str, tx: &tokio::sync::broadcast::Sender<String>) -> Briefing {
     let questions = decompose_topic(state, topic).await;
     let mut all_facts = Vec::new();
     let mut total_stored = 0u32;
     let mut total_relations = 0u32;
 
+    let q_total = questions.len() + 1; // +1 for exact topic search
+
     // Search the exact topic first (highest priority)
+    let _ = tx.send(format!("event: briefing_progress\ndata: {}\n\n",
+        serde_json::json!({"question": topic, "index": 1, "total": q_total, "phase": "searching"})));
     let exact_facts = gather_facts_for_question(state, topic, topic).await;
+    let _ = tx.send(format!("event: briefing_progress\ndata: {}\n\n",
+        serde_json::json!({"question": topic, "index": 1, "total": q_total, "facts_found": exact_facts.len()})));
     all_facts.extend(exact_facts);
 
     // Search each decomposed question (dedup by content to avoid 4x repeats)
-    for question in &questions {
+    for (qi, question) in questions.iter().enumerate() {
+        let _ = tx.send(format!("event: briefing_progress\ndata: {}\n\n",
+            serde_json::json!({"question": question, "index": qi + 2, "total": q_total, "phase": "searching"})));
         let facts = gather_facts_for_question(state, question, topic).await;
+        let new_count = facts.len();
         for fact in facts {
             if !all_facts.iter().any(|f| f.content == fact.content) {
                 all_facts.push(fact);
             }
         }
+        let _ = tx.send(format!("event: briefing_progress\ndata: {}\n\n",
+            serde_json::json!({"question": question, "index": qi + 2, "total": q_total, "facts_found": new_count})));
     }
 
     // Ingest relevant web findings via full pipeline
@@ -300,7 +316,7 @@ Return ONLY a JSON array: ["query 1", "query 2"]"#,
             let content = extract_content(&response);
             let content_str = content.unwrap_or_default();
             if content_str.is_empty() {
-                eprintln!("[debate] detect_gaps: empty LLM content, raw response: {}", &response.to_string()[..response.to_string().len().min(500)]);
+                eprintln!("[debate] detect_gaps: empty LLM content, raw response: {}", safe_truncate(&response.to_string(), 500));
                 return Vec::new();
             }
             match parse_json_from_llm(&content_str) {
@@ -317,7 +333,7 @@ Return ONLY a JSON array: ["query 1", "query 2"]"#,
                     eprintln!("[debate] detect_gaps: parsed JSON is not an array: {}", parsed);
                 }
                 Err(e) => {
-                    eprintln!("[debate] detect_gaps: JSON parse failed: {} | raw: {}", e, &content_str[..content_str.len().min(300)]);
+                    eprintln!("[debate] detect_gaps: JSON parse failed: {} | raw: {}", e, safe_truncate(&content_str, 300));
                 }
             }
             Vec::new()
@@ -331,28 +347,44 @@ Return ONLY a JSON array: ["query 1", "query 2"]"#,
 
 /// Close gaps sequentially (Ollama serializes concurrent LLM calls anyway).
 /// Each gap tries URLs one by one, collects 2 answers, cross-validates, then ingests.
-pub async fn close_gaps(state: &AppState, gaps: &[String], topic: &str, topic_languages: &[String]) -> Vec<GapResearch> {
+pub async fn close_gaps(state: &AppState, gaps: &[String], topic: &str, topic_languages: &[String], tx: &tokio::sync::broadcast::Sender<String>) -> Vec<GapResearch> {
     let mut results = Vec::new();
     for (i, gap_query) in gaps.iter().enumerate() {
-        eprintln!("[debate] gap {}/{}: \"{}\"", i + 1, gaps.len(), &gap_query[..gap_query.len().min(60)]);
-        let result = close_single_gap(state, gap_query, topic, topic_languages).await;
+        eprintln!("[debate] gap {}/{}: \"{}\"", i + 1, gaps.len(), safe_truncate(gap_query, 60));
+        let result = close_single_gap(state, gap_query, topic, topic_languages, tx).await;
         results.push(result);
     }
     results
 }
 
 /// Close a single gap with a timeout safety net.
-pub async fn close_single_gap_with_timeout(state: &AppState, query: &str, topic: &str, timeout_secs: u64, topic_languages: &[String]) -> GapResearch {
-    match tokio::time::timeout(
+pub async fn close_single_gap_with_timeout(state: &AppState, query: &str, topic: &str, timeout_secs: u64, topic_languages: &[String], tx: &tokio::sync::broadcast::Sender<String>) -> GapResearch {
+    let _ = tx.send(format!("event: gap_progress\ndata: {}\n\n",
+        serde_json::json!({"gap": safe_truncate(query, 80), "status": "searching"})));
+
+    let result = match tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
-        close_single_gap(state, query, topic, topic_languages),
+        close_single_gap(state, query, topic, topic_languages, tx),
     ).await {
         Ok(result) => result,
         Err(_) => {
-            eprintln!("[debate] gap TIMED OUT ({}s): \"{}\"", timeout_secs, &query[..query.len().min(60)]);
+            eprintln!("[debate] gap TIMED OUT ({}s): \"{}\"", timeout_secs, safe_truncate(query, 60));
+            let _ = tx.send(format!("event: gap_progress\ndata: {}\n\n",
+                serde_json::json!({"gap": safe_truncate(query, 80), "status": "timeout"})));
             empty_gap(query)
         }
-    }
+    };
+
+    let _ = tx.send(format!("event: gap_progress\ndata: {}\n\n",
+        serde_json::json!({
+            "gap": safe_truncate(query, 80),
+            "status": if result.ingested { "ingested" } else { "complete" },
+            "source": result.source,
+            "facts_stored": result.facts_stored,
+            "findings": result.findings.len(),
+        })));
+
+    result
 }
 
 /// An answer extracted from a single article.
@@ -370,7 +402,7 @@ struct GapAnswer {
 /// 5. Collect 2 answers from different sources
 /// 6. Cross-validate/combine the 2 answers via LLM
 /// 7. Ingest the validated answer
-async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, topic_languages: &[String]) -> GapResearch {
+async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, topic_languages: &[String], tx: &tokio::sync::broadcast::Sender<String>) -> GapResearch {
     let mut all_findings = Vec::new();
     let mut facts_stored = 0u32;
     let mut relations_created = 0u32;
@@ -382,6 +414,8 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
     dbg_debate!("[gap] ===== START gap: \"{}\" =====", original_query);
 
     // 1. Check graph first (spawn_blocking to never block async runtime)
+    let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
+        serde_json::json!({"message": format!("Searching engram graph: {}", safe_truncate(original_query, 60))})));
     {
         let graph = state.graph.clone();
         let q = original_query.to_string();
@@ -402,6 +436,10 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
             }),
         ).await;
         if let Ok(Ok(findings)) = graph_findings {
+            if !findings.is_empty() {
+                let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
+                    serde_json::json!({"message": format!("Graph: {} existing facts found", findings.len())})));
+            }
             for f in findings {
                 if !all_findings.contains(&f) {
                     all_findings.push(f);
@@ -413,8 +451,12 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
     let mut answers: Vec<GapAnswer> = Vec::new();
 
     // 2. SPARQL knowledge bases (most precise for entity facts)
+    let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
+        serde_json::json!({"message": "Querying SPARQL knowledge bases..."})));
     if let Some(sparql_answer) = query_sparql_endpoints(state, original_query).await {
-        all_findings.push(format!("[sparql] {}: {}", sparql_answer.source_title, &sparql_answer.text[..sparql_answer.text.len().min(100)]));
+        all_findings.push(format!("[sparql] {}: {}", sparql_answer.source_title, safe_truncate(&sparql_answer.text, 100)));
+        let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
+            serde_json::json!({"message": format!("SPARQL: found answer from {}", sparql_answer.source_title)})));
         eprintln!("[debate] gap: sparql answer from \"{}\" ({} chars) in {:.1}s",
             sparql_answer.source_title, sparql_answer.text.len(), t0.elapsed().as_secs_f32());
         answers.push(sparql_answer);
@@ -428,8 +470,12 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
     // 3. Wikipedia API (free, fast, trusted, no rate limits)
     //    Use the shortened query — long gap questions return irrelevant Wikipedia articles
     if answers.len() < 2 {
+        let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
+            serde_json::json!({"message": format!("Searching Wikipedia: {}", safe_truncate(&short_query, 50))})));
         if let Some(wiki_answer) = search_wikipedia(state, &short_query).await {
-            all_findings.push(format!("[wikipedia] {}: {}", wiki_answer.source_title, &wiki_answer.text[..wiki_answer.text.len().min(100)]));
+            all_findings.push(format!("[wikipedia] {}: {}", wiki_answer.source_title, safe_truncate(&wiki_answer.text, 100)));
+            let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
+                serde_json::json!({"message": format!("Wikipedia: {}", wiki_answer.source_title)})));
             eprintln!("[debate] gap: wikipedia answer from \"{}\" ({} chars) in {:.1}s",
                 wiki_answer.source_title, wiki_answer.text.len(), t0.elapsed().as_secs_f32());
             answers.push(wiki_answer);
@@ -439,13 +485,19 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
     }
 
     // 4. Web search for second source (or first if Wikipedia had nothing)
+    let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
+        serde_json::json!({"message": format!("Web search: {}", safe_truncate(&short_query, 50))})));
     let mut web_results = execute_web_search_structured(state, &short_query).await;
     eprintln!("[debate] gap: web_results={} (en) in {:.1}s", web_results.len(), t0.elapsed().as_secs_f32());
+    if !web_results.is_empty() {
+        let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
+            serde_json::json!({"message": format!("Web: {} results, fetching articles...", web_results.len())})));
+    }
 
     // If English search returned nothing, try non-English topic languages
     if web_results.is_empty() {
         for lang in topic_languages.iter().filter(|l| l.as_str() != "en") {
-            dbg_debate!("[gap] retrying search in language '{}' for: {}", lang, &short_query[..short_query.len().min(50)]);
+            dbg_debate!("[gap] retrying search in language '{}' for: {}", lang, safe_truncate(&short_query, 50));
             match crate::handlers::web_search::search_with_language(state, &short_query, lang).await {
                 Ok(results) if !results.is_empty() => {
                     eprintln!("[debate] gap: web_results={} ({}) in {:.1}s", results.len(), lang, t0.elapsed().as_secs_f32());
@@ -476,30 +528,48 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
         urls_tried += 1;
 
         // Fetch article
-        let content = match fetch_article_content(&state.http_client, &result.url, &blocked).await {
-            Some(c) => c,
+        let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
+            serde_json::json!({"message": format!("Fetching: {}", safe_truncate(&result.title, 50))})));
+        let fetched = match fetch_article_content(&state.http_client, &result.url, &blocked).await {
+            Some(f) => f,
             None => continue,
         };
         urls_fetched += 1;
 
-        // Async store fetched content to doc_store (non-blocking, fire-and-forget)
+        // Compute content hash (same algorithm as pipeline: SHA-256 of extracted text)
+        let content_hash = engram_core::storage::doc_store::DocStore::hash_content(fetched.text.as_bytes());
+        let content_hash_hex = engram_core::storage::doc_store::DocStore::hash_hex(&content_hash);
+        let mime = engram_core::storage::doc_store::MimeType::from_mime_str(&fetched.mime_type);
+
+        // Store to doc_store with correct mime type (fire-and-forget)
         {
             let doc_store = state.doc_store.clone();
-            let content_bytes = content.as_bytes().to_vec();
+            let content_bytes = fetched.text.as_bytes().to_vec();
             tokio::spawn(async move {
                 if let Ok(mut store) = doc_store.write() {
-                    let _ = store.store(&content_bytes, engram_core::storage::doc_store::MimeType::Text);
+                    let _ = store.store(&content_bytes, mime);
                 }
             });
         }
 
-        let truncated = if content.len() > 4000 { &content[..4000] } else { &content };
+        // Create pending Document node with full metadata (ner_complete: false)
+        create_pending_document_node(
+            &state.graph,
+            &content_hash_hex,
+            Some(&result.url),
+            Some(&result.title),
+            &fetched.mime_type,
+            fetched.text.len(),
+        );
+
+        let content = fetched.text;
+        let truncated = safe_truncate(&content, 4000);
 
         // LLM reading comprehension on this single article
         let answer = answer_gap_from_article(state, original_query, &result.url, &result.title, truncated).await;
         if let Some(a) = answer {
             eprintln!("[debate] gap: answer {}/2 from \"{}\" ({} chars)",
-                answers.len() + 1, &result.title[..result.title.len().min(40)], a.text.len());
+                answers.len() + 1, safe_truncate(&result.title, 40), a.text.len());
             answers.push(a);
         }
     }
@@ -524,14 +594,14 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
         answers.remove(0).text
     };
 
-    all_findings.push(format!("[answer] {}", &final_answer[..final_answer.len().min(200)]));
+    all_findings.push(format!("[answer] {}", safe_truncate(&final_answer, 200)));
 
     // 5. Ingest the validated answer
     let source_label = if answers.is_empty() {
         "web".to_string()
     } else {
         // Already removed first for single-answer case; use the stored findings
-        format!("gap: {}", &original_query[..original_query.len().min(60)])
+        format!("gap: {}", safe_truncate(original_query, 60))
     };
     let (fs, rc) = run_ingest(state, &source_label, &final_answer).await;
     facts_stored += fs;
@@ -546,12 +616,12 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
         // NER produced nothing -- store directly as fact node
         let prov = engram_core::graph::Provenance::user(&source_label);
         if let Ok(mut g) = state.graph.try_write() {
-            let label = if final_answer.len() > 250 { &final_answer[..250] } else { &final_answer };
+            let label = safe_truncate(&final_answer, 250);
             if g.store_with_confidence(label, 0.55, &prov).is_ok() {
                 state.dirty.store(true, std::sync::atomic::Ordering::Release);
                 facts_stored += 1;
                 ingested = true;
-                entities_stored.push(format!("direct: {}", &final_answer[..final_answer.len().min(80)]));
+                entities_stored.push(format!("direct: {}", safe_truncate(&final_answer, 80)));
                 eprintln!("[debate] gap: stored as direct node in {:.1}s", t0.elapsed().as_secs_f32());
             }
         }
@@ -595,7 +665,7 @@ async fn query_sparql_endpoints(state: &AppState, gap_query: &str) -> Option<Gap
             Some(q) if !q.is_empty() => q,
             _ => continue,
         };
-        eprintln!("[sparql] generated query for {}:\n{}", ep.name, &sparql[..sparql.len().min(500)]);
+        eprintln!("[sparql] generated query for {}:\n{}", ep.name, safe_truncate(&sparql, 500));
 
         // Step 2: Execute SPARQL
         dbg_debate!("[sparql] >> querying {} url={}", ep.name, ep.url);
@@ -652,7 +722,7 @@ async fn query_sparql_endpoints(state: &AppState, gap_query: &str) -> Option<Gap
         let data: serde_json::Value = match serde_json::from_str(&resp_text) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("[sparql] {} JSON parse failed: {} | body: {}", ep.name, e, &resp_text[..resp_text.len().min(300)]);
+                eprintln!("[sparql] {} JSON parse failed: {} | body: {}", ep.name, e, safe_truncate(&resp_text, 300));
                 continue;
             }
         };
@@ -886,7 +956,7 @@ async fn search_wikipedia(state: &AppState, gap_query: &str) -> Option<GapAnswer
     dbg_debate!("[wikipedia] << article \"{}\" {} chars in {:.1}s", title, extract.len(), t0.elapsed().as_secs_f32());
 
     // Truncate to reasonable size for LLM
-    let content = if extract.len() > 4000 { &extract[..4000] } else { extract };
+    let content = safe_truncate(extract, 4000);
     let wiki_url = format!("https://en.wikipedia.org/wiki/{}", urlencoding::encode(title));
 
     // Step 3: LLM reading comprehension on the Wikipedia article
@@ -931,7 +1001,7 @@ Return ONLY this JSON (no other text, no code fences):
 {{"found": true, "answer": "2-4 sentences summarizing ALL data and statistics in this article, noting the country/context. Include all numbers, percentages, dates, and comparisons."}}
 or
 {{"found": false}}"#,
-        gap_query, title, &content[..content.len().min(4000)]
+        gap_query, title, safe_truncate(content, 4000)
     );
 
     let request = serde_json::json!({
@@ -945,18 +1015,18 @@ or
     });
 
     let t0 = std::time::Instant::now();
-    dbg_debate!("[gap] >> LLM reading article \"{}\" ({} chars)", &title[..title.len().min(40)], content.len());
+    dbg_debate!("[gap] >> LLM reading article \"{}\" ({} chars)", safe_truncate(title, 40), content.len());
     let response = match call_llm(state, request).await {
         Ok(r) => r,
         Err(e) => {
-            dbg_debate!("[gap] << LLM error for \"{}\" in {:.1}s: {}", &title[..title.len().min(40)], t0.elapsed().as_secs_f32(), e);
+            dbg_debate!("[gap] << LLM error for \"{}\" in {:.1}s: {}", safe_truncate(title, 40), t0.elapsed().as_secs_f32(), e);
             return None;
         }
     };
     let raw_content = match extract_content(&response) {
         Some(c) => c,
         None => {
-            dbg_debate!("[gap] << empty LLM response for \"{}\" in {:.1}s", &title[..title.len().min(40)], t0.elapsed().as_secs_f32());
+            dbg_debate!("[gap] << empty LLM response for \"{}\" in {:.1}s", safe_truncate(title, 40), t0.elapsed().as_secs_f32());
             return None;
         }
     };
@@ -964,7 +1034,7 @@ or
     let json = match parse_json_from_llm(&raw_content) {
         Ok(j) => j,
         Err(e) => {
-            dbg_debate!("[gap] << JSON parse failed for \"{}\" in {:.1}s: {} | raw({} chars): {}", &title[..title.len().min(40)], t0.elapsed().as_secs_f32(), e, raw_content.len(), &raw_content[..raw_content.len().min(500)]);
+            dbg_debate!("[gap] << JSON parse failed for \"{}\" in {:.1}s: {} | raw({} chars): {}", safe_truncate(title, 40), t0.elapsed().as_secs_f32(), e, raw_content.len(), safe_truncate(&raw_content, 500));
             // Try to salvage truncated JSON: if it starts with {"found": true, "answer": "...
             // extract the partial answer text
             if raw_content.contains("\"found\": true") || raw_content.contains("\"found\":true") {
@@ -976,7 +1046,7 @@ or
                         // Take everything after the opening quote, trim trailing junk
                         let partial = raw_content[val_start..].trim_end_matches(|c: char| c == '"' || c == '}' || c.is_whitespace());
                         if partial.len() >= 40 {
-                            dbg_debate!("[gap] << salvaged truncated answer ({} chars) for \"{}\"", partial.len(), &title[..title.len().min(40)]);
+                            dbg_debate!("[gap] << salvaged truncated answer ({} chars) for \"{}\"", partial.len(), safe_truncate(title, 40));
                             return Some(GapAnswer {
                                 text: partial.to_string(),
                                 source_title: title.to_string(),
@@ -991,7 +1061,7 @@ or
     };
 
     let found = json.get("found").and_then(|f| f.as_bool()).unwrap_or(false);
-    dbg_debate!("[gap] << LLM result: found={} in {:.1}s for \"{}\"", found, t0.elapsed().as_secs_f32(), &title[..title.len().min(40)]);
+    dbg_debate!("[gap] << LLM result: found={} in {:.1}s for \"{}\"", found, t0.elapsed().as_secs_f32(), safe_truncate(title, 40));
 
     if !found {
         return None;
@@ -1073,6 +1143,7 @@ pub async fn moderate_round(
     round: &DebateRound,
     agents: &[DebateAgent],
     topic: &str,
+    tx: &tokio::sync::broadcast::Sender<String>,
 ) -> Vec<ModeratorCheck> {
     let mut claims_summary = String::new();
     for turn in &round.turns {
@@ -1107,7 +1178,7 @@ Return ONLY a JSON array:
             let content = extract_content(&response);
             let content_str = content.unwrap_or_default();
             if content_str.is_empty() {
-                eprintln!("[debate] moderate_round: empty LLM content, raw response: {}", &response.to_string()[..response.to_string().len().min(500)]);
+                eprintln!("[debate] moderate_round: empty LLM content, raw response: {}", safe_truncate(&response.to_string(), 500));
                 Vec::new()
             } else {
                 match parse_json_from_llm(&content_str) {
@@ -1126,7 +1197,7 @@ Return ONLY a JSON array:
                         }
                     }
                     Err(e) => {
-                        eprintln!("[debate] moderate_round: JSON parse failed: {} | raw: {}", e, &content_str[..content_str.len().min(300)]);
+                        eprintln!("[debate] moderate_round: JSON parse failed: {} | raw: {}", e, safe_truncate(&content_str, 300));
                         Vec::new()
                     }
                 }
@@ -1181,10 +1252,23 @@ Return ONLY a JSON array:
         }),
     ).await;
 
-    match checks_result {
+    let checks = match checks_result {
         Ok(Ok(checks)) => checks,
         _ => Vec::new(),
+    };
+
+    // Emit moderator check events for each claim
+    for check in &checks {
+        let _ = tx.send(format!("event: moderator_check\ndata: {}\n\n",
+            serde_json::json!({
+                "agent_id": check.agent_id,
+                "claim": safe_truncate(&check.claim, 120),
+                "verdict": format!("{:?}", check.verdict),
+                "confidence": check.engram_confidence,
+            })));
     }
+
+    checks
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────
@@ -1208,7 +1292,7 @@ pub async fn shorten_for_search(state: &AppState, question: &str) -> String {
         Ok(resp) => {
             let content = extract_content(&resp).unwrap_or_default().trim().trim_matches('"').to_string();
             if content.len() > 5 {
-                dbg_debate!("[search] shortened \"{}\" -> \"{}\"", &question[..question.len().min(60)], content);
+                dbg_debate!("[search] shortened \"{}\" -> \"{}\"", safe_truncate(question, 60), content);
                 content
             } else {
                 question.to_string()
@@ -1260,7 +1344,7 @@ pub async fn fetch_article_content_debug(url: &str) -> Option<String> {
         .redirect(reqwest::redirect::Policy::limited(5))
         .build().ok()?;
     let defaults: Vec<String> = DEFAULT_BLOCKED_DOMAINS.iter().map(|s| s.to_string()).collect();
-    fetch_article_content(&client, url, &defaults).await
+    fetch_article_content(&client, url, &defaults).await.map(|f| f.text)
 }
 
 /// Default domains that always block scrapers -- skip to save time.
@@ -1373,7 +1457,7 @@ fn find_data_download_link(html: &str, base_url: &str) -> Option<String> {
         };
 
         let ext_name = matched_ext.map(|e| &e[1..]).unwrap_or("data");
-        dbg_debate!("[fetch] found data link: {} ({})", &full_url[..full_url.len().min(100)], ext_name);
+        dbg_debate!("[fetch] found data link: {} ({})", safe_truncate(&full_url, 100), ext_name);
         return Some(full_url);
     }
     None
@@ -1460,11 +1544,17 @@ fn extract_html_tables(html: &str, max_tables: usize) -> Option<String> {
     }
 }
 
+/// Fetched article with extracted text and original mime type.
+struct FetchedArticle {
+    text: String,
+    mime_type: String,
+}
+
 /// Fetch article content from a URL using dom_smoothie (Mozilla Readability).
 /// For large pages: extracts tables and scans for data download links first.
-/// Returns extracted plain text, or None on failure.
-async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_domains: &[String]) -> Option<String> {
-    let url_short = &url[..url.len().min(80)];
+/// Returns extracted text + detected mime type, or None on failure.
+async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_domains: &[String]) -> Option<FetchedArticle> {
+    let url_short = safe_truncate(url, 80);
     let t0 = std::time::Instant::now();
 
     // Skip known-blocked domains (user config or defaults)
@@ -1497,16 +1587,21 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_doma
     dbg_debate!("[fetch] HTTP {} in {:.1}s | {}", resp.status(), t0.elapsed().as_secs_f32(), url_short);
     if !resp.status().is_success() { return None; }
 
+    // Detect content type from headers
+    let detected_mime = resp.headers().get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("text/html")
+        .split(';').next().unwrap_or("text/html")
+        .trim().to_lowercase();
+
     // PDF extraction: extract text and find relevant paragraphs
-    let is_pdf = url.to_lowercase().ends_with(".pdf")
-        || resp.headers().get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(|ct| ct.contains("application/pdf"))
-            .unwrap_or(false);
+    let is_pdf = detected_mime.contains("application/pdf")
+        || url.to_lowercase().ends_with(".pdf");
     if is_pdf {
         #[cfg(feature = "pdf")]
         {
-            return extract_pdf_text(resp, url_short).await;
+            return extract_pdf_text(resp, url_short).await
+                .map(|text| FetchedArticle { text, mime_type: "application/pdf".into() });
         }
         #[cfg(not(feature = "pdf"))]
         {
@@ -1529,7 +1624,7 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_doma
     // These are more valuable than any HTML extraction
     let base_origin = url.split('/').take(3).collect::<Vec<_>>().join("/");
     if let Some(data_url) = find_data_download_link(&html, &base_origin) {
-        dbg_debate!("[fetch] >> fetching data link: {}", &data_url[..data_url.len().min(80)]);
+        dbg_debate!("[fetch] >> fetching data link: {}", safe_truncate(&data_url, 80));
         if let Ok(data_resp) = client.get(&data_url)
             .timeout(std::time::Duration::from_secs(10))
             .header("User-Agent", "Mozilla/5.0 (compatible; engram/1.1)")
@@ -1537,9 +1632,9 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_doma
         {
             if data_resp.status().is_success() {
                 if let Ok(data_text) = data_resp.text().await {
-                    let capped = &data_text[..data_text.len().min(8000)];
-                    dbg_debate!("[fetch] << data link OK {} chars | {}", capped.len(), &data_url[..data_url.len().min(60)]);
-                    return Some(capped.to_string());
+                    let capped = safe_truncate(&data_text, 8000);
+                    dbg_debate!("[fetch] << data link OK {} chars | {}", capped.len(), safe_truncate(&data_url, 60));
+                    return Some(FetchedArticle { text: capped.to_string(), mime_type: detected_mime.clone() });
                 }
             }
         }
@@ -1553,15 +1648,15 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_doma
         dbg_debate!("[fetch] large page ({} bytes), trying table extraction | {}", html.len(), url_short);
 
         // Extract HTML tables — run in spawn_blocking with timeout
-        let html_for_tables = html[..html.len().min(2_000_000)].to_string();
+        let html_for_tables = safe_truncate(&html, 2_000_000).to_string();
         let table_result = tokio::time::timeout(PARSE_TIMEOUT, tokio::task::spawn_blocking(move || {
             extract_html_tables(&html_for_tables, 5)
         })).await;
         if let Ok(Ok(Some(tables))) = table_result {
             if tables.len() > 200 {
-                let capped = &tables[..tables.len().min(6000)];
+                let capped = safe_truncate(&tables, 6000);
                 dbg_debate!("[fetch] << DONE {:.1}s result=TABLES ({} chars) | {}", t0.elapsed().as_secs_f32(), capped.len(), url_short);
-                return Some(capped.to_string());
+                return Some(FetchedArticle { text: capped.to_string(), mime_type: detected_mime.clone() });
             }
         } else if table_result.is_err() {
             dbg_debate!("[fetch] table extraction TIMED OUT after {}s | {}", PARSE_TIMEOUT.as_secs(), url_short);
@@ -1569,7 +1664,7 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_doma
 
         // Last resort for large pages: take first 500KB through readability with timeout
         dbg_debate!("[fetch] large page: no tables/data links, trying readability on first 500KB | {}", url_short);
-        let html_capped = html[..500_000].to_string();
+        let html_capped = safe_truncate(&html, 500_000).to_string();
         let parse_result = tokio::time::timeout(PARSE_TIMEOUT, tokio::task::spawn_blocking(move || {
             let mut readability = dom_smoothie::Readability::new(html_capped, None, None).ok()?;
             let article = readability.parse().ok()?;
@@ -1581,7 +1676,7 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_doma
             Err(_) => { dbg_debate!("[fetch] readability TIMED OUT after {}s | {}", PARSE_TIMEOUT.as_secs(), url_short); None }
         };
         dbg_debate!("[fetch] << DONE {:.1}s result={} | {}", t0.elapsed().as_secs_f32(), if parse_result.is_some() { "OK" } else { "EMPTY" }, url_short);
-        return parse_result;
+        return parse_result.map(|text| FetchedArticle { text, mime_type: detected_mime.clone() });
     }
 
     // Normal path for pages < 500KB: readability extraction with timeout
@@ -1599,7 +1694,7 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_doma
     };
 
     dbg_debate!("[fetch] << DONE {:.1}s result={} | {}", t0.elapsed().as_secs_f32(), if parse_result.is_some() { "OK" } else { "EMPTY" }, url_short);
-    parse_result
+    parse_result.map(|text| FetchedArticle { text, mime_type: detected_mime })
 }
 
 /// Run the full ingest pipeline on content.
@@ -1628,7 +1723,10 @@ async fn run_ingest(state: &AppState, source_name: &str, content: &str) -> (u32,
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         tokio::task::spawn_blocking(move || {
-            let config = engram_ingest::PipelineConfig::default();
+            let config = engram_ingest::PipelineConfig {
+                create_documents: false,
+                ..Default::default()
+            };
             let mut pipeline = super::super::ingest::build_pipeline(
                 graph, config, kb_endpoints, ner_model, rel_model,
                 relation_templates, rel_threshold, coreference_enabled,
@@ -1678,4 +1776,53 @@ async fn run_ingest(state: &AppState, source_name: &str, content: &str) -> (u32,
 #[cfg(not(feature = "ingest"))]
 async fn run_ingest(_state: &AppState, _source: &str, _content: &str) -> (u32, u32) {
     (0, 0)
+}
+
+/// Create a pending Document node in the graph from fetched article content.
+/// Saves metadata (URL, title, mime, content_hash) with `ner_complete: false`.
+/// Uses `try_write` to avoid blocking the async runtime.
+fn create_pending_document_node(
+    graph: &std::sync::Arc<std::sync::RwLock<engram_core::graph::Graph>>,
+    content_hash_hex: &str,
+    url: Option<&str>,
+    title: Option<&str>,
+    mime_type: &str,
+    content_length: usize,
+) {
+    let short = if content_hash_hex.len() >= 8 { &content_hash_hex[..8] } else { content_hash_hex };
+    let doc_label = format!("Doc:{short}");
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let Ok(mut g) = graph.try_write() else {
+        eprintln!("[debate] WARN: could not acquire graph write lock for Document node {}", doc_label);
+        return;
+    };
+
+    // Skip if already exists (same content hash = same doc label)
+    if g.find_node_id(&doc_label).ok().flatten().is_some() {
+        return;
+    }
+
+    let prov = engram_core::graph::Provenance {
+        source_type: engram_core::graph::SourceType::Derived,
+        source_id: "debate-fetch".to_string(),
+    };
+    if g.store_with_confidence(&doc_label, 0.80, &prov).is_err() {
+        return;
+    }
+    let _ = g.set_node_type(&doc_label, "Document");
+    let _ = g.set_property(&doc_label, "content_hash", content_hash_hex);
+    let _ = g.set_property(&doc_label, "mime_type", mime_type);
+    let _ = g.set_property(&doc_label, "fetched_at", &now_ts.to_string());
+    let _ = g.set_property(&doc_label, "content_length", &content_length.to_string());
+    let _ = g.set_property(&doc_label, "ner_complete", "false");
+    if let Some(u) = url {
+        let _ = g.set_property(&doc_label, "url", u);
+    }
+    if let Some(t) = title {
+        let _ = g.set_property(&doc_label, "title", t);
+    }
 }

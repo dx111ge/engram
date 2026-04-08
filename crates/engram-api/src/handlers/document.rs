@@ -255,8 +255,13 @@ pub async fn document_passage(
 
     // Extract the requested chunk
     let content = if let Some(idx) = chunk_index {
-        let chunks = engram_ingest::fact_extract::chunk_text(&full_content, 3000);
-        chunks.into_iter().nth(idx).unwrap_or(full_content)
+        #[cfg(feature = "ingest")]
+        {
+            let chunks = engram_ingest::fact_extract::chunk_text(&full_content, 3000);
+            chunks.into_iter().nth(idx).unwrap_or(full_content)
+        }
+        #[cfg(not(feature = "ingest"))]
+        full_content
     } else {
         full_content
     };

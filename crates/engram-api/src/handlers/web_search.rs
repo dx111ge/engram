@@ -6,7 +6,7 @@
 /// Providers are tried in the user-defined order from `web_search_providers` config.
 /// Each provider cascades on error, timeout, or zero results.
 ///
-/// Supported providers: searxng, serper, google_cx, brave, duckduckgo
+/// Supported providers: searxng, serper, brave, duckduckgo
 
 use crate::state::{AppState, WebSearchProviderConfig};
 use std::sync::LazyLock;
@@ -80,7 +80,10 @@ async fn search_inner(state: &AppState, query: &str, time_range: &str, language:
                 search_searxng(client, query, provider.url.as_deref(), time_range, lang).await
             }
             "serper" => search_serper(client, query, &api_key, lang).await,
-            "google_cx" => search_google_cx(client, query, &api_key, provider.cx_id.as_deref().unwrap_or(""), lang).await,
+            "google_cx" => {
+                eprintln!("[web_search] google_cx is deprecated (discontinued Jan 2027), skipping");
+                Err("google_cx deprecated".into())
+            }
             "brave" => search_brave(client, query, &api_key).await,
             "duckduckgo" => search_duckduckgo(client, query).await,
             other => {
@@ -105,7 +108,7 @@ async fn search_inner(state: &AppState, query: &str, time_range: &str, language:
     }
 
     let msg = format!("all {} search providers exhausted, no results for \"{}\"",
-        providers.len(), &query[..query.len().min(60)]);
+        providers.len(), &query[..query.char_indices().nth(60).map(|(i,_)| i).unwrap_or(query.len())]);
     eprintln!("[web_search] {}", msg);
     Err(msg)
 }
@@ -207,7 +210,7 @@ async fn search_searxng(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("searxng HTTP {}: {}", status, &body[..body.len().min(200)]));
+        return Err(format!("searxng HTTP {}: {}", status, &body[..body.char_indices().nth(200).map(|(i,_)| i).unwrap_or(body.len())]));
     }
 
     let data: serde_json::Value = resp.json().await
@@ -240,7 +243,7 @@ async fn search_searxng(
         }
     }
 
-    eprintln!("[web_search] searxng: {} results for \"{}\"", results.len(), &query[..query.len().min(60)]);
+    eprintln!("[web_search] searxng: {} results for \"{}\"", results.len(), &query[..query.char_indices().nth(60).map(|(i,_)| i).unwrap_or(query.len())]);
     Ok(results)
 }
 
@@ -267,7 +270,7 @@ async fn search_serper(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("serper HTTP {}: {}", status, &body[..body.len().min(200)]));
+        return Err(format!("serper HTTP {}: {}", status, &body[..body.char_indices().nth(200).map(|(i,_)| i).unwrap_or(body.len())]));
     }
 
     let data: serde_json::Value = resp.json().await
@@ -285,60 +288,7 @@ async fn search_serper(
         }
     }
 
-    eprintln!("[web_search] serper: {} results for \"{}\"", results.len(), &query[..query.len().min(60)]);
-    Ok(results)
-}
-
-async fn search_google_cx(
-    client: &reqwest::Client,
-    query: &str,
-    api_key: &str,
-    cx_id: &str,
-    language: &str,
-) -> Result<Vec<WebSearchResult>, String> {
-    if api_key.is_empty() {
-        return Err("google_cx: API key not configured (add to secrets store)".into());
-    }
-    if cx_id.is_empty() {
-        return Err("google_cx: cx_id not configured".into());
-    }
-
-    let url = format!(
-        "https://www.googleapis.com/customsearch/v1?key={}&cx={}&q={}&lr=lang_{}",
-        urlencoding::encode(api_key),
-        urlencoding::encode(cx_id),
-        urlencoding::encode(query),
-        language,
-    );
-
-    let resp = client.get(&url)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("google_cx request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("google_cx HTTP {}: {}", status, &body[..body.len().min(200)]));
-    }
-
-    let data: serde_json::Value = resp.json().await
-        .map_err(|e| format!("google_cx parse failed: {}", e))?;
-
-    let mut results = Vec::new();
-    if let Some(arr) = data.get("items").and_then(|r| r.as_array()) {
-        for r in arr.iter().take(10) {
-            let title = r.get("title").and_then(|t| t.as_str()).unwrap_or_default().to_string();
-            let snippet = r.get("snippet").and_then(|s| s.as_str()).unwrap_or_default().to_string();
-            let url = r.get("link").and_then(|u| u.as_str()).unwrap_or_default().to_string();
-            if !title.is_empty() {
-                results.push(WebSearchResult { url, title, snippet });
-            }
-        }
-    }
-
-    eprintln!("[web_search] google_cx: {} results for \"{}\"", results.len(), &query[..query.len().min(60)]);
+    eprintln!("[web_search] serper: {} results for \"{}\"", results.len(), &query[..query.char_indices().nth(60).map(|(i,_)| i).unwrap_or(query.len())]);
     Ok(results)
 }
 
@@ -367,7 +317,7 @@ async fn search_brave(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("brave HTTP {}: {}", status, &body[..body.len().min(200)]));
+        return Err(format!("brave HTTP {}: {}", status, &body[..body.char_indices().nth(200).map(|(i,_)| i).unwrap_or(body.len())]));
     }
 
     let data: serde_json::Value = resp.json().await
@@ -385,7 +335,7 @@ async fn search_brave(
         }
     }
 
-    eprintln!("[web_search] brave: {} results for \"{}\"", results.len(), &query[..query.len().min(60)]);
+    eprintln!("[web_search] brave: {} results for \"{}\"", results.len(), &query[..query.char_indices().nth(60).map(|(i,_)| i).unwrap_or(query.len())]);
     Ok(results)
 }
 
@@ -408,7 +358,7 @@ async fn search_duckduckgo(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("duckduckgo HTTP {}: {}", status, &body[..body.len().min(200)]));
+        return Err(format!("duckduckgo HTTP {}: {}", status, &body[..body.char_indices().nth(200).map(|(i,_)| i).unwrap_or(body.len())]));
     }
 
     let data: serde_json::Value = resp.json().await
@@ -447,6 +397,6 @@ async fn search_duckduckgo(
         }
     }
 
-    eprintln!("[web_search] duckduckgo: {} results for \"{}\"", results.len(), &query[..query.len().min(60)]);
+    eprintln!("[web_search] duckduckgo: {} results for \"{}\"", results.len(), &query[..query.char_indices().nth(60).map(|(i,_)| i).unwrap_or(query.len())]);
     Ok(results)
 }

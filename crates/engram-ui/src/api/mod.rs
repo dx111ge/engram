@@ -57,7 +57,9 @@ impl ApiClient {
         format!("{}{}", self.base_url, path)
     }
 
-    fn auth_token() -> Option<String> {
+    /// Get the current auth token from session storage.
+    /// Public so SSE endpoints can pass it as a query parameter.
+    pub fn auth_token() -> Option<String> {
         web_sys::window()
             .and_then(|w| w.session_storage().ok().flatten())
             .and_then(|s| s.get_item(AUTH_STORAGE_KEY).ok().flatten())

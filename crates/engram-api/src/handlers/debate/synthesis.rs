@@ -170,6 +170,33 @@ pub fn build_conclusion_prompt(session: &DebateSession, selection: Option<&Selec
 
     let mode_additions = super::modes::synthesis_additions(&session.mode, session.mode_input.as_deref());
 
+    let mode_conclusion_guidance = match session.mode {
+        DebateMode::ScenarioForecast => r#"
+This was a SCENARIO FORECAST debate where each agent built a distinct future scenario.
+Your conclusion must:
+- Compare and contrast ALL scenarios presented, not elevate one to "the answer"
+- Assign probability ranges to each scenario (must sum to ~100%)
+- Identify which branching conditions determine which scenario unfolds
+- Highlight where scenarios converge (consensus) vs diverge (genuine uncertainty)
+- State which early warning indicators to watch for each scenario"#,
+        DebateMode::RedTeam => r#"
+This was a RED TEAM exercise. Your conclusion must focus on:
+- Which strategies survived red team scrutiny and which were broken
+- The most critical vulnerabilities discovered
+- Concrete recommendations ranked by feasibility"#,
+        DebateMode::Premortem => r#"
+This was a PRE-MORTEM analysis. Your conclusion must:
+- Rank failure modes by probability * severity
+- Identify which failures are preventable vs must be mitigated
+- Provide specific preventive actions for the top failure modes"#,
+        DebateMode::DecisionMatrix => r#"
+This was a DECISION MATRIX evaluation. Your conclusion must:
+- Present the final ranked recommendation with scores
+- Explain why the top option won and what trade-offs it involves
+- State under what conditions the ranking would change"#,
+        _ => "",
+    };
+
     let system_prompt = format!(
         r#"You are a senior intelligence analyst writing the final assessment for a {rounds}-round debate.
 
@@ -177,12 +204,14 @@ Topic: "{topic}"
 {selection_note}
 {context}
 {mode_additions}
+{mode_conclusion_guidance}
 
 Write a comprehensive evidence-based conclusion that DIRECTLY ANSWERS the question/topic.
 - Commit to a probabilistic assessment with specific probability ranges
 - Ground your conclusion in the strongest arguments and evidence from the debate
 - Acknowledge key vulnerabilities and counterarguments
 - Be specific and actionable, not vague
+- Your confidence score must reflect genuine uncertainty -- speculative extrapolations should not exceed 0.70, only well-evidenced assessments with multiple corroborating sources warrant 0.80+
 
 Write 3-5 paragraphs of prose. No JSON, no markdown headers, just clear analytical writing.
 End with a single line: "CONFIDENCE: X.XX" (0.00-1.00) reflecting your overall assessment confidence.{lang_instruction}"#,

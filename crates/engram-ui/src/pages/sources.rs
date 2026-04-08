@@ -35,8 +35,10 @@ fn format_timestamp(ts: i64) -> String {
     format!("{:02}:{:02}", h, m)
 }
 
+/// Embeddable sources section (used in System page).
+/// Contains the full sources table + CRUD + test ingest + wizard modal.
 #[component]
-pub fn SourcesPage() -> impl IntoView {
+pub fn SourcesSection() -> impl IntoView {
     let api = use_context::<ApiClient>().expect("ApiClient context");
 
     let (sources, set_sources) = signal(Vec::<SourceInfo>::new());
@@ -112,13 +114,10 @@ pub fn SourcesPage() -> impl IntoView {
     });
 
     view! {
-        <div class="page-header">
-            <h2><i class="fa-solid fa-plug"></i>" Sources"</h2>
-            <div class="page-actions">
-                <button class="btn btn-primary" on:click=move |_| set_wizard_open.set(true)>
-                    <i class="fa-solid fa-plus"></i>" Add Source"
-                </button>
-            </div>
+        <div style="margin-bottom: 0.5rem; text-align: right;">
+            <button class="btn btn-primary btn-sm" on:click=move |_| set_wizard_open.set(true)>
+                <i class="fa-solid fa-plus"></i>" Add Source"
+            </button>
         </div>
 
         // Active sources table

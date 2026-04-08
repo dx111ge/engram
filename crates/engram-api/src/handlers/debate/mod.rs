@@ -114,6 +114,10 @@ pub async fn debate_start(
         search_queries: Vec::new(),
         topic_languages: vec!["en".to_string()],
         compressed_context: String::new(),
+        sse_tx: {
+            let (tx, _) = tokio::sync::broadcast::channel::<String>(512);
+            Some(Arc::new(tx))
+        },
     };
 
     // Store session
@@ -268,7 +272,10 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             Some(s) => s,
             None => return,
         };
-        let (tx, _) = tokio::sync::broadcast::channel::<String>(256);
+        // Use the session's broadcast channel so debate_stream subscribers get events
+        let tx = session.sse_tx.as_ref()
+            .map(|t| (**t).clone())
+            .unwrap_or_else(|| tokio::sync::broadcast::channel::<String>(512).0);
         (session.agents.clone(), session.max_rounds, session.current_round, session.topic.clone(),
          session.mode.clone(), session.mode_input.clone(), tx)
     };
@@ -289,8 +296,8 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                 serde_json::json!({"status": "Researching", "message": "Building factual briefing..."})));
 
             let t_briefing = std::time::Instant::now();
-            dbg_debate!("[debate] >> briefing START topic=\"{}\"", &topic[..topic.len().min(60)]);
-            let briefing = research::build_starter_plate(&state, &topic).await;
+            dbg_debate!("[debate] >> briefing START topic=\"{}\"", research::safe_truncate(&topic, 60));
+            let briefing = research::build_starter_plate(&state, &topic, &tx).await;
             dbg_debate!("[debate] << briefing DONE {} facts, {} stored, {:.1}s", briefing.facts.len(), briefing.facts_stored, t_briefing.elapsed().as_secs_f32());
             eprintln!("[debate] briefing took {:.1}s ({} facts, {} stored)", t_briefing.elapsed().as_secs_f32(), briefing.facts.len(), briefing.facts_stored);
 
@@ -469,6 +476,9 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             ).await {
                 Ok(turn) => {
                     dbg_debate!("[debate] << agent turn \"{}\" done conf={:.0}% evidence={} took={:.1}s", agent.name, turn.confidence * 100.0, turn.evidence.len(), t_agent.elapsed().as_secs_f32());
+                    let evidence_items: Vec<serde_json::Value> = turn.evidence.iter().map(|e| {
+                        serde_json::json!({"entity": e.entity, "confidence": e.confidence, "source_type": e.source})
+                    }).collect();
                     let _ = tx.send(format!("event: turn_complete\ndata: {}\n\n",
                         serde_json::json!({
                             "agent_id": agent.id,
@@ -476,6 +486,7 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                             "position": turn.position,
                             "confidence": turn.confidence,
                             "evidence_count": turn.evidence.len(),
+                            "evidence": evidence_items,
                             "agrees_with": turn.agrees_with,
                             "disagrees_with": turn.disagrees_with,
                         })));
@@ -516,7 +527,7 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             "Fact-checking claims...", None, 0, 0);
         let t_mod = std::time::Instant::now();
         dbg_debate!("[debate] >> moderator fact-check round={}", round_idx + 1);
-        let checks = research::moderate_round(&state, &round, &agents, &topic).await;
+        let checks = research::moderate_round(&state, &round, &agents, &topic, &tx).await;
         dbg_debate!("[debate] << moderator done {} checks {:.1}s", checks.len(), t_mod.elapsed().as_secs_f32());
         eprintln!("[debate] round {} moderator took {:.1}s ({} checks)", round_idx + 1, t_mod.elapsed().as_secs_f32(), checks.len());
         round.moderator_checks = checks;
@@ -548,11 +559,11 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                 let mut gap_results = Vec::new();
                 for (gi, gq) in gap_queries.iter().enumerate() {
                     set_progress(&state, &session_id, "gap_closing",
-                        &format!("Closing gap {}/{}: {}...", gi + 1, gap_queries.len(), &gq[..gq.len().min(50)]),
+                        &format!("Closing gap {}/{}: {}...", gi + 1, gap_queries.len(), research::safe_truncate(gq, 50)),
                         None, gi, gap_queries.len());
-                    dbg_debate!("[debate] >> gap {}/{} \"{}\"", gi + 1, gap_queries.len(), &gq[..gq.len().min(60)]);
+                    dbg_debate!("[debate] >> gap {}/{} \"{}\"", gi + 1, gap_queries.len(), research::safe_truncate(gq, 60));
                     let t_gap = std::time::Instant::now();
-                    let result = research::close_single_gap_with_timeout(&state, gq, &topic, 90, &gap_languages).await;
+                    let result = research::close_single_gap_with_timeout(&state, gq, &topic, 90, &gap_languages, &tx).await;
                     dbg_debate!("[debate] << gap {}/{} ingested={} facts={} {:.1}s", gi + 1, gap_queries.len(), result.ingested, result.facts_stored, t_gap.elapsed().as_secs_f32());
                     gap_results.push(result);
                 }
@@ -626,20 +637,20 @@ async fn run_debate_loop(state: AppState, session_id: String) {
                             let name = s.agents.iter().find(|a| a.id == turn.agent_id)
                                 .map(|a| a.name.as_str()).unwrap_or(&turn.agent_id);
                             // Only new claims and shifts, not full position text
-                            let position_excerpt = &turn.position[..turn.position.len().min(300)];
+                            let position_excerpt = research::safe_truncate(&turn.position, 300);
                             ctx.push_str(&format!("{} (conf {:.0}%): {}\n",
                                 name, turn.confidence * 100.0, position_excerpt));
                             if !turn.position_shift.is_empty() {
-                                ctx.push_str(&format!("  [shift: {}]\n", &turn.position_shift[..turn.position_shift.len().min(100)]));
+                                ctx.push_str(&format!("  [shift: {}]\n", research::safe_truncate(&turn.position_shift, 100)));
                             }
                         }
                         ctx.push('\n');
                         // Gap research findings
                         for gr in &latest_round.gap_research {
                             if gr.ingested {
-                                ctx.push_str(&format!("New data: {}\n", &gr.gap_query[..gr.gap_query.len().min(80)]));
+                                ctx.push_str(&format!("New data: {}\n", research::safe_truncate(&gr.gap_query, 80)));
                                 for f in gr.findings.iter().take(2) {
-                                    ctx.push_str(&format!("  - {}\n", &f[..f.len().min(120)]));
+                                    ctx.push_str(&format!("  - {}\n", research::safe_truncate(f, 120)));
                                 }
                             }
                         }
@@ -817,10 +828,20 @@ pub async fn debate_synthesize(
     let total_steps = if modes::uses_selection(&session_data.mode) { 6 } else { 5 };
     let mut step = 0;
 
+    // Get SSE broadcast channel for synthesis events
+    let synth_tx = state.debate_sessions.read().ok()
+        .and_then(|s| s.get(&session_id).and_then(|sess| sess.sse_tx.clone()));
+    let emit = |event: &str, data: serde_json::Value| {
+        if let Some(ref tx) = synth_tx {
+            let _ = tx.send(format!("event: {event}\ndata: {data}\n\n"));
+        }
+    };
+
     // ── Layer 0: Select-then-Refine (mode-gated) ──
     let selection = if modes::uses_selection(&session_data.mode) {
         step += 1;
         set_progress(&state, &session_id, "synthesizing", "Layer 0: Scoring agents and selecting strongest position...", None, step, total_steps);
+        emit("synthesis_step", serde_json::json!({"layer": "selection", "status": "started", "step": step, "total": total_steps}));
         eprintln!("[debate] synthesis: Layer 0 -- selecting strongest position...");
         let t0 = std::time::Instant::now();
         let sel_prompt = synthesis::build_selection_prompt(&session_data, llm::medium_output_budget(&state));
@@ -855,6 +876,7 @@ pub async fn debate_synthesize(
     // ── Pass 1: Evidence conclusion (think=ON, prose) ──
     step += 1;
     set_progress(&state, &session_id, "synthesizing", "Pass 1: Writing evidence-based conclusion (deep analysis)...", None, step, total_steps);
+    emit("synthesis_step", serde_json::json!({"layer": "conclusion", "status": "started", "step": step, "total": total_steps}));
     eprintln!("[debate] synthesis: Pass 1 -- generating evidence conclusion...");
     let t0 = std::time::Instant::now();
     let output_lang = state.config.read().ok().and_then(|c| c.output_language.clone());
@@ -872,6 +894,7 @@ pub async fn debate_synthesize(
     // 2a: Evidence gaps
     step += 1;
     set_progress(&state, &session_id, "synthesizing", "Pass 2a: Identifying evidence gaps and investigations...", None, step, total_steps);
+    emit("synthesis_step", serde_json::json!({"layer": "gaps", "status": "started", "step": step, "total": total_steps}));
     eprintln!("[debate] synthesis: Pass 2a -- gaps...");
     let t0 = std::time::Instant::now();
     let gaps_prompt = synthesis::build_gaps_prompt(&session_data, &evidence_conclusion, short_budget);
@@ -881,6 +904,7 @@ pub async fn debate_synthesize(
     // 2b: Influence map
     step += 1;
     set_progress(&state, &session_id, "synthesizing", "Pass 2b: Mapping agent influence and bias distortion...", None, step, total_steps);
+    emit("synthesis_step", serde_json::json!({"layer": "influence", "status": "started", "step": step, "total": total_steps}));
     eprintln!("[debate] synthesis: Pass 2b -- influence...");
     let t0 = std::time::Instant::now();
     let influence_prompt = synthesis::build_influence_prompt(&session_data, &evidence_conclusion, short_budget);
@@ -890,6 +914,7 @@ pub async fn debate_synthesize(
     // 2c: Consensus (agreements, disagreements, tensions)
     step += 1;
     set_progress(&state, &session_id, "synthesizing", "Pass 2c: Analyzing consensus, disagreements, and tensions...", None, step, total_steps);
+    emit("synthesis_step", serde_json::json!({"layer": "consensus", "status": "started", "step": step, "total": total_steps}));
     eprintln!("[debate] synthesis: Pass 2c -- consensus...");
     let t0 = std::time::Instant::now();
     let consensus_prompt = synthesis::build_consensus_prompt(&session_data, &evidence_conclusion, short_budget);
@@ -899,6 +924,7 @@ pub async fn debate_synthesize(
     // 2d: Evolution + final positions
     step += 1;
     set_progress(&state, &session_id, "synthesizing", "Pass 2d: Tracking agent evolution and final positions...", None, step, total_steps);
+    emit("synthesis_step", serde_json::json!({"layer": "evolution", "status": "started", "step": step, "total": total_steps}));
     eprintln!("[debate] synthesis: Pass 2d -- evolution...");
     let t0 = std::time::Instant::now();
     let evolution_prompt = synthesis::build_evolution_prompt(&session_data, &evidence_conclusion, short_budget);
@@ -991,37 +1017,53 @@ pub async fn debate_synthesize(
 }
 
 /// GET /debate/{id}/stream -- SSE event stream for debate progress.
-/// Uses polling (every 2s) to emit state changes, round completions, and synthesis.
+/// Subscribes to the session's broadcast channel for real-time push events.
+/// Falls back to polling for session state (rounds, synthesis) every 3s.
 pub async fn debate_stream(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
-    struct PollState {
+    // Get broadcast receiver from session
+    let rx = state.debate_sessions.read().ok()
+        .and_then(|s| s.get(&session_id).and_then(|sess| sess.sse_tx.as_ref().map(|tx| tx.subscribe())));
+
+    enum StreamSource {
+        Broadcast(tokio::sync::broadcast::Receiver<String>),
+        PollFallback,
+    }
+
+    struct StreamState {
         state: AppState,
         session_id: String,
+        source: StreamSource,
         last_round_count: usize,
         last_status: String,
-        last_progress: String,
         sent_initial: bool,
     }
 
-    let initial = PollState {
+    let initial = StreamState {
         state,
         session_id,
+        source: match rx {
+            Some(rx) => StreamSource::Broadcast(rx),
+            None => StreamSource::PollFallback,
+        },
         last_round_count: 0,
         last_status: String::new(),
-        last_progress: String::new(),
         sent_initial: false,
     };
 
-    let stream = futures::stream::unfold(initial, |mut ps| async move {
-        if !ps.sent_initial {
-            ps.sent_initial = true;
+    let stream = futures::stream::unfold(initial, |mut ss| async move {
+        // Send initial state snapshot
+        if !ss.sent_initial {
+            ss.sent_initial = true;
             let data = {
-                let sessions = ps.state.debate_sessions.read().unwrap_or_else(|e| e.into_inner());
-                sessions.get(&ps.session_id).map(|session| {
-                    ps.last_status = format!("{:?}", session.status);
-                    ps.last_round_count = session.rounds.len();
+                let sessions = ss.state.debate_sessions.read().unwrap_or_else(|e| e.into_inner());
+                sessions.get(&ss.session_id).map(|session| {
+                    ss.last_status = serde_json::to_value(&session.status)
+                        .ok().and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_else(|| format!("{:?}", session.status));
+                    ss.last_round_count = session.rounds.len();
                     serde_json::json!({
                         "status": session.status,
                         "agents": session.agents,
@@ -1033,96 +1075,139 @@ pub async fn debate_stream(
             return match data {
                 Some(d) => Some((
                     Ok(axum::response::sse::Event::default().event("state").data(d.to_string())),
-                    ps,
+                    ss,
                 )),
                 None => None,
             };
         }
 
-        // Poll every 2 seconds
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        match &mut ss.source {
+            StreamSource::Broadcast(rx) => {
+                // Wait for next broadcast event or timeout for state polling
+                let event = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    rx.recv(),
+                ).await;
 
-        // Snapshot session state (drop lock before returning ps)
-        let snapshot = ps.state.debate_sessions.read().ok().and_then(|sessions| {
-            sessions.get(&ps.session_id).map(|s| {
-                (format!("{:?}", s.status), s.status.clone(), s.rounds.clone(), s.synthesis.clone(), s.progress.clone())
-            })
-        });
+                match event {
+                    Ok(Ok(raw)) => {
+                        // Parse "event: TYPE\ndata: JSON\n\n" format from broadcast
+                        let (event_name, data) = if let Some(rest) = raw.strip_prefix("event: ") {
+                            if let Some(idx) = rest.find("\ndata: ") {
+                                let ename = &rest[..idx];
+                                let dstart = idx + 7; // "\ndata: ".len()
+                                let dend = rest.find("\n\n").unwrap_or(rest.len());
+                                (ename.to_string(), rest[dstart..dend].to_string())
+                            } else {
+                                ("message".into(), rest.trim().to_string())
+                            }
+                        } else {
+                            ("message".into(), raw)
+                        };
+                        Some((
+                            Ok(axum::response::sse::Event::default().event(&event_name).data(data)),
+                            ss,
+                        ))
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                        // Missed messages -- send a warning and continue
+                        let data = serde_json::json!({"missed_events": n});
+                        Some((
+                            Ok(axum::response::sse::Event::default().event("warning").data(data.to_string())),
+                            ss,
+                        ))
+                    }
+                    Ok(Err(_)) => None, // channel closed
+                    Err(_) => {
+                        // Timeout -- poll for state changes (rounds, synthesis, status)
+                        let snapshot = ss.state.debate_sessions.read().ok().and_then(|sessions| {
+                            sessions.get(&ss.session_id).map(|s| {
+                                let status_str = serde_json::to_value(&s.status)
+                                    .ok().and_then(|v| v.as_str().map(String::from))
+                                    .unwrap_or_else(|| format!("{:?}", s.status));
+                                (status_str, s.status.clone(), s.rounds.len(), s.synthesis.clone())
+                            })
+                        });
+                        let (status, status_enum, round_count, synthesis) = match snapshot {
+                            Some(s) => s,
+                            None => return None,
+                        };
 
-        let (status, status_enum, rounds, synthesis, progress) = match snapshot {
-            Some(s) => s,
-            None => return None, // session deleted
-        };
+                        // New rounds
+                        if round_count > ss.last_round_count {
+                            ss.last_round_count = round_count;
+                            // Don't emit round data here -- it comes via broadcast events
+                        }
 
-        // Emit progress updates (synthesis steps, gap-closing, etc.)
-        if let Some(ref prog) = progress {
-            let prog_msg = format!("{}:{}", prog.phase, prog.message);
-            if prog_msg != ps.last_progress {
-                ps.last_progress = prog_msg;
-                let data = serde_json::json!({
-                    "phase": prog.phase,
-                    "message": prog.message,
-                    "current": prog.current,
-                    "total": prog.total,
-                    "active_agent": prog.active_agent,
-                });
-                return Some((
-                    Ok(axum::response::sse::Event::default().event("progress").data(data.to_string())),
-                    ps,
-                ));
-            }
-        }
+                        // Status change
+                        if status != ss.last_status {
+                            ss.last_status = status.clone();
+                            if status_enum == DebateStatus::Complete {
+                                if let Some(ref syn) = synthesis {
+                                    let data = serde_json::to_string(syn).unwrap_or_default();
+                                    return Some((
+                                        Ok(axum::response::sse::Event::default().event("synthesis_complete").data(data)),
+                                        ss,
+                                    ));
+                                }
+                            }
+                            let data = serde_json::json!({"status": status});
+                            return Some((
+                                Ok(axum::response::sse::Event::default().event("status_change").data(data.to_string())),
+                                ss,
+                            ));
+                        }
 
-        let round_count = rounds.len();
+                        if status_enum == DebateStatus::Complete { return None; }
 
-        // Emit new round data
-        if round_count > ps.last_round_count {
-            if let Some(round) = rounds.get(ps.last_round_count) {
-                ps.last_round_count += 1;
-                let data = serde_json::json!({
-                    "round": round.round_number + 1,
-                    "turns": round.turns,
-                    "user_injection": round.user_injection,
-                });
-                return Some((
-                    Ok(axum::response::sse::Event::default().event("round_complete").data(data.to_string())),
-                    ps,
-                ));
-            }
-        }
-
-        // Emit status changes
-        if status != ps.last_status {
-            ps.last_status = status.clone();
-
-            // If complete, emit synthesis
-            if status_enum == DebateStatus::Complete {
-                if let Some(ref syn) = synthesis {
-                    let data = serde_json::to_string(syn).unwrap_or_default();
-                    return Some((
-                        Ok(axum::response::sse::Event::default().event("synthesis_complete").data(data)),
-                        ps,
-                    ));
+                        Some((
+                            Ok(axum::response::sse::Event::default().comment("keepalive")),
+                            ss,
+                        ))
+                    }
                 }
             }
-
-            let data = serde_json::json!({"status": status});
-            return Some((
-                Ok(axum::response::sse::Event::default().event("status_change").data(data.to_string())),
-                ps,
-            ));
+            StreamSource::PollFallback => {
+                // No broadcast channel -- pure polling fallback
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let snapshot = ss.state.debate_sessions.read().ok().and_then(|sessions| {
+                    sessions.get(&ss.session_id).map(|s| {
+                        let status_str = serde_json::to_value(&s.status)
+                            .ok().and_then(|v| v.as_str().map(String::from))
+                            .unwrap_or_else(|| format!("{:?}", s.status));
+                        (status_str, s.status.clone(), s.progress.clone())
+                    })
+                });
+                let (status, status_enum, progress) = match snapshot {
+                    Some(s) => s,
+                    None => return None,
+                };
+                if status != ss.last_status {
+                    ss.last_status = status.clone();
+                    let data = serde_json::json!({"status": status});
+                    return Some((
+                        Ok(axum::response::sse::Event::default().event("status_change").data(data.to_string())),
+                        ss,
+                    ));
+                }
+                if let Some(ref prog) = progress {
+                    let data = serde_json::json!({
+                        "phase": prog.phase, "message": prog.message,
+                        "current": prog.current, "total": prog.total,
+                        "active_agent": prog.active_agent,
+                    });
+                    return Some((
+                        Ok(axum::response::sse::Event::default().event("progress").data(data.to_string())),
+                        ss,
+                    ));
+                }
+                if status_enum == DebateStatus::Complete { return None; }
+                Some((
+                    Ok(axum::response::sse::Event::default().comment("keepalive")),
+                    ss,
+                ))
+            }
         }
-
-        // Complete -- stop stream
-        if status_enum == DebateStatus::Complete {
-            return None;
-        }
-
-        // Keepalive
-        Some((
-            Ok(axum::response::sse::Event::default().comment("keepalive")),
-            ps,
-        ))
     });
 
     axum::response::Sse::new(stream)
@@ -1138,7 +1223,8 @@ pub async fn debate_test_gap(
     let topic = body.get("topic").and_then(|v| v.as_str()).unwrap_or("general");
     eprintln!("[test-gap] Starting: query=\"{}\"", query);
     dbg_debate!("[test-gap] query=\"{}\"", query);
-    let result = research::close_gaps(&state, &[query.to_string()], topic, &["en".to_string()]).await;
+    let (tx, _) = tokio::sync::broadcast::channel(16);
+    let result = research::close_gaps(&state, &[query.to_string()], topic, &["en".to_string()], &tx).await;
     let gap = result.into_iter().next().unwrap_or_else(|| GapResearch {
         gap_query: query.to_string(), source: "test".into(), findings: Vec::new(),
         ingested: false, entities_stored: Vec::new(), facts_stored: 0, relations_created: 0,
@@ -1175,7 +1261,7 @@ pub async fn debate_test_fetch(
             "elapsed_s": format!("{:.1}", elapsed),
             "chars": content.as_ref().map(|c| c.len()).unwrap_or(0),
             "ok": content.is_some(),
-            "preview": content.as_ref().map(|c| &c[..c.len().min(200)]).unwrap_or(""),
+            "preview": content.as_ref().map(|c| research::safe_truncate(c, 200)).unwrap_or(""),
         }));
     }
 

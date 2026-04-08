@@ -138,6 +138,18 @@ impl DocStore {
         }
     }
 
+    /// Create a fresh DocStore with the correct brain_path but no existing data.
+    /// Use this as a fallback when `open()` fails, so writes go to the right
+    /// location instead of falling back to the empty-path placeholder.
+    pub fn fresh(brain_path: &Path) -> Self {
+        DocStore {
+            brain_path: brain_path.to_path_buf(),
+            index: HashMap::new(),
+            active_segment: 0,
+            max_segment_bytes: DEFAULT_MAX_SEGMENT_BYTES,
+        }
+    }
+
     /// Open or create a DocStore for the given brain file path.
     pub fn open(brain_path: &Path) -> io::Result<Self> {
         let mut store = DocStore {
@@ -164,6 +176,12 @@ impl DocStore {
 
     /// Store content, returning its SHA-256 hash. Deduplicates automatically.
     pub fn store(&mut self, content: &[u8], mime: MimeType) -> io::Result<ContentHash> {
+        if self.brain_path.as_os_str().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DocStore has no brain_path (placeholder store) -- call open() first",
+            ));
+        }
         let hash = Self::hash_content(content);
         if self.index.contains_key(&hash) {
             return Ok(hash); // already stored

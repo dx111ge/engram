@@ -544,9 +544,12 @@ pub fn OnboardingWizard(
                         set_enrichment_elapsed.set(0);
                         set_enrichment_phases_done.set(Vec::new());
                         let sse_api = use_context::<ApiClient>();
+                        let sse_token = ApiClient::auth_token()
+                            .map(|t| format!("&token={}", js_sys::encode_uri_component(&t)))
+                            .unwrap_or_default();
                         let sse_url = match sse_api {
-                            Some(ref client) => format!("{}/ingest/seed/stream?session_id={}", client.base_url, sid_for_sse),
-                            None => format!("/ingest/seed/stream?session_id={}", sid_for_sse),
+                            Some(ref client) => format!("{}/ingest/seed/stream?session_id={}{}", client.base_url, sid_for_sse, sse_token),
+                            None => format!("/ingest/seed/stream?session_id={}{}", sid_for_sse, sse_token),
                         };
                         if let Ok(es) = web_sys::EventSource::new(&sse_url) {
                             // seed_progress -- generic phase-level updates (main progress driver)

@@ -13,6 +13,28 @@ use crate::components::onboarding_wizard::OnboardingWizard;
 use crate::components::toast::{Toast, ToastContainer};
 use crate::pages;
 
+/// Global debate state -- survives route changes, accessible from Nav and any page.
+#[derive(Clone, Debug)]
+pub struct ActiveDebate {
+    pub session_id: RwSignal<Option<String>>,
+    pub status: RwSignal<String>,
+    pub topic: RwSignal<String>,
+    pub mode: RwSignal<String>,
+    pub current_round: RwSignal<usize>,
+    pub max_rounds: RwSignal<usize>,
+}
+
+impl ActiveDebate {
+    pub fn is_running(&self) -> bool {
+        matches!(self.status.get_untracked().as_str(),
+            "running" | "researching" | "gap_closing" | "synthesizing")
+    }
+    pub fn is_active(&self) -> bool {
+        self.session_id.get_untracked().is_some() &&
+        !matches!(self.status.get_untracked().as_str(), "" | "complete" | "error")
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     // Provide API client
@@ -30,6 +52,17 @@ pub fn App() -> impl IntoView {
     // Provide chat open state
     let chat_open = RwSignal::new(false);
     provide_context(chat_open);
+
+    // Provide global debate state (survives route changes)
+    let active_debate = ActiveDebate {
+        session_id: RwSignal::new(None),
+        status: RwSignal::new(String::new()),
+        topic: RwSignal::new(String::new()),
+        mode: RwSignal::new(String::new()),
+        current_round: RwSignal::new(0),
+        max_rounds: RwSignal::new(0),
+    };
+    provide_context(active_debate);
 
     // Provide page context signals for chat panel
     provide_context(ChatSelectedNode(RwSignal::new(None)));
@@ -87,7 +120,7 @@ pub fn App() -> impl IntoView {
                                 <Route path=path!("/import") view=pages::import::ImportPage />
                                 <Route path=path!("/learning") view=pages::learning::LearningPage />
                                 <Route path=path!("/ingest") view=pages::ingest::IngestPage />
-                                <Route path=path!("/sources") view=pages::sources::SourcesPage />
+                                // /sources removed -- merged into System page Ingestion Sources section
                                 <Route path=path!("/actions") view=pages::actions::ActionsPage />
                                 <Route path=path!("/gaps") view=pages::gaps::GapsPage />
                                 <Route path=path!("/mesh") view=pages::mesh::MeshPage />

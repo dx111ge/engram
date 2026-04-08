@@ -324,6 +324,9 @@ pub struct PipelineConfig {
     pub channel_buffer: usize,
     /// Which stages are enabled.
     pub stages: StageConfig,
+    /// Whether to create Document nodes in the graph.
+    /// Set to false for debate ingest where content is LLM-generated, not source documents.
+    pub create_documents: bool,
 }
 
 impl Default for PipelineConfig {
@@ -335,6 +338,7 @@ impl Default for PipelineConfig {
             batch_timeout_ms: 100,
             channel_buffer: 10_000,
             stages: StageConfig::default(),
+            create_documents: true,
         }
     }
 }

@@ -34,6 +34,14 @@ pub fn SseListener(
             Some(client) => format!("{}{}", client.base_url, url),
             None => url,
         };
+        // EventSource can't send Authorization headers; pass token as query param
+        let full_url = {
+            let sep = if full_url.contains('?') { "&" } else { "?" };
+            match crate::api::ApiClient::auth_token() {
+                Some(t) => format!("{}{}token={}", full_url, sep, js_sys::encode_uri_component(&t)),
+                None => full_url,
+            }
+        };
 
         let source = match web_sys::EventSource::new(&full_url) {
             Ok(s) => s,

@@ -12,6 +12,7 @@ pub fn DocumentsZone(
     let api = use_context::<ApiClient>().expect("ApiClient context");
 
     let (processing, set_processing) = signal(false);
+    let (processing_label, set_processing_label) = signal(Option::<String>::None);
     let (result_msg, set_result_msg) = signal(Option::<String>::None);
     let (progress_msg, set_progress_msg) = signal(Option::<String>::None);
     let (refresh_trigger, set_refresh_trigger) = signal(0u32);
@@ -34,7 +35,10 @@ pub fn DocumentsZone(
                 return;
             }
 
-            let url = format!("{}/events/stream?topics=ingest_progress", base_url);
+            let token_param = crate::api::ApiClient::auth_token()
+                .map(|t| format!("&token={}", js_sys::encode_uri_component(&t)))
+                .unwrap_or_default();
+            let url = format!("{}/events/stream?topics=ingest_progress{}", base_url, token_param);
             let source = match web_sys::EventSource::new(&url) {
                 Ok(s) => s,
                 Err(_) => return,
@@ -42,17 +46,18 @@ pub fn DocumentsZone(
 
             let set_prog = set_progress_msg;
             let set_proc = set_processing;
+            let set_proc_label = set_processing_label;
             let set_refresh = set_refresh_trigger;
 
             let on_event = Closure::wrap(Box::new(move |evt: web_sys::MessageEvent| {
                 if let Some(data) = evt.data().as_string() {
-                    // Parse the stage from the SSE data
                     let stage = data.clone();
                     set_prog.set(Some(stage.clone()));
 
                     // Check if processing is complete
                     if data.contains("complete") || data.contains("error") {
                         set_proc.set(false);
+                        set_proc_label.set(None);
                         set_refresh.update(|c| *c += 1);
                     }
                 }
@@ -68,6 +73,7 @@ pub fn DocumentsZone(
             // Also listen for generic messages (fallback)
             let set_prog2 = set_progress_msg;
             let set_proc2 = set_processing;
+            let set_proc_label2 = set_processing_label;
             let set_refresh2 = set_refresh_trigger;
             let on_msg = Closure::wrap(Box::new(move |evt: web_sys::MessageEvent| {
                 if let Some(data) = evt.data().as_string() {
@@ -75,6 +81,7 @@ pub fn DocumentsZone(
                         set_prog2.set(Some(data.clone()));
                         if data.contains("complete") || data.contains("error") {
                             set_proc2.set(false);
+                            set_proc_label2.set(None);
                             set_refresh2.update(|c| *c += 1);
                         }
                     }
@@ -102,7 +109,7 @@ pub fn DocumentsZone(
         set_result_msg.set(None);
         set_progress_msg.set(None);
         async move {
-            let body = serde_json::json!({ "batch_size": 20 });
+            let body = serde_json::json!({ "batch_size": 5 });
             match api.post::<_, ReprocessResponse>("/ingest/reprocess-docs", &body).await {
                 Ok(r) => {
                     let msg = format!(
@@ -206,19 +213,58 @@ pub fn DocumentsZone(
                                                 <th>"Title"</th>
                                                 <th>"URL"</th>
                                                 <th>"Lang"</th>
+                                                <th></th>
                                             </tr></thead>
                                             <tbody>
                                                 {pending.into_iter().map(|d| {
                                                     let label = d.label.clone();
+                                                    let label_for_btn = d.label.clone();
                                                     let title = if d.title.is_empty() { "-".to_string() } else { d.title.clone() };
                                                     let url = if d.url.is_empty() { "-".to_string() } else { d.url.clone() };
                                                     let lang = if d.original_language.is_empty() { "-".to_string() } else { d.original_language.clone() };
+                                                    let api_single = api.clone();
+                                                    let do_process_single = Action::new_local(move |_: &()| {
+                                                        let api = api_single.clone();
+                                                        let lbl = label_for_btn.clone();
+                                                        let encoded = js_sys::encode_uri_component(&lbl).as_string().unwrap_or(lbl.clone());
+                                                        set_processing.set(true);
+                                                        set_processing_label.set(Some(lbl.clone()));
+                                                        set_progress_msg.set(Some(format!("Processing {}...", lbl)));
+                                                        async move {
+                                                            match api.post_text(&format!("/ingest/reprocess-doc/{}", encoded), &()).await {
+                                                                Ok(_) => {}
+                                                                Err(e) => {
+                                                                    set_result_msg.set(Some(format!("Error: {e}")));
+                                                                    set_processing.set(false);
+                                                                    set_processing_label.set(None);
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                    let label_check = label.clone();
                                                     view! {
                                                         <tr>
                                                             <td><code style="font-size: 0.8rem;">{label}</code></td>
                                                             <td>{title}</td>
                                                             <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{url}</td>
                                                             <td>{lang}</td>
+                                                            <td>
+                                                                <button
+                                                                    class="btn btn-sm btn-primary"
+                                                                    title="Process this document"
+                                                                    disabled=move || processing.get()
+                                                                    on:click=move |_| { let _ = do_process_single.dispatch(()); }
+                                                                >
+                                                                    {move || {
+                                                                        let is_this = processing_label.get().as_deref() == Some(&label_check);
+                                                                        if is_this {
+                                                                            view! { <i class="fa-solid fa-spinner fa-spin"></i> }.into_any()
+                                                                        } else {
+                                                                            view! { <i class="fa-solid fa-play"></i> }.into_any()
+                                                                        }
+                                                                    }}
+                                                                </button>
+                                                            </td>
                                                         </tr>
                                                     }
                                                 }).collect::<Vec<_>>()}

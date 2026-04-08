@@ -591,47 +591,77 @@ async fn run_web_source(
         .unwrap_or("")
         .to_string();
 
-    let body = resp.text().await
-        .map_err(|e| format!("body read: {e}"))?;
-
-    // Extract article text from HTML
-    let text = if content_type.contains("html") {
-        dom_smoothie::Readability::new(body.clone(), None, None)
-            .ok()
-            .and_then(|mut r| r.parse().ok())
-            .map(|a| a.text_content.to_string())
-            .unwrap_or(body)
-    } else {
-        body
-    };
-
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
 
-    // Dedup: skip if content hash already seen
-    let hash = engram_ingest::SearchLedger::content_hash(text.as_bytes());
-    if let Ok(ledger) = state.ledger.read() {
-        if ledger.has_content(&src.name, hash) {
-            return Ok(serde_json::json!({ "message": "content unchanged (deduped)", "facts_stored": 0 }));
-        }
-    }
+    let is_pdf = content_type.contains("application/pdf")
+        || url.to_lowercase().ends_with(".pdf");
 
-    // Entity filter: skip if no known entities mentioned
-    if let Some(g) = gaz {
-        if !g.is_empty() && !g.contains_known_entity(&text) {
-            return Ok(serde_json::json!({ "message": "no known entities found (filtered)", "facts_stored": 0 }));
-        }
-    }
+    let (items, hash) = if is_pdf {
+        // PDF: read as bytes to preserve binary content
+        let data = resp.bytes().await
+            .map_err(|e| format!("body read: {e}"))?
+            .to_vec();
 
-    let items = vec![engram_ingest::RawItem {
-        content: engram_ingest::Content::Text(text),
-        source_url: Some(url.to_string()),
-        source_name: src.name.clone(),
-        fetched_at: now,
-        metadata: Default::default(),
-    }];
+        let hash = engram_ingest::SearchLedger::content_hash(&data);
+        if let Ok(ledger) = state.ledger.read() {
+            if ledger.has_content(&src.name, hash) {
+                return Ok(serde_json::json!({ "message": "content unchanged (deduped)", "facts_stored": 0 }));
+            }
+        }
+
+        // Pipeline's PdfParser extracts text; entity filter happens post-extraction
+        let item = engram_ingest::RawItem {
+            content: engram_ingest::Content::Bytes {
+                data,
+                mime: "application/pdf".to_string(),
+            },
+            source_url: Some(url.to_string()),
+            source_name: src.name.clone(),
+            fetched_at: now,
+            metadata: Default::default(),
+        };
+        (vec![item], hash)
+    } else {
+        // HTML/text: extract readable article text
+        let body = resp.text().await
+            .map_err(|e| format!("body read: {e}"))?;
+
+        let text = if content_type.contains("html") {
+            dom_smoothie::Readability::new(body.clone(), None, None)
+                .ok()
+                .and_then(|mut r| r.parse().ok())
+                .map(|a| a.text_content.to_string())
+                .unwrap_or(body)
+        } else {
+            body
+        };
+
+        let hash = engram_ingest::SearchLedger::content_hash(text.as_bytes());
+        if let Ok(ledger) = state.ledger.read() {
+            if ledger.has_content(&src.name, hash) {
+                return Ok(serde_json::json!({ "message": "content unchanged (deduped)", "facts_stored": 0 }));
+            }
+        }
+
+        // Entity filter: skip if no known entities mentioned
+        if let Some(g) = gaz {
+            if !g.is_empty() && !g.contains_known_entity(&text) {
+                return Ok(serde_json::json!({ "message": "no known entities found (filtered)", "facts_stored": 0 }));
+            }
+        }
+
+        let item = engram_ingest::RawItem {
+            content: engram_ingest::Content::Text(text),
+            source_url: Some(url.to_string()),
+            source_name: src.name.clone(),
+            fetched_at: now,
+            metadata: Default::default(),
+        };
+        (vec![item], hash)
+    };
 
     let result = run_ingest_items(state, items, &src.name).await;
 

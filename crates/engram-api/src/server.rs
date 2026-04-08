@@ -65,7 +65,12 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/ingest/analyze", post(handlers::ingest_analyze))
         .route("/ingest/file", post(handlers::ingest_file))
         .route("/ingest/configure", post(handlers::ingest_configure))
-        .route("/ingest/reprocess-docs", post(handlers::reprocess_docs))
+        .route("/ingest/reprocess-docs", post(handlers::reprocess_docs));
+
+    #[cfg(feature = "ingest")]
+    let app = app.route("/ingest/reprocess-doc/{label}", post(handlers::reprocess_single_doc));
+
+    let mut app = app
         .route("/sources", get(handlers::sources::list_sources))
         .route("/sources", post(handlers::sources::create_source))
         .route("/sources/{name}", get(handlers::sources::get_source))

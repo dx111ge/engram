@@ -1059,6 +1059,34 @@ pub struct DebateSessionResponse {
     pub mode_input: Option<String>,
     #[serde(default)]
     pub progress: Option<DebateProgress>,
+    #[serde(default)]
+    pub briefing: Option<DebateBriefing>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebateBriefing {
+    #[serde(default)]
+    pub questions: Vec<String>,
+    #[serde(default)]
+    pub facts: Vec<BriefingFact>,
+    #[serde(default)]
+    pub facts_stored: u32,
+    #[serde(default)]
+    pub relations_created: u32,
+    #[serde(default)]
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BriefingFact {
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub confidence: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

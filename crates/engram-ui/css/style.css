@@ -3162,3 +3162,132 @@ pre .chat-code-block,
   color: var(--text-secondary);
   margin-top: 0.25rem;
 }
+
+/* ── War Room: 3-panel debate layout ── */
+.war-room {
+  display: grid;
+  grid-template-columns: 260px 1fr 280px;
+  grid-template-rows: 1fr auto;
+  gap: 0.5rem;
+  height: calc(100vh - 220px);
+  min-height: 400px;
+}
+.war-room-agents {
+  grid-row: 1;
+  grid-column: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.25rem;
+}
+.war-room-feed {
+  grid-row: 1;
+  grid-column: 2;
+  overflow-y: auto;
+  padding: 0.25rem;
+}
+.war-room-evidence {
+  grid-row: 1;
+  grid-column: 3;
+  overflow-y: auto;
+  padding: 0.25rem;
+}
+.war-room-controls {
+  grid-row: 2;
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 1024px) {
+  .war-room {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto auto;
+    height: auto;
+  }
+  .war-room-agents {
+    flex-direction: row;
+    overflow-x: auto;
+    max-height: 160px;
+  }
+}
+
+/* Agent card in War Room */
+.agent-card-war {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.5rem;
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.agent-card-war:hover {
+  border-color: var(--border-light);
+}
+.agent-card-active {
+  animation: agent-pulse 1.5s ease-in-out infinite;
+}
+@keyframes agent-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(74, 158, 255, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(74, 158, 255, 0); }
+}
+
+/* Confidence gauge (CSS conic-gradient) */
+.confidence-gauge {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--gauge-color, var(--accent-bright)) calc(var(--confidence, 0) * 1%),
+    var(--bg-secondary) 0
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  flex-shrink: 0;
+}
+.confidence-gauge::after {
+  content: '';
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  position: absolute;
+}
+.confidence-gauge-value {
+  position: absolute;
+  font-size: 0.7rem;
+  font-weight: bold;
+  z-index: 1;
+  color: var(--text-primary);
+}
+
+/* Sparkline (bar chart) */
+.sparkline {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 24px;
+  flex: 1;
+}
+.sparkline-bar {
+  width: 4px;
+  min-height: 2px;
+  background: var(--accent-bright);
+  border-radius: 1px;
+  transition: height 0.3s ease;
+}
+
+/* Activity feed entry */
+.feed-entry {
+  padding: 0.3rem 0.5rem;
+  border-left: 3px solid var(--border);
+  background: var(--bg-secondary);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 0.15s;
+  line-height: 1.4;
+}
+.feed-entry:hover {
+  background: var(--bg-tertiary);
+}

@@ -1188,25 +1188,27 @@ impl Pipeline {
             source_id: format!("ingest:{}", self.config.name),
         };
 
-        // Collect unique documents and cache content
-        let mut created_docs: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for fact in facts {
-            if let Some(ref doc_ctx) = fact.doc_context {
-                let doc_label = crate::document::doc_label(&doc_ctx.content_hash_hex);
-                if created_docs.contains(&doc_label) {
-                    continue;
+        // Collect unique documents and cache content (skip for debate ingest)
+        if self.config.create_documents {
+            let mut created_docs: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for fact in facts {
+                if let Some(ref doc_ctx) = fact.doc_context {
+                    let doc_label = crate::document::doc_label(&doc_ctx.content_hash_hex);
+                    if created_docs.contains(&doc_label) {
+                        continue;
+                    }
+                    created_docs.insert(doc_label.clone());
+                    self.create_document_node(&mut graph, doc_ctx, &doc_label, &prov, now_ts);
+                    self.cache_document_content(doc_ctx);
                 }
-                created_docs.insert(doc_label.clone());
-                self.create_document_node(&mut graph, doc_ctx, &doc_label, &prov, now_ts);
-                self.cache_document_content(doc_ctx);
             }
-        }
 
-        // Layer 1: Entity -> Document (mentioned_in) direct edges
-        for fact in facts {
-            if let Some(ref doc_ctx) = fact.doc_context {
-                let doc_label = crate::document::doc_label(&doc_ctx.content_hash_hex);
-                let _ = graph.relate_upsert(&fact.entity, &doc_label, "mentioned_in", &prov);
+            // Layer 1: Entity -> Document (mentioned_in) direct edges
+            for fact in facts {
+                if let Some(ref doc_ctx) = fact.doc_context {
+                    let doc_label = crate::document::doc_label(&doc_ctx.content_hash_hex);
+                    let _ = graph.relate_upsert(&fact.entity, &doc_label, "mentioned_in", &prov);
+                }
             }
         }
         Ok(())

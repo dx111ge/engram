@@ -35,6 +35,10 @@ pub struct DebateSession {
     /// Rolling compressed context: briefing + all previous rounds + gap research,
     /// compressed by LLM after each round to stay within context budget.
     pub compressed_context: String,
+    /// Broadcast channel for SSE events during this debate session.
+    /// Stored here so `debate_stream` can subscribe to live events.
+    #[allow(dead_code)]
+    pub sse_tx: Option<Arc<tokio::sync::broadcast::Sender<String>>>,
 }
 
 /// Live progress information for the frontend.

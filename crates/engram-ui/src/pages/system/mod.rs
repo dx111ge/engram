@@ -14,7 +14,7 @@ use crate::api::ApiClient;
 use crate::api::types::{
     ComputeResponse, ConfigResponse,
     MeshAuditEntry, PeerInfo, SecretListItem,
-    SourceInfo, KbEndpointInfo, StatsResponse,
+    KbEndpointInfo, StatsResponse,
 };
 
 use presets::*;
@@ -77,12 +77,6 @@ pub fn SystemPage() -> impl IntoView {
     let mesh_identity = LocalResource::new(move || {
         let api = api_identity.clone();
         async move { api.get_text("/mesh/identity").await.ok().unwrap_or_default() }
-    });
-
-    let api_sources = api.clone();
-    let sources = LocalResource::new(move || {
-        let api = api_sources.clone();
-        async move { api.get::<Vec<SourceInfo>>("/sources").await.ok().unwrap_or_default() }
     });
 
     let api_kb = api.clone();
@@ -705,32 +699,7 @@ pub fn SystemPage() -> impl IntoView {
                         <i class="fa-solid fa-download" style="margin-right: 0.4rem; opacity: 0.7;"></i>"Ingestion Sources"
                     </h4>
                     <div style=move || if ig_open.get() { "" } else { "display:none" }>
-                    {move || {
-                        let src = sources.get().unwrap_or_default();
-                        if src.is_empty() {
-                            view! {
-                                <p class="text-muted" style="font-size: 0.85rem;">"No ingestion sources configured."</p>
-                            }.into_any()
-                        } else {
-                            view! {
-                                <table class="data-table" style="margin-bottom: 0.5rem;">
-                                    <thead><tr><th>"Name"</th><th>"Type"</th><th>"Status"</th></tr></thead>
-                                    <tbody>
-                                        {src.iter().map(|s| view! {
-                                            <tr>
-                                                <td><strong>{s.name.clone()}</strong></td>
-                                                <td class="text-secondary">{s.source_type.clone().unwrap_or_default()}</td>
-                                                <td><span class="badge badge-success">{s.status.clone().unwrap_or_else(|| "Active".into())}</span></td>
-                                            </tr>
-                                        }).collect::<Vec<_>>()}
-                                    </tbody>
-                                </table>
-                            }.into_any()
-                        }
-                    }}
-                    <a href="/sources" class="btn btn-secondary btn-sm">
-                        <i class="fa-solid fa-plus"></i>" Add Ingestion Source"
-                    </a>
+                        <crate::pages::sources::SourcesSection />
                     </div> // ig_open
                 </div>
                 </div> } // view! + block for collapsible signals

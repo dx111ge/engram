@@ -579,7 +579,12 @@ impl AppState {
                 }
             }
             Err(e) => {
-                eprintln!("WARNING: DocStore failed to open: {e}");
+                eprintln!("WARNING: DocStore failed to open: {e} — creating fresh store");
+                // Create a fresh store with the correct brain_path so writes
+                // go to the right location instead of the CWD placeholder.
+                self.doc_store = Arc::new(RwLock::new(
+                    engram_core::storage::doc_store::DocStore::fresh(brain_path)
+                ));
             }
         }
     }

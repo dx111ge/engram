@@ -24,6 +24,7 @@ pub async fn export_relation_templates(
 
     // Collect learned relation types from the graph's relation gazetteer sidecar
     let mut learned_types: Vec<String> = Vec::new();
+    #[cfg(feature = "ingest")]
     if let Some(ref config_path) = state.config_path {
         // Derive brain path from config path (config is .brain.config, brain is .brain)
         let brain_path = config_path.with_extension("");
@@ -31,8 +32,8 @@ pub async fn export_relation_templates(
         if relgaz_path.exists() {
             if let Ok(gaz) = engram_ingest::RelationGazetteer::load(&brain_path) {
                 for rt in gaz.known_relation_types() {
-                    if !configured.contains_key(rt) {
-                        learned_types.push(rt.clone());
+                    if !configured.contains_key::<str>(&rt) {
+                        learned_types.push(rt.to_string());
                     }
                 }
                 learned_types.sort();

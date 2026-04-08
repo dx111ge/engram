@@ -509,7 +509,8 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
-    // Extract bearer token or X-Api-Key header
+    // Extract bearer token, X-Api-Key header, or ?token= query param.
+    // Query param fallback is needed for SSE (EventSource can't set headers).
     let token = request
         .headers()
         .get("authorization")
@@ -522,6 +523,15 @@ pub async fn auth_middleware(
                 .get("x-api-key")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
+        })
+        .or_else(|| {
+            // Query parameter fallback for SSE/EventSource endpoints
+            request.uri().query()
+                .and_then(|q| {
+                    q.split('&')
+                        .find_map(|pair| pair.strip_prefix("token="))
+                        .map(|t| t.to_string())
+                })
         });
 
     let token = match token {

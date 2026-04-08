@@ -1,6 +1,11 @@
 /// Multi-agent debate panel page.
-/// UX: setup -> review/edit agents -> run rounds -> synthesis on top.
-/// Rounds collapse after completion. Sticky controls. Clear round indicators.
+/// UX: setup -> review/edit agents -> War Room (3-panel) -> synthesis on top.
+
+mod war_room;
+mod agent_card;
+mod activity_feed;
+mod evidence_board;
+mod controls;
 
 use leptos::prelude::*;
 
@@ -10,6 +15,7 @@ use crate::api::types::{
     DebateRunResponse, DebateInjectResponse, DebateSynthesizeResponse,
     DebateRound, DebateTurn,
 };
+use crate::app::ActiveDebate;
 
 #[component]
 pub fn DebatePage() -> impl IntoView {
@@ -32,14 +38,21 @@ pub fn DebatePage() -> impl IntoView {
     let (max_rounds, set_max_rounds) = signal(3usize);
     let (current_round, set_current_round) = signal(0usize);
     let (synthesis, set_synthesis) = signal(Option::<crate::api::types::DebateSynthesis>::None);
+    let (briefing, set_briefing) = signal(Option::<crate::api::types::DebateBriefing>::None);
 
     // UI state
     let (inject_text, set_inject_text) = signal(String::new());
-    let (synthesis_tab, set_synthesis_tab) = signal("evidence".to_string());
     let (polling, set_polling) = signal(false);
     let (progress_msg, set_progress_msg) = signal(String::new());
-    let (expanded_round, set_expanded_round) = signal(Option::<usize>::None);
     let (editing_agent, set_editing_agent) = signal(Option::<String>::None);
+
+    // War Room state -- lifted here so it survives status-change remounts
+    let (agent_states, set_agent_states) = signal(std::collections::HashMap::<String, war_room::AgentLiveState>::new());
+    let (feed_entries, set_feed_entries) = signal(Vec::<war_room::FeedEntry>::new());
+    let (evidence_items, set_evidence_items) = signal(Vec::<war_room::EvidenceItem>::new());
+    let (feed_counter, set_feed_counter) = signal(0u64);
+    let (sse_connected, set_sse_connected) = signal(false);
+    let (center_panel, set_center_panel) = signal(war_room::CenterPanel::ActivityFeed);
 
     // Edit form signals
     let (edit_name, set_edit_name) = signal(String::new());
@@ -49,19 +62,136 @@ pub fn DebatePage() -> impl IntoView {
     let (edit_rigor, set_edit_rigor) = signal(String::new());
     let (edit_source, set_edit_source) = signal(String::new());
 
+    // ── Sync with global ActiveDebate context ──
+    let global_debate = use_context::<ActiveDebate>();
+    Effect::new(move |_| {
+        if let Some(ref gd) = global_debate {
+            let sid = session_id.get();
+            let st = session_status.get();
+            let t = topic.get();
+            let m = debate_mode.get();
+            let cr = current_round.get();
+            let mr = max_rounds.get();
+            gd.session_id.set(sid.clone());
+            gd.status.set(st);
+            gd.topic.set(t);
+            gd.mode.set(m);
+            gd.current_round.set(cr);
+            gd.max_rounds.set(mr);
+            // Persist to localStorage for session recovery
+            if let Some(w) = web_sys::window() {
+                if let Ok(Some(storage)) = w.local_storage() {
+                    if let Some(ref id) = sid {
+                        let _ = storage.set_item("engram_debate_session", id);
+                    } else {
+                        let _ = storage.remove_item("engram_debate_session");
+                    }
+                }
+            }
+        }
+    });
+
+    // ── Session recovery: restore active debate on mount ──
+    {
+        let api_recover = api.clone();
+        Effect::new(move |prev: Option<bool>| {
+            // Only run once on mount
+            if prev.is_some() { return false; }
+            if session_id.get_untracked().is_some() { return false; }
+            // Check localStorage for a saved session
+            let saved_sid = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+                .and_then(|s| s.get_item("engram_debate_session").ok().flatten());
+            if let Some(sid) = saved_sid {
+                let api = api_recover.clone();
+                leptos::task::spawn_local(async move {
+                    let path = format!("/debate/{}", js_sys::encode_uri_component(&sid));
+                    if let Ok(resp) = api.get::<DebateSessionResponse>(&path).await {
+                        // Only restore if session is still active (not complete/error)
+                        if !matches!(resp.status.as_str(), "complete" | "error" | "") {
+                            set_session_id.set(Some(sid));
+                            set_session_status.set(resp.status.clone());
+                            set_agents.set(resp.agents);
+                            set_rounds.set(resp.rounds);
+                            set_current_round.set(resp.current_round);
+                            set_max_rounds.set(resp.max_rounds);
+                            if let Some(b) = resp.briefing {
+                                set_briefing.set(Some(b));
+                            }
+                            if let Some(syn) = resp.synthesis {
+                                set_synthesis.set(Some(syn));
+                            }
+                            if !resp.topic.is_empty() {
+                                set_topic.set(resp.topic);
+                            }
+                            if !resp.mode.is_empty() {
+                                set_debate_mode.set(resp.mode);
+                            }
+                            if let Some(p) = &resp.progress {
+                                set_progress_msg.set(p.message.clone());
+                            }
+                            // Resume polling if still running
+                            if matches!(resp.status.as_str(), "running" | "researching" | "gap_closing" | "synthesizing") {
+                                set_polling.set(true);
+                            }
+                            // Set center panel based on restored status
+                            match resp.status.as_str() {
+                                "awaiting_input" | "all_rounds_complete" => {
+                                    set_center_panel.set(war_room::CenterPanel::RoundSummary);
+                                }
+                                "complete" => {
+                                    set_center_panel.set(war_room::CenterPanel::SynthesisResult);
+                                }
+                                _ => {}
+                            }
+                            set_status_msg.set(match resp.status.as_str() {
+                                "panel_ready" => "Session restored. Review agents and start.".into(),
+                                "awaiting_input" => "Session restored. Continue, inject, or synthesize.".into(),
+                                "all_rounds_complete" => "Session restored. Click Synthesize.".into(),
+                                "complete" => "Session restored. Synthesis complete.".into(),
+                                _ => "Session restored. Debate in progress...".into(),
+                            });
+                        } else {
+                            // Session is done, clear localStorage
+                            if let Some(w) = web_sys::window() {
+                                if let Ok(Some(s)) = w.local_storage() {
+                                    let _ = s.remove_item("engram_debate_session");
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            false
+        });
+    }
+
     // ── Reset for new debate ──
     let reset_all = move || {
+        // Clear localStorage session
+        if let Some(w) = web_sys::window() {
+            if let Ok(Some(s)) = w.local_storage() {
+                let _ = s.remove_item("engram_debate_session");
+            }
+        }
         set_session_id.set(None);
         set_session_status.set(String::new());
         set_agents.set(Vec::new());
         set_rounds.set(Vec::new());
         set_synthesis.set(None);
+        set_briefing.set(None);
         set_status_msg.set(String::new());
         set_topic.set(String::new());
         set_debate_mode.set("analyze".into());
         set_mode_input.set(String::new());
         set_current_round.set(0);
-        set_expanded_round.set(None);
+        set_center_panel.set(war_room::CenterPanel::ActivityFeed);
+        // Reset War Room state
+        set_agent_states.set(std::collections::HashMap::new());
+        set_feed_entries.set(Vec::new());
+        set_evidence_items.set(Vec::new());
+        set_feed_counter.set(0);
+        set_sse_connected.set(false);
     };
 
     // ── Start debate ──
@@ -137,7 +267,9 @@ pub fn DebatePage() -> impl IntoView {
                 let path = format!("/debate/{}", js_sys::encode_uri_component(&sid));
                 match api.get::<DebateSessionResponse>(&path).await {
                     Ok(resp) => {
-                        set_session_status.set(resp.status.clone());
+                        if resp.status != session_status.get_untracked() {
+                            set_session_status.set(resp.status.clone());
+                        }
                         set_agents.set(resp.agents);
                         set_current_round.set(resp.current_round);
                         set_max_rounds.set(resp.max_rounds);
@@ -150,15 +282,10 @@ pub fn DebatePage() -> impl IntoView {
                             };
                             set_progress_msg.set(msg);
                         }
-                        // Auto-expand latest round
-                        if resp.rounds.len() > rounds.get_untracked().len() {
-                            set_expanded_round.set(Some(resp.rounds.len() - 1));
-                            // Scroll to bottom
-                            if let Some(w) = web_sys::window() {
-                                let _ = w.scroll_to_with_x_and_y(0.0, 99999.0);
-                            }
-                        }
                         set_rounds.set(resp.rounds);
+                        if let Some(b) = resp.briefing {
+                            set_briefing.set(Some(b));
+                        }
                         if let Some(syn) = resp.synthesis {
                             set_synthesis.set(Some(syn));
                         }
@@ -167,22 +294,24 @@ pub fn DebatePage() -> impl IntoView {
                                 let r = current_round.get_untracked();
                                 let m = max_rounds.get_untracked();
                                 set_status_msg.set(format!("Round {} of {} complete. Continue, inject a question, or synthesize.", r, m));
+                                set_center_panel.set(war_room::CenterPanel::RoundSummary);
+                                set_feed_entries.set(Vec::new());
                                 set_polling.set(false);
                                 break;
                             }
                             "all_rounds_complete" => {
                                 let m = max_rounds.get_untracked();
                                 set_status_msg.set(format!("All {} rounds complete. Click Synthesize to generate the analysis.", m));
+                                set_center_panel.set(war_room::CenterPanel::RoundSummary);
+                                set_feed_entries.set(Vec::new());
                                 set_polling.set(false);
                                 break;
                             }
                             "complete" => {
                                 set_status_msg.set("Synthesis complete.".into());
+                                set_center_panel.set(war_room::CenterPanel::SynthesisResult);
+                                set_feed_entries.set(Vec::new());
                                 set_polling.set(false);
-                                // Scroll to top to show synthesis
-                                if let Some(w) = web_sys::window() {
-                                    let _ = w.scroll_to_with_x_and_y(0.0, 0.0);
-                                }
                                 break;
                             }
                             "error" => {
@@ -224,6 +353,9 @@ pub fn DebatePage() -> impl IntoView {
                         set_session_status.set("running".into());
                         set_status_msg.set("Question injected, debate resuming...".into());
                         set_polling.set(true);
+                        // Reset center panel to activity feed for the next round
+                        set_feed_entries.set(Vec::new());
+                        set_center_panel.set(war_room::CenterPanel::ActivityFeed);
                     }
                     Err(e) => set_status_msg.set(format!("Inject error: {e}")),
                 }
@@ -244,6 +376,9 @@ pub fn DebatePage() -> impl IntoView {
                         set_session_status.set("running".into());
                         set_status_msg.set("Debate continuing...".into());
                         set_polling.set(true);
+                        // Reset center panel to activity feed for the next round
+                        set_feed_entries.set(Vec::new());
+                        set_center_panel.set(war_room::CenterPanel::ActivityFeed);
                     }
                     Err(e) => set_status_msg.set(format!("Continue error: {e}")),
                 }
@@ -266,8 +401,9 @@ pub fn DebatePage() -> impl IntoView {
                         set_synthesis.set(Some(resp.synthesis));
                         set_session_status.set("complete".into());
                         set_status_msg.set("Synthesis complete.".into());
-                        // Collapse all rounds, scroll to top
-                        set_expanded_round.set(None);
+                        // Switch to synthesis result in center panel
+                        set_center_panel.set(war_room::CenterPanel::SynthesisResult);
+                        set_feed_entries.set(Vec::new());
                         if let Some(w) = web_sys::window() {
                             let _ = w.scroll_to_with_x_and_y(0.0, 0.0);
                         }
@@ -339,7 +475,7 @@ pub fn DebatePage() -> impl IntoView {
                         }.into_any()),
                         "awaiting_input" => Some(view! {
                             <span class="badge" style="font-size: 0.8rem;">
-                                {format!("Round {} of {} complete", cr, mr)}
+                                {format!("Round {} of {} complete", cr.max(1), mr)}
                             </span>
                         }.into_any()),
                         "all_rounds_complete" => Some(view! {
@@ -361,15 +497,6 @@ pub fn DebatePage() -> impl IntoView {
                         <button class="btn" style="font-size: 0.8rem;" on:click=move |_| { reset_all(); }>
                             <i class="fa-solid fa-plus"></i>" New"
                         </button>
-                        {(session_status.get() == "complete").then(|| view! {
-                            <button class="btn" style="font-size: 0.8rem;"
-                                on:click=move |_| {
-                                    export_debate(session_id.get_untracked(), rounds.get_untracked(), agents.get_untracked(), synthesis.get_untracked());
-                                }
-                            >
-                                <i class="fa-solid fa-download"></i>" Export"
-                            </button>
-                        })}
                     })
                 }}
             </div>
@@ -517,7 +644,11 @@ pub fn DebatePage() -> impl IntoView {
                         <div style="margin-top: 0.75rem;">
                             <button class="btn btn-primary" on:click=move |_| { start_debate.dispatch(()); }
                                 disabled=move || loading.get()>
-                                {move || if loading.get() { "Generating..." } else { "Generate Panel" }}
+                                {move || if loading.get() {
+                                    view! { <><i class="fa-solid fa-spinner fa-spin"></i>" Generating..."</> }.into_any()
+                                } else {
+                                    view! { <><i class="fa-solid fa-wand-magic-sparkles"></i>" Generate Panel"</> }.into_any()
+                                }}
                             </button>
                         </div>
                     </div>
@@ -525,118 +656,172 @@ pub fn DebatePage() -> impl IntoView {
             } else { None }
         }}
 
-        // ── Sticky controls bar ──
+        // ── Start button (only awaiting_start) ──
         {move || {
-            let status = session_status.get();
-            match status.as_str() {
-                "awaiting_start" => Some(view! {
-                    <div class="card" style="position: sticky; top: 48px; z-index: 10; margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center;">
-                        <button class="btn btn-primary" on:click=move |_| { run_debate.dispatch(()); }
-                            disabled=move || loading.get()>
-                            <i class="fa-solid fa-play"></i>" Start Debate"
-                        </button>
-                        <span class="text-secondary" style="font-size: 0.85rem;">"Review agents below, click to edit. Then start."</span>
-                    </div>
-                }.into_any()),
-                "running" | "researching" => Some(view! {
-                    <div class="card" style="position: sticky; top: 48px; z-index: 10; margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center;">
-                        <span class="badge badge-active"><i class="fa-solid fa-spinner fa-spin"></i>
-                            {move || {
-                                let msg = progress_msg.get();
-                                if msg.is_empty() { " Working...".to_string() } else { format!(" {}", msg) }
-                            }}
-                        </span>
-                    </div>
-                }.into_any()),
-                "awaiting_input" => Some(view! {
-                    <div class="card" style="position: sticky; top: 48px; z-index: 10; margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
-                        <input type="text" placeholder="Inject a question for the next round..."
-                            prop:value=inject_text on:input=move |ev| set_inject_text.set(event_target_value(&ev))
-                            style="flex: 1; min-width: 200px;" />
-                        <button class="btn btn-primary" on:click=move |_| { inject_action.dispatch(()); }>
-                            <i class="fa-solid fa-paper-plane"></i>" Inject"
-                        </button>
-                        <button class="btn" on:click=move |_| { continue_action.dispatch(()); }>
-                            <i class="fa-solid fa-forward"></i>" Continue"
-                        </button>
-                        <button class="btn" on:click=move |_| { synthesize_action.dispatch(()); }
-                            disabled=move || loading.get()>
-                            <i class="fa-solid fa-flask"></i>" Synthesize"
-                        </button>
-                    </div>
-                }.into_any()),
-                "all_rounds_complete" => Some(view! {
-                    <div class="card" style="position: sticky; top: 48px; z-index: 10; margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center;">
-                        <span style="flex: 1; font-weight: bold;">"All rounds complete."</span>
-                        <button class="btn btn-primary" on:click=move |_| { synthesize_action.dispatch(()); }
-                            disabled=move || loading.get()>
-                            <i class="fa-solid fa-flask"></i>
-                            {move || if loading.get() { " Synthesizing..." } else { " Generate Synthesis" }}
-                        </button>
-                    </div>
-                }.into_any()),
-                _ => None,
-            }
+            (session_status.get() == "awaiting_start").then(|| view! {
+                <div class="card" style="position: sticky; top: 48px; z-index: 10; margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                    <button class="btn btn-primary" on:click=move |_| { run_debate.dispatch(()); }
+                        disabled=move || loading.get()>
+                        <i class="fa-solid fa-play"></i>" Start Debate"
+                    </button>
+                    <span class="text-secondary" style="font-size: 0.85rem;">"Review agents below, click to edit. Then start."</span>
+                </div>
+            })
         }}
 
-        // ── SYNTHESIS ON TOP (when complete) ──
+        // Synthesis is now shown inside the War Room center panel (SynthesisResultView)
+
+        // ── Briefing (collapsible, shown when briefing data available) ──
         {move || {
-            let syn = synthesis.get();
-            syn.map(|s| {
-                let s2 = s.clone(); let s3 = s.clone(); let s4 = s.clone();
+            briefing.get().map(|b| {
+                let fact_count = b.facts.len();
+                let q_count = b.questions.len();
+                let _summary = b.summary.clone();
                 view! {
-                    <div class="card" style="margin-bottom: 1.5rem; border: 1px solid var(--primary);">
-                        <h3><i class="fa-solid fa-flask"></i>" Synthesis"</h3>
-                        <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem;">
-                            <button class=move || if synthesis_tab.get() == "evidence" { "btn btn-primary" } else { "btn" }
-                                on:click=move |_| set_synthesis_tab.set("evidence".into())>
-                                <i class="fa-solid fa-search"></i>" Evidence"
-                            </button>
-                            <button class=move || if synthesis_tab.get() == "influence" { "btn btn-primary" } else { "btn" }
-                                on:click=move |_| set_synthesis_tab.set("influence".into())>
-                                <i class="fa-solid fa-arrows-alt"></i>" Influence"
-                            </button>
-                            <button class=move || if synthesis_tab.get() == "agendas" { "btn btn-primary" } else { "btn" }
-                                on:click=move |_| set_synthesis_tab.set("agendas".into())>
-                                <i class="fa-solid fa-mask"></i>" Hidden Agendas"
-                            </button>
-                            <button class=move || if synthesis_tab.get() == "evolution" { "btn btn-primary" } else { "btn" }
-                                on:click=move |_| set_synthesis_tab.set("evolution".into())>
-                                <i class="fa-solid fa-chart-line"></i>" Evolution"
-                            </button>
+                    <details style="margin-bottom: 0.5rem;">
+                        <summary class="card" style="cursor: pointer; padding: 0.5rem 0.75rem; list-style: none; display: flex; align-items: center; gap: 0.5rem;">
+                            <i class="fa-solid fa-book-open" style="color: var(--accent-bright);"></i>
+                            <strong style="font-size: 0.85rem;">"Briefing"</strong>
+                            <span class="badge" style="font-size: 0.7rem;">{format!("{} questions", q_count + 1)}</span>
+                            <span class="badge badge-active" style="font-size: 0.7rem;">{format!("{} facts", fact_count)}</span>
+                            {if b.facts_stored > 0 || b.relations_created > 0 {
+                                view! {
+                                    <span class="badge badge-active" style="font-size: 0.7rem;">
+                                        {format!("{} stored, {} relations", b.facts_stored, b.relations_created)}
+                                    </span>
+                                }.into_any()
+                            } else if fact_count > 0 {
+                                view! {
+                                    <span class="badge" style="font-size: 0.7rem; background: var(--bg-tertiary); color: var(--text-secondary);">
+                                        "graph only"
+                                    </span>
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <span class="badge" style="font-size: 0.7rem; opacity: 0.5;">
+                                        "no data"
+                                    </span>
+                                }.into_any()
+                            }}
+                        </summary>
+                        <div class="card" style="margin-top: 0; border-top: none; border-radius: 0 0 8px 8px; padding: 0.75rem; font-size: 0.85rem;">
+                            // Structured facts grouped by question
+                            {b.facts.iter().fold(Vec::<(String, Vec<crate::api::types::BriefingFact>)>::new(), |mut acc, f| {
+                                if let Some(group) = acc.iter_mut().find(|(q, _)| q == &f.question) {
+                                    group.1.push(f.clone());
+                                } else {
+                                    acc.push((f.question.clone(), vec![f.clone()]));
+                                }
+                                acc
+                            }).iter().map(|(question, facts)| {
+                                let q = question.clone();
+                                let fs = facts.clone();
+                                view! {
+                                    <details style="margin-bottom: 0.5rem;">
+                                        <summary style="cursor: pointer; font-weight: 600; font-size: 0.8rem; padding: 0.3rem 0; color: var(--text-primary);">
+                                            <i class="fa-solid fa-magnifying-glass" style="margin-right: 0.3rem; opacity: 0.5; font-size: 0.7rem;"></i>
+                                            {q}
+                                            <span class="badge" style="font-size: 0.6rem; margin-left: 0.3rem;">{format!("{}", fs.len())}</span>
+                                        </summary>
+                                        <ul style="margin: 0.2rem 0 0; padding-left: 1.2rem; font-size: 0.78rem;">
+                                            {fs.iter().take(5).map(|f| {
+                                                let source_icon = match f.source.as_str() {
+                                                    "graph" => "fa-solid fa-database",
+                                                    "web" => "fa-solid fa-globe",
+                                                    "sparql" => "fa-solid fa-link",
+                                                    "wikipedia" => "fa-brands fa-wikipedia-w",
+                                                    _ => "fa-solid fa-circle-info",
+                                                };
+                                                let conf_pct = (f.confidence * 100.0) as u32;
+                                                view! {
+                                                    <li style="margin-bottom: 0.15rem; line-height: 1.4;">
+                                                        <i class=source_icon style="font-size: 0.65rem; opacity: 0.6; margin-right: 0.2rem;"></i>
+                                                        {f.content.clone()}
+                                                        <span class="text-muted" style="font-size: 0.65rem;">{format!(" ({}%)", conf_pct)}</span>
+                                                    </li>
+                                                }
+                                            }).collect::<Vec<_>>()}
+                                        </ul>
+                                    </details>
+                                }
+                            }).collect::<Vec<_>>()}
                         </div>
-                        {move || match synthesis_tab.get().as_str() {
-                            "evidence" => render_evidence_tab(s.clone()).into_any(),
-                            "influence" => render_influence_tab(s2.clone()).into_any(),
-                            "agendas" => render_agendas_tab(s3.clone()).into_any(),
-                            "evolution" => render_evolution_tab(s4.clone()).into_any(),
-                            _ => view! { <p>"Unknown tab"</p> }.into_any(),
-                        }}
-                        {move || {
-                            let syn = synthesis.get();
-                            syn.map(|ss| view! {
-                                <div style="margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem;">
-                                    {(!ss.key_tensions.is_empty()).then(|| view! {
-                                        <h4><i class="fa-solid fa-bolt"></i>" Key Tensions"</h4>
-                                        <ul>{ss.key_tensions.iter().map(|t| view! { <li>{t.clone()}</li> }).collect::<Vec<_>>()}</ul>
-                                    })}
-                                    {(!ss.recommended_investigations.is_empty()).then(|| view! {
-                                        <h4><i class="fa-solid fa-magnifying-glass"></i>" Recommended Investigations"</h4>
-                                        <ul>{ss.recommended_investigations.iter().map(|r| view! { <li>{r.clone()}</li> }).collect::<Vec<_>>()}</ul>
-                                    })}
-                                </div>
-                            })
-                        }}
+                    </details>
+                }
+            })
+        }}
+
+        // ── Topic + mode bar (shown as soon as panel exists) ──
+        {move || {
+            let status = session_status.get();
+            let show_topic = matches!(status.as_str(), "panel_ready" | "running" | "researching" | "awaiting_input" | "all_rounds_complete" | "synthesizing");
+            show_topic.then(|| {
+                let t = topic.get();
+                let m = debate_mode.get();
+                let mode_label = match m.as_str() {
+                    "analyze" => "Analyze", "red_team" => "Red Team", "outcome_engineering" => "Outcome Engineering",
+                    "scenario_forecast" => "Scenario Forecast", "stakeholder_simulation" => "Stakeholder Simulation",
+                    "pre_mortem" => "Pre-Mortem", "decision_matrix" => "Decision Matrix",
+                    _ => &m,
+                };
+                view! {
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; padding: 0.4rem 0.6rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem;">
+                        <span class="badge badge-active" style="font-size: 0.7rem;">{mode_label.to_string()}</span>
+                        <strong style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{t}</strong>
                     </div>
                 }
             })
         }}
 
-        // ── Agent panel (collapsible) ──
+        // ── War Room (3-panel layout when debate is active) ──
+        {move || {
+            let status = session_status.get();
+            let is_war_room = matches!(status.as_str(), "running" | "researching" | "awaiting_input" | "all_rounds_complete" | "synthesizing" | "complete");
+            is_war_room.then(|| {
+                view! {
+                <war_room::WarRoom
+                    session_id=session_id
+                    session_status=session_status
+                    agents=agents
+                    rounds=rounds
+                    current_round=current_round
+                    max_rounds=max_rounds
+                    synthesis=synthesis
+                    set_session_status=set_session_status
+                    set_rounds=set_rounds
+                    set_synthesis=set_synthesis
+                    set_status_msg=set_status_msg
+                    inject_text=inject_text
+                    set_inject_text=set_inject_text
+                    progress_msg=progress_msg
+                    set_progress_msg=set_progress_msg
+                    inject_action=inject_action
+                    continue_action=continue_action
+                    synthesize_action=synthesize_action
+                    loading=loading
+                    // Lifted state -- survives remounts
+                    agent_states=agent_states
+                    set_agent_states=set_agent_states
+                    feed_entries=feed_entries
+                    set_feed_entries=set_feed_entries
+                    evidence_items=evidence_items
+                    set_evidence_items=set_evidence_items
+                    feed_counter=feed_counter
+                    set_feed_counter=set_feed_counter
+                    sse_connected=sse_connected
+                    set_sse_connected=set_sse_connected
+                    center_panel=center_panel
+                    set_center_panel=set_center_panel
+                />
+            }}) // view! + then
+        }}
+
+        // ── Agent panel (only shown when awaiting_start for editing) ──
         {move || {
             let current_agents = agents.get();
             if current_agents.is_empty() { return None; }
             let is_editable = session_status.get() == "awaiting_start";
+            if !is_editable { return None; }
             Some(view! {
                 <div class="card" style="margin-bottom: 1rem;">
                     <h3 style="margin: 0;"><i class="fa-solid fa-users"></i>" Agent Panel"
@@ -712,10 +897,13 @@ pub fn DebatePage() -> impl IntoView {
                             <div>
                                 <label>"Source Access"</label>
                                 <select prop:value=edit_source on:change=move |ev| set_edit_source.set(event_target_value(&ev)) style="width: 100%;">
-                                    <option value="graph_only">"Graph only"</option>
-                                    <option value="graph_and_web">"Graph + Web"</option>
-                                    <option value="graph_low_confidence">"Graph (low confidence)"</option>
-                                    <option value="web_only">"Web only"</option>
+                                    <option value="Comprehensive">"Deep research (graph + web)"</option>
+                                    <option value="BriefingFocused">"Briefing-focused"</option>
+                                    <option value="Contrarian">"Contrarian research"</option>
+                                    <option value="WeakSignals">"Weak signals & low-confidence"</option>
+                                    <option value="GraphOnly">"Graph only"</option>
+                                    <option value="GraphAndWeb">"Graph + Web search"</option>
+                                    <option value="WebOnly">"Web only"</option>
                                 </select>
                             </div>
                             <div>
@@ -736,96 +924,7 @@ pub fn DebatePage() -> impl IntoView {
             })
         }}
 
-        // ── Debate timeline (collapsible rounds) ──
-        {move || {
-            let current_rounds = rounds.get();
-            if current_rounds.is_empty() { return None; }
-            let current_agents = agents.get();
-            Some(view! {
-                <div style="margin-bottom: 1.5rem;">
-                    <h3><i class="fa-solid fa-timeline"></i>" Debate Timeline"</h3>
-                    {current_rounds.into_iter().enumerate().map(|(idx, round)| {
-                        let round_num = round.round_number + 1;
-                        let turn_count = round.turns.len();
-                        let gap_count = round.gap_research.len();
-                        let injection = round.user_injection.clone();
-                        let agents_for_round = current_agents.clone();
-                        let is_expanded = move || expanded_round.get() == Some(idx);
-                        view! {
-                            <div class="card" style="margin-bottom: 0.5rem; padding: 0;">
-                                // Round header (clickable to expand/collapse)
-                                <div style="padding: 0.6rem 1rem; cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
-                                    on:click=move |_| {
-                                        if expanded_round.get_untracked() == Some(idx) {
-                                            set_expanded_round.set(None);
-                                        } else {
-                                            set_expanded_round.set(Some(idx));
-                                        }
-                                    }>
-                                    <span>
-                                        <i class=move || if is_expanded() { "fa-solid fa-chevron-down" } else { "fa-solid fa-chevron-right" }></i>
-                                        <strong>{format!(" Round {}", round_num)}</strong>
-                                        <span class="text-secondary" style="margin-left: 0.5rem; font-size: 0.85rem;">
-                                            {format!("{} turns", turn_count)}
-                                            {(gap_count > 0).then(|| format!(" + {} gaps researched", gap_count))}
-                                        </span>
-                                        {injection.as_ref().map(|inj| view! {
-                                            <span class="badge" style="font-size: 0.65rem; margin-left: 0.5rem;">
-                                                <i class="fa-solid fa-comment-dots"></i>{format!(" {}", truncate_str(inj, 40))}
-                                            </span>
-                                        })}
-                                    </span>
-                                </div>
-                                // Round body (expanded)
-                                {move || {
-                                    if !is_expanded() { return None; }
-                                    let inj2 = round.user_injection.clone();
-                                    Some(view! {
-                                        <div style="padding: 0 1rem 0.75rem;">
-                                            {inj2.map(|inj| view! {
-                                                <div class="alert" style="margin: 0.5rem 0; font-style: italic;">
-                                                    <i class="fa-solid fa-comment-dots"></i>
-                                                    {format!(" Moderator: {}", inj)}
-                                                </div>
-                                            })}
-                                            {round.turns.iter().map(|turn| {
-                                                let agent = agents_for_round.iter().find(|a| a.id == turn.agent_id).cloned();
-                                                render_turn(turn.clone(), agent)
-                                            }).collect::<Vec<_>>()}
-                                            // Gap research results
-                                            {(!round.gap_research.is_empty()).then(|| {
-                                                let gaps = round.gap_research.clone();
-                                                view! {
-                                                    <div style="margin-top: 0.75rem; padding: 0.6rem; background: rgba(46,204,113,0.08); border-radius: 4px; border-left: 3px solid var(--success);">
-                                                        <strong style="font-size: 0.85rem;"><i class="fa-solid fa-magnifying-glass-plus"></i>" Gap-Closing Research"</strong>
-                                                        {gaps.iter().map(|gr| {
-                                                            let ingested = gr.ingested;
-                                                            view! {
-                                                                <div style="margin-top: 0.4rem; font-size: 0.8rem;">
-                                                                    <div><i class="fa-solid fa-search"></i>{format!(" {}", gr.gap_query)}</div>
-                                                                    {gr.findings.iter().map(|f| {
-                                                                        view! { <div style="margin-left: 1rem; color: var(--text-secondary);">{format!("- {}", f)}</div> }
-                                                                    }).collect::<Vec<_>>()}
-                                                                    {ingested.then(|| view! {
-                                                                        <div style="margin-left: 1rem; color: var(--success); font-size: 0.75rem;">
-                                                                            <i class="fa-solid fa-database"></i>" Added to knowledge graph"
-                                                                        </div>
-                                                                    })}
-                                                                </div>
-                                                            }
-                                                        }).collect::<Vec<_>>()}
-                                                    </div>
-                                                }
-                                            })}
-                                        </div>
-                                    })
-                                }}
-                            </div>
-                        }
-                    }).collect::<Vec<_>>()}
-                </div>
-            })
-        }}
+        // Timeline view removed -- all debate content now lives in the War Room center panel.
     }
 }
 
@@ -853,53 +952,7 @@ fn source_label(sa: &str) -> &'static str {
     }
 }
 
-fn render_turn(turn: DebateTurn, agent: Option<DebateAgent>) -> impl IntoView {
-    let color = agent.as_ref().map(|a| a.color.clone()).unwrap_or_else(|| "#666".into());
-    let icon = agent.as_ref().map(|a| a.icon.clone()).unwrap_or_else(|| "fa-user".into());
-    let name = agent.as_ref().map(|a| a.name.clone()).unwrap_or_else(|| turn.agent_id.clone());
-    let bias_label = agent.as_ref().map(|a| {
-        if a.bias.is_neutral { "Neutral".to_string() } else { a.bias.label.clone() }
-    }).unwrap_or_default();
-
-    view! {
-        <div style=format!("border-left: 3px solid {}; padding: 0.6rem; margin: 0.4rem 0; background: var(--bg-secondary); border-radius: 4px;", color)>
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
-                <span>
-                    <i class=format!("fa-solid {}", icon) style=format!("color: {};", color)></i>
-                    <strong>{format!(" {}", name)}</strong>
-                    <span class="badge" style="font-size: 0.6rem; margin-left: 0.4rem;">{bias_label}</span>
-                </span>
-                <span class="badge" style="font-size: 0.7rem;">{format!("{:.0}%", turn.confidence * 100.0)}</span>
-            </div>
-            // Position shift (evolution)
-            {(!turn.position_shift.is_empty()).then(|| view! {
-                <div style="margin-bottom: 0.4rem; font-size: 0.8rem; padding: 0.25rem 0.5rem; background: rgba(52,152,219,0.1); border-radius: 3px; border-left: 2px solid var(--info);">
-                    <i class="fa-solid fa-arrows-rotate" style="color: var(--info);"></i>
-                    {format!(" {}", turn.position_shift)}
-                </div>
-            })}
-            {(!turn.concessions.is_empty()).then(|| view! {
-                <div style="margin-bottom: 0.4rem; font-size: 0.8rem; color: var(--success);">
-                    <i class="fa-solid fa-hand-holding-heart"></i>
-                    {format!(" Concedes: {}", turn.concessions.join("; "))}
-                </div>
-            })}
-            <div style="white-space: pre-wrap; font-size: 0.85rem; line-height: 1.4;">{turn.position.clone()}</div>
-            <div style="margin-top: 0.4rem; font-size: 0.75rem; color: var(--text-secondary); display: flex; gap: 1rem; flex-wrap: wrap;">
-                {(!turn.evidence.is_empty()).then(|| format!("{} evidence", turn.evidence.len()))}
-                {(!turn.tools_used.is_empty()).then(|| format!("{} tools", turn.tools_used.len()))}
-                {(!turn.agrees_with.is_empty()).then(|| view! {
-                    <span style="color: var(--success);"><i class="fa-solid fa-handshake"></i>{format!(" {}", turn.agrees_with.join(", "))}</span>
-                })}
-                {(!turn.disagrees_with.is_empty()).then(|| view! {
-                    <span style="color: var(--danger);"><i class="fa-solid fa-xmark"></i>{format!(" {}", turn.disagrees_with.join(", "))}</span>
-                })}
-            </div>
-        </div>
-    }
-}
-
-fn render_evidence_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView {
+pub(super) fn render_evidence_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView {
     view! {
         <div>
             <h4><i class="fa-solid fa-check-circle"></i>" Evidence-Based Conclusion"</h4>
@@ -913,11 +966,19 @@ fn render_evidence_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView {
                 <h4><i class="fa-solid fa-exclamation-triangle"></i>" Evidence Gaps"</h4>
                 <ul>{s.evidence_gaps.iter().map(|g| view! { <li>{g.clone()}</li> }).collect::<Vec<_>>()}</ul>
             })}
+            {(!s.key_tensions.is_empty()).then(|| view! {
+                <h4><i class="fa-solid fa-bolt"></i>" Key Tensions"</h4>
+                <ul>{s.key_tensions.iter().map(|t| view! { <li>{t.clone()}</li> }).collect::<Vec<_>>()}</ul>
+            })}
+            {(!s.recommended_investigations.is_empty()).then(|| view! {
+                <h4><i class="fa-solid fa-magnifying-glass"></i>" Recommended Investigations"</h4>
+                <ul>{s.recommended_investigations.iter().map(|r| view! { <li>{r.clone()}</li> }).collect::<Vec<_>>()}</ul>
+            })}
         </div>
     }
 }
 
-fn render_influence_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView {
+pub(super) fn render_influence_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView {
     view! {
         <div>
             {(!s.influence_map.is_empty()).then(|| view! {
@@ -953,7 +1014,7 @@ fn render_influence_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView 
     }
 }
 
-fn render_agendas_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView {
+pub(super) fn render_agendas_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView {
     view! {
         <div>
             {(!s.hidden_agendas.is_empty()).then(|| view! {
@@ -991,7 +1052,7 @@ fn render_agendas_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView {
     }
 }
 
-fn render_evolution_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView {
+pub(super) fn render_evolution_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView {
     view! {
         <div>
             {if s.evolution.is_empty() {
@@ -1047,7 +1108,7 @@ fn render_evolution_tab(s: crate::api::types::DebateSynthesis) -> impl IntoView 
     }
 }
 
-fn export_debate(
+pub(super) fn export_debate(
     session_id: Option<String>,
     rounds: Vec<DebateRound>,
     agents: Vec<DebateAgent>,
