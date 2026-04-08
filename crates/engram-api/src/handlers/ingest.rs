@@ -851,13 +851,13 @@ async fn reprocess_docs_background(
 
     let mut items: Vec<engram_ingest::RawItem> = Vec::new();
     let mut processed_count = 0u32;
+    let mut fetched_doc_labels: Vec<String> = Vec::new();
 
     for (doc_label, props) in &docs_to_process {
         processed_count += 1;
         let url = props.get("url");
         let title = props.get("title").cloned();
         let doc_date = props.get("doc_date").cloned();
-        let content_hash = props.get("content_hash");
 
         state.event_bus.publish(GraphEvent::IngestProgress {
             operation: "reprocess".into(),
@@ -871,91 +871,95 @@ async fn reprocess_docs_background(
             .unwrap_or_default()
             .as_secs() as i64;
 
-        // Strategy 1: Re-fetch from URL
-        if let Some(u) = url {
-            match http_client.get(u).send().await {
-                Ok(resp) => {
-                    let ct = resp.headers()
-                        .get("content-type")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("")
-                        .to_string();
-                    let is_pdf = u.to_lowercase().ends_with(".pdf") || ct.contains("pdf");
+        // Re-fetch from URL for fresh, complete content.
+        // No doc_store fallback: if fetch fails, doc stays pending and user decides.
+        let Some(u) = url else {
+            state.event_bus.publish(GraphEvent::IngestProgress {
+                operation: "reprocess".into(),
+                document: doc_label.as_str().into(),
+                processed: processed_count, total,
+                stage: "error: no URL, content not available".into(),
+            });
+            continue;
+        };
 
-                    if let Ok(bytes) = resp.bytes().await {
-                        let content = if is_pdf {
-                            engram_ingest::Content::Bytes {
-                                data: bytes.to_vec(),
-                                mime: "application/pdf".into(),
+        match http_client.get(u).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let ct = resp.headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let is_pdf = u.to_lowercase().ends_with(".pdf") || ct.contains("pdf");
+
+                if let Ok(bytes) = resp.bytes().await {
+                    let content = if is_pdf {
+                        engram_ingest::Content::Bytes {
+                            data: bytes.to_vec(),
+                            mime: "application/pdf".into(),
+                        }
+                    } else {
+                        let text = String::from_utf8(bytes.to_vec())
+                            .unwrap_or_else(|_| "[binary content]".to_string());
+                        let text = if ct.contains("html") {
+                            // Extract tables BEFORE Readability strips them
+                            let tables = super::debate::research::extract_html_tables(&text, 10);
+                            let article_text = dom_smoothie::Readability::new(text.clone(), None, None)
+                                .ok()
+                                .and_then(|mut r| r.parse().ok())
+                                .map(|a| a.text_content.to_string())
+                                .unwrap_or(text);
+                            // Append extracted tables to article text
+                            match tables {
+                                Some(t) => format!("{}\n\n{}", article_text, t),
+                                None => article_text,
                             }
                         } else {
-                            let text = String::from_utf8(bytes.to_vec())
-                                .unwrap_or_else(|_| "[binary content]".to_string());
-                            let text = if ct.contains("html") {
-                                dom_smoothie::Readability::new(text.clone(), None, None)
-                                    .ok()
-                                    .and_then(|mut r| r.parse().ok())
-                                    .map(|a| a.text_content.to_string())
-                                    .unwrap_or(text)
-                            } else {
-                                text
-                            };
-                            engram_ingest::Content::Text(text)
+                            text
                         };
+                        engram_ingest::Content::Text(text)
+                    };
 
-                        let mut metadata = std::collections::HashMap::new();
-                        if let Some(t) = title.clone() { metadata.insert("title".into(), t); }
-                        if let Some(d) = doc_date.clone() { metadata.insert("doc_date".into(), d); }
+                    let mut metadata = std::collections::HashMap::new();
+                    if let Some(t) = title.clone() { metadata.insert("title".into(), t); }
+                    if let Some(d) = doc_date.clone() { metadata.insert("doc_date".into(), d); }
 
-                        items.push(engram_ingest::RawItem {
-                            content,
-                            source_url: Some(u.clone()),
-                            source_name: format!("reprocess:{doc_label}"),
-                            fetched_at: now,
-                            metadata,
-                        });
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(doc = %doc_label, error = %e, "reprocess: fetch failed");
-                }
-            }
-        }
-
-        // Strategy 2: Load from DocStore (fallback)
-        if let Some(hash_hex) = content_hash {
-            let hash_bytes: Vec<u8> = (0..hash_hex.len())
-                .step_by(2)
-                .filter_map(|i| u8::from_str_radix(&hash_hex[i..i+2], 16).ok())
-                .collect();
-
-            if hash_bytes.len() == 32 {
-                let mut hash = [0u8; 32];
-                hash.copy_from_slice(&hash_bytes);
-
-                if let Ok(store) = state.doc_store.read() {
-                    if let Ok((content_bytes, _mime)) = store.load(&hash) {
-                        if let Ok(text) = String::from_utf8(content_bytes) {
-                            let mut metadata = std::collections::HashMap::new();
-                            if let Some(t) = title { metadata.insert("title".into(), t); }
-                            if let Some(d) = doc_date { metadata.insert("doc_date".into(), d); }
-
-                            items.push(engram_ingest::RawItem {
-                                content: engram_ingest::Content::Text(text),
-                                source_url: url.cloned(),
-                                source_name: format!("reprocess:{doc_label}"),
-                                fetched_at: now,
-                                metadata,
-                            });
-                            continue;
-                        }
-                    }
+                    items.push(engram_ingest::RawItem {
+                        content,
+                        source_url: Some(u.clone()),
+                        source_name: format!("reprocess:{doc_label}"),
+                        fetched_at: now,
+                        metadata,
+                    });
+                    fetched_doc_labels.push(doc_label.clone());
+                } else {
+                    state.event_bus.publish(GraphEvent::IngestProgress {
+                        operation: "reprocess".into(),
+                        document: doc_label.as_str().into(),
+                        processed: processed_count, total,
+                        stage: "error: content not available (body read failed)".into(),
+                    });
                 }
             }
+            Ok(resp) => {
+                let status = resp.status();
+                state.event_bus.publish(GraphEvent::IngestProgress {
+                    operation: "reprocess".into(),
+                    document: doc_label.as_str().into(),
+                    processed: processed_count, total,
+                    stage: format!("error: content not available (HTTP {})", status).into(),
+                });
+            }
+            Err(e) => {
+                tracing::warn!(doc = %doc_label, error = %e, "reprocess: fetch failed");
+                state.event_bus.publish(GraphEvent::IngestProgress {
+                    operation: "reprocess".into(),
+                    document: doc_label.as_str().into(),
+                    processed: processed_count, total,
+                    stage: format!("error: content not available ({})", e).into(),
+                });
+            }
         }
-
-        tracing::warn!(doc = %doc_label, "reprocess: no URL and no cached content");
     }
 
     if items.is_empty() {
@@ -996,13 +1000,33 @@ async fn reprocess_docs_background(
 
     match result {
         Ok(Ok(r)) => {
-            // Mark original documents as ner_complete.
-            // The pipeline may have created new Doc nodes with different hashes
-            // (if content changed). Mark the originals anyway so they aren't
-            // re-queued. The new Doc nodes are already marked by the pipeline.
+            // Delete old pending Document nodes that were successfully re-fetched.
+            // The pipeline created new Document nodes from fresh content.
             if let Ok(mut g) = state.graph.write() {
-                for (doc_label, _) in &docs_to_process {
-                    let _ = g.set_property(doc_label, "ner_complete", "true");
+                let prov = engram_core::graph::Provenance {
+                    source_type: engram_core::graph::SourceType::Derived,
+                    source_id: "reprocess-cleanup".into(),
+                };
+                for doc_label in &fetched_doc_labels {
+                    // Get content_hash before deleting so we can clean up doc_store
+                    let old_hash_hex = g.get_properties(doc_label)
+                        .ok().flatten()
+                        .and_then(|p| p.get("content_hash").cloned());
+                    let _ = g.delete(doc_label, &prov);
+                    // Remove old cached content from doc_store
+                    if let Some(hex) = old_hash_hex {
+                        let hash_bytes: Vec<u8> = (0..hex.len())
+                            .step_by(2)
+                            .filter_map(|i| u8::from_str_radix(&hex[i..i+2], 16).ok())
+                            .collect();
+                        if hash_bytes.len() == 32 {
+                            let mut hash = [0u8; 32];
+                            hash.copy_from_slice(&hash_bytes);
+                            if let Ok(mut store) = state.doc_store.write() {
+                                store.remove(&hash);
+                            }
+                        }
+                    }
                 }
             }
             state.mark_dirty();

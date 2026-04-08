@@ -109,6 +109,20 @@ pub fn extract_claims(
 ) -> Vec<ExtractedClaim> {
     let entity_list = entity_names.join(", ");
 
+    // Detect if chunk contains pipe tables (lines starting with |)
+    let has_table = chunk.lines().filter(|l| {
+        let t = l.trim();
+        t.starts_with('|') && t.ends_with('|') && t.matches('|').count() >= 3
+    }).count() >= 2;
+
+    let table_instruction = if has_table {
+        "\n- This text contains TABULAR DATA with column headers. \
+         Map each row's cell values through the column headers to form triples. \
+         Example: header \"Country\" + cell \"Russia\", header \"Output\" + cell \"71.4 Mt\" → FACT||Russia||output||71.4 Mt\n"
+    } else {
+        ""
+    };
+
     let prompt = format!(
         "You are a knowledge graph fact extraction engine. Extract Subject-Predicate-Object triples from this text.\n\n\
          Known entities in scope: {entity_list}\n\n\
@@ -120,7 +134,8 @@ pub fn extract_claims(
          - Extract dates/time references when present (ISO-8601)\n\
          - Rate confidence: \"stated\" facts = high, \"alleged\"/\"reported\" = medium, \"speculated\"/\"rumored\" = low\n\
          - Do NOT infer facts not stated in the text\n\
-         - Do NOT use pronouns (he, she, they, it) as Subject or Object\n\n\
+         - Do NOT use pronouns (he, she, they, it) as Subject or Object\n\
+         {table_instruction}\n\
          Examples:\n\
          FACT||Russia||deployed||Shahed drones in Ukraine||Russia,Ukraine||2024-03-15||high\n\
          FACT||NATO||expanded sanctions against||Russian energy sector||NATO,Russia||2024-02-01||medium\n\

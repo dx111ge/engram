@@ -206,10 +206,37 @@ impl Pipeline {
     /// 5. Build ProcessedFacts from extracted entities
     /// 6. Apply transformers
     /// 7. Batch-write to graph (write lock, chunked)
+    /// Log current process RSS in MB for memory debugging.
+    fn log_ram(label: &str) {
+        #[cfg(target_os = "windows")]
+        {
+            // Read from /proc/self or use GetProcessMemoryInfo
+            use std::process::Command;
+            if let Ok(out) = Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {}", std::process::id()), "/FO", "CSV", "/NH"])
+                .output()
+            {
+                let s = String::from_utf8_lossy(&out.stdout);
+                // CSV format: "engram.exe","PID","Console","1","123.456 K"
+                if let Some(mem) = s.split(',').nth(4) {
+                    let mem = mem.trim().trim_matches('"').replace('.', "").replace(" K", "");
+                    if let Ok(kb) = mem.parse::<u64>() {
+                        eprintln!("[RAM] {}: {} MB", label, kb / 1024);
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            eprintln!("[RAM] {}: (non-windows)", label);
+        }
+    }
+
     pub fn execute(&self, items: Vec<RawItem>) -> Result<PipelineResult, IngestError> {
         let start = std::time::Instant::now();
         let mut result = PipelineResult::default();
         let mut absorbed_dates: HashMap<String, String> = HashMap::new();
+        Self::log_ram("pipeline-start");
 
         if items.is_empty() {
             return Ok(result);
@@ -222,7 +249,9 @@ impl Pipeline {
         );
 
         // Stage 1: Parse raw items into text segments
+        Self::log_ram("before-parse");
         let segments = self.parse_items(&items, &mut result)?;
+        Self::log_ram("after-parse");
 
         if segments.is_empty() {
             result.duration_ms = start.elapsed().as_millis() as u64;
@@ -278,11 +307,31 @@ impl Pipeline {
         };
 
         // Stage 3: Extract entities via NER (cascade through extractors)
+        Self::log_ram("before-NER");
         let mut facts: Vec<ProcessedFact> = Vec::new();
 
         if self.config.stages.ner && !self.extractors.is_empty() {
             for (seg, lang) in &lang_segments {
-                let mut extracted = self.run_extractors(&seg.text, lang);
+                // Chunk large texts before NER to prevent ONNX memory explosion.
+                // GLiNER2 tokenizes the full input into one tensor -- 37K chars caused 51GB RAM.
+                let mut extracted = if seg.text.len() > 5000 {
+                    let chunks = crate::fact_extract::chunk_text(&seg.text, 3000);
+                    tracing::info!(chunks = chunks.len(), chars = seg.text.len(), "NER: chunking large text");
+                    let mut all_entities = Vec::new();
+                    for (ci, chunk) in chunks.iter().enumerate() {
+                        Self::log_ram(&format!("NER-chunk-{}/{}", ci + 1, chunks.len()));
+                        let chunk_entities = self.run_extractors(chunk, lang);
+                        eprintln!("[RAM] NER-chunk-{}: {} entities from {} chars", ci + 1, chunk_entities.len(), chunk.len());
+                        all_entities.extend(chunk_entities);
+                    }
+                    Self::log_ram("NER-chunks-done");
+                    // Dedup entities that appear in overlapping chunks
+                    all_entities.sort_by(|a, b| a.text.cmp(&b.text).then(a.entity_type.cmp(&b.entity_type)));
+                    all_entities.dedup_by(|a, b| a.text == b.text && a.entity_type == b.entity_type);
+                    all_entities
+                } else {
+                    self.run_extractors(&seg.text, lang)
+                };
 
                 // Fragment filter: remove junk NER outputs
                 extracted.retain(|e| {
@@ -341,7 +390,27 @@ impl Pipeline {
                 }
 
                 // Stage 5: Relation extraction (after NER + resolve, before fact building)
-                let relations = self.run_relation_extraction(&seg.text, &extracted);
+                // Chunk large texts to prevent ONNX memory explosion (same as NER)
+                Self::log_ram("before-RE");
+                let relations = if seg.text.len() > 5000 && !extracted.is_empty() {
+                    let chunks = crate::fact_extract::chunk_text(&seg.text, 3000);
+                    let mut all_rels = Vec::new();
+                    for chunk in &chunks {
+                        // Filter entities that appear in this chunk
+                        let chunk_entities: Vec<_> = extracted.iter()
+                            .filter(|e| chunk.contains(&e.text))
+                            .cloned()
+                            .collect();
+                        if chunk_entities.len() >= 2 {
+                            let rels = self.run_relation_extraction(chunk, &chunk_entities);
+                            all_rels.extend(rels);
+                        }
+                    }
+                    all_rels
+                } else {
+                    self.run_relation_extraction(&seg.text, &extracted)
+                };
+                Self::log_ram("after-RE");
 
                 // Stage 6: Convert extracted entities to ProcessedFacts
                 let now = std::time::SystemTime::now()
@@ -417,6 +486,7 @@ impl Pipeline {
                 });
             }
         }
+        Self::log_ram("after-NER-all");
 
         // Stage 6: Apply transformers
         let facts = self.apply_transformers(facts, &mut result);
@@ -494,7 +564,19 @@ impl Pipeline {
                         }
                     };
 
-                    let mut extracted = self.run_extractors(&seg.text, &lang);
+                    // Chunk large texts before NER (same as sequential path)
+                    let mut extracted = if seg.text.len() > 5000 {
+                        let chunks = crate::fact_extract::chunk_text(&seg.text, 3000);
+                        let mut all_entities = Vec::new();
+                        for chunk in &chunks {
+                            all_entities.extend(self.run_extractors(chunk, &lang));
+                        }
+                        all_entities.sort_by(|a, b| a.text.cmp(&b.text).then(a.entity_type.cmp(&b.entity_type)));
+                        all_entities.dedup_by(|a, b| a.text == b.text && a.entity_type == b.entity_type);
+                        all_entities
+                    } else {
+                        self.run_extractors(&seg.text, &lang)
+                    };
 
                     // Fragment filter: remove junk NER outputs
                     extracted.retain(|e| {
@@ -1204,10 +1286,12 @@ impl Pipeline {
             }
 
             // Layer 1: Entity -> Document (mentioned_in) direct edges
+            // Layer 2: Fact --[extracted_from]--> Document provenance edges
             for fact in facts {
                 if let Some(ref doc_ctx) = fact.doc_context {
                     let doc_label = crate::document::doc_label(&doc_ctx.content_hash_hex);
                     let _ = graph.relate_upsert(&fact.entity, &doc_label, "mentioned_in", &prov);
+                    let _ = graph.relate_upsert(&fact.entity, &doc_label, "extracted_from", &prov);
                 }
             }
         }
@@ -1342,27 +1426,37 @@ impl Pipeline {
 
         let mut total_facts = 0u32;
         for (doc_label, (text, entity_names)) in &doc_texts {
-            // Chunk the document text
-            let chunks = crate::fact_extract::chunk_text(text, 3000);
+            // Safety cap: warn and truncate excessively large documents to prevent
+            // memory explosion (42GB observed on a 37K char PDF producing 15 chunks).
+            let text = if text.len() > 100_000 {
+                tracing::warn!(
+                    doc = %doc_label, chars = text.len(),
+                    "LLM fact extraction: document exceeds 100K chars, truncating"
+                );
+                &text[..100_000]
+            } else {
+                text.as_str()
+            };
 
-            let mut all_claims = Vec::new();
+            let chunks = crate::fact_extract::chunk_text(text, 3000);
+            tracing::info!(doc = %doc_label, chunks = chunks.len(), "LLM fact extraction: processing");
+
+            // Process and store one chunk at a time to keep memory bounded.
+            // Each chunk's claims are written to graph immediately, then freed.
             for (idx, chunk) in chunks.iter().enumerate() {
                 let claims = crate::fact_extract::extract_claims(
                     &client, &config, chunk, entity_names, idx,
                 );
-                all_claims.extend(claims);
-            }
-
-            if all_claims.is_empty() {
-                continue;
-            }
-
-            // Store facts in graph
-            if let Ok(mut graph) = self.graph.write() {
-                let count = crate::fact_extract::store_facts_in_graph(
-                    &mut graph, &all_claims, doc_label, entity_names,
-                );
-                total_facts += count;
+                if claims.is_empty() {
+                    continue;
+                }
+                if let Ok(mut graph) = self.graph.write() {
+                    let count = crate::fact_extract::store_facts_in_graph(
+                        &mut graph, &claims, doc_label, entity_names,
+                    );
+                    total_facts += count;
+                }
+                // claims dropped here -- memory freed before next chunk
             }
         }
 

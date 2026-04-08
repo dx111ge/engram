@@ -40,7 +40,7 @@ pub fn InsightsPage() -> impl IntoView {
             <div class="flex gap-sm mt-1" style="flex-wrap: wrap;">
                 {move || {
                     stats.get().flatten().map(|s| view! {
-                        <span class="badge badge-active" style="font-size: 0.85rem;">{format!("{} facts", s.nodes)}</span>
+                        <span class="badge badge-active" style="font-size: 0.85rem;">{format!("{} nodes", s.nodes)}</span>
                         <span class="badge badge-active" style="font-size: 0.85rem;">{format!("{} connections", s.edges)}</span>
                         <span class="badge badge-active" style="font-size: 0.85rem;">{format!("{} documents", s.documents)}</span>
                     })

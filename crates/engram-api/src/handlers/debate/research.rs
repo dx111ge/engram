@@ -1466,7 +1466,7 @@ fn find_data_download_link(html: &str, base_url: &str) -> Option<String> {
 
 /// Extract HTML tables as markdown-formatted text, preserving structure.
 /// Returns extracted table text if tables with numeric data are found.
-fn extract_html_tables(html: &str, max_tables: usize) -> Option<String> {
+pub(crate) fn extract_html_tables(html: &str, max_tables: usize) -> Option<String> {
     let mut result = String::new();
     let mut tables_found = 0;
     let lower = html.to_lowercase();
