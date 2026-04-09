@@ -559,15 +559,24 @@ fn cmd_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         });
 
         // Detect frontend directory next to the executable
-        // Leptos WASM build outputs to frontend/dist/ via trunk
+        // Check frontend/dist/ (trunk build output) and frontend/ (release layout)
         let frontend_dir = std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|d| d.join("frontend").join("dist")))
-            .filter(|p| p.join("index.html").exists())
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .and_then(|d| {
+                let dist = d.join("frontend").join("dist");
+                if dist.join("index.html").exists() { return Some(dist); }
+                let flat = d.join("frontend");
+                if flat.join("index.html").exists() { return Some(flat); }
+                None
+            })
             .or_else(|| {
                 // Fallback: check relative to working directory
-                let p = std::path::PathBuf::from("frontend").join("dist");
-                if p.join("index.html").exists() { Some(p) } else { None }
+                let dist = std::path::PathBuf::from("frontend").join("dist");
+                if dist.join("index.html").exists() { return Some(dist); }
+                let flat = std::path::PathBuf::from("frontend");
+                if flat.join("index.html").exists() { return Some(flat); }
+                None
             });
         if let Some(ref dir) = frontend_dir {
             println!("Frontend: {}", dir.display());
