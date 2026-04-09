@@ -90,7 +90,7 @@ engram serve my.brain
 We recommend **Gemma 4** as the LLM (thinking mode, large context window). Run it locally with [Ollama](https://ollama.com/):
 
 ```bash
-ollama pull gemma3:27b
+ollama pull gemma4:e4b
 ```
 
 Then configure engram via the web UI onboarding wizard, or via API:
@@ -98,7 +98,7 @@ Then configure engram via the web UI onboarding wizard, or via API:
 ```bash
 curl -X POST http://localhost:3030/config \
   -H "Content-Type: application/json" \
-  -d '{"llm_endpoint": "http://localhost:11434/v1/chat/completions", "llm_model": "gemma3:27b"}'
+  -d '{"llm_endpoint": "http://localhost:11434/v1/chat/completions", "llm_model": "gemma4:e4b"}'
 
 curl -X POST http://localhost:3030/config/wizard-complete
 ```
