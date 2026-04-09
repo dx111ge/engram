@@ -15,6 +15,11 @@ scripting.
 - Bulk-import knowledge from CSV and JSON
 - Wire engram up as a tool in a LangChain agent
 - Drive engram from subprocesses for quick scripting
+- Authenticate and manage API keys
+- Launch multi-agent debate sessions
+- Create Bayesian intelligence assessments
+- Ingest documents (PDF, text) and review extracted facts
+- Use the 47-tool chat system for analysis, investigation, and reporting
 
 **Prerequisites:**
 
@@ -30,7 +35,7 @@ scripting.
 ## Table of Contents
 
 1. [Prerequisites and Server Startup](#1-prerequisites-and-server-startup)
-2. [Quick Start — the EngramClient class](#2-quick-start--the-engramclient-class)
+2. [Quick Start -- the EngramClient class](#2-quick-start--the-engramclient-class)
 3. [Storing Knowledge](#3-storing-knowledge)
 4. [Creating Relationships](#4-creating-relationships)
 5. [Querying the Graph](#5-querying-the-graph)
@@ -41,6 +46,11 @@ scripting.
 10. [Integration with LangChain](#10-integration-with-langchain)
 11. [CLI Wrapper](#11-cli-wrapper)
 12. [Error Handling](#12-error-handling)
+13. [Authentication](#13-authentication)
+14. [Debate Sessions](#14-debate-sessions)
+15. [Assessments](#15-assessments)
+16. [Document Ingestion](#16-document-ingestion)
+17. [Chat (Natural Language Tools)](#17-chat-natural-language-tools)
 
 ---
 
@@ -1642,16 +1652,179 @@ print(result)
 
 ---
 
+## 13. Authentication
+
+v1.1.0 requires authentication. Setup on first run, then use bearer tokens:
+
+```python
+import requests
+
+ENGRAM = "http://127.0.0.1:3030"
+
+# First run: create admin account
+requests.post(f"{ENGRAM}/auth/setup", json={
+    "username": "admin",
+    "password": "your-secure-password"
+})
+
+# Login and get token
+resp = requests.post(f"{ENGRAM}/auth/login", json={
+    "username": "admin",
+    "password": "your-secure-password"
+})
+token = resp.json()["token"]
+
+# Use token in all subsequent requests
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Content-Type": "application/json"
+}
+
+# Example: store with auth
+requests.post(f"{ENGRAM}/store", headers=headers, json={
+    "entity": "Berlin", "type": "city"
+})
+```
+
+### API keys (for scripts and services)
+
+```python
+# Create a persistent API key (no expiry)
+resp = requests.post(f"{ENGRAM}/auth/api-keys", headers=headers, json={
+    "name": "my-script"
+})
+api_key = resp.json()["key"]
+
+# Use API key instead of bearer token
+headers = {"Authorization": f"Bearer {api_key}"}
+```
+
+---
+
+## 14. Debate Sessions
+
+Launch multi-agent analysis debates:
+
+```python
+# Start a Red Team debate
+resp = requests.post(f"{ENGRAM}/debate/start", headers=headers, json={
+    "topic": "Supply chain risks in semiconductor industry",
+    "mode": "red_team",
+    "rounds": 3
+})
+debate_id = resp.json()["id"]
+
+# Check status
+status = requests.get(f"{ENGRAM}/debate/{debate_id}", headers=headers).json()
+print(f"Status: {status['status']}")
+
+# Run a round
+requests.post(f"{ENGRAM}/debate/{debate_id}/run", headers=headers)
+
+# Get final synthesis
+synth = requests.post(f"{ENGRAM}/debate/{debate_id}/synthesize", headers=headers)
+print(synth.json()["synthesis"])
+```
+
+**Available modes:** `analyze`, `red_team`, `devils_advocate`, `scenario_planning`, `delphi`, `sat`, `war_game`
+
+---
+
+## 15. Assessments
+
+Create intelligence assessments with Bayesian probability:
+
+```python
+# Create an assessment
+requests.post(f"{ENGRAM}/assessments", headers=headers, json={
+    "title": "China-Taiwan conflict escalation 2027",
+    "hypothesis": "Military action within 12 months",
+    "initial_probability": 0.15
+})
+
+# Add supporting evidence
+requests.post(f"{ENGRAM}/assessments/China-Taiwan conflict escalation 2027/evidence",
+    headers=headers, json={
+    "entity": "PLA Naval Exercises",
+    "direction": "supports",
+    "weight": 0.3
+})
+
+# Re-evaluate
+result = requests.post(
+    f"{ENGRAM}/assessments/China-Taiwan conflict escalation 2027/evaluate",
+    headers=headers
+).json()
+print(f"Updated probability: {result['probability']}")
+```
+
+---
+
+## 16. Document Ingestion
+
+Upload and process documents:
+
+```python
+# Ingest text through NER pipeline
+requests.post(f"{ENGRAM}/ingest", headers=headers, json={
+    "text": "Angela Merkel served as Chancellor of Germany from 2005 to 2021.",
+    "source": "wikipedia"
+})
+
+# Ingest a PDF file
+with open("report.pdf", "rb") as f:
+    requests.post(f"{ENGRAM}/ingest/file",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("report.pdf", f, "application/pdf")})
+
+# List documents
+docs = requests.post(f"{ENGRAM}/documents", headers=headers, json={}).json()
+for doc in docs.get("documents", []):
+    print(f"  {doc['label']}: {doc.get('title', 'untitled')}")
+
+# Review extracted facts
+facts = requests.post(f"{ENGRAM}/facts", headers=headers, json={}).json()
+for fact in facts.get("facts", []):
+    print(f"  {fact['label']}: confidence={fact.get('confidence', '?')}")
+```
+
+---
+
+## 17. Chat (Natural Language Tools)
+
+Use the chat endpoint for complex queries with 47 tools:
+
+```python
+# Entity comparison
+resp = requests.post(f"{ENGRAM}/chat/compare", headers=headers, json={
+    "entity_a": "Russia",
+    "entity_b": "China"
+})
+print(resp.json())
+
+# Network analysis
+resp = requests.post(f"{ENGRAM}/chat/network_analysis", headers=headers, json={
+    "entity": "Putin",
+    "depth": 2
+})
+print(f"Centrality: {resp.json().get('centrality')}")
+
+# What-if analysis
+resp = requests.post(f"{ENGRAM}/chat/what_if", headers=headers, json={
+    "entity": "SWIFT",
+    "action": "remove",
+    "hops": 2
+})
+for affected in resp.json().get("affected", []):
+    print(f"  {affected['entity']}: impact={affected['impact']}")
+```
+
+---
+
 ## Next Steps
 
-- Read the [HTTP API reference](./http-api.md) for the full endpoint list with
-  all optional fields documented.
-- Read the [MCP server guide](./mcp-server.md) to use engram natively inside
-  Claude, Cursor, or Windsurf without writing any Python.
-- Run `engram reindex` after configuring an ONNX embedder to enable true
-  semantic similarity via `/similar`.
-- Schedule `POST /learn/decay` daily and `POST /learn/reinforce` on every access
-  to keep confidence values meaningful over time.
-- Use `POST /learn/derive` with transitive rules to materialise implicit
-  relationships — for example, that a service inherits the properties of its
-  base type.
+- Read the [HTTP API wiki](https://github.com/dx111ge/engram/wiki/HTTP-API) for the full endpoint list
+- Read the [MCP Server wiki](https://github.com/dx111ge/engram/wiki/MCP-Server) to use engram natively inside Claude, Cursor, or Windsurf
+- Run `engram reindex` after configuring an ONNX embedder to enable true semantic similarity via `/similar`
+- Schedule `POST /learn/decay` daily and `POST /learn/reinforce` on every access to keep confidence values meaningful over time
+- Use `POST /learn/derive` with transitive rules to materialise implicit relationships

@@ -197,15 +197,32 @@ def main():
     # ================================================================
 
     subsection("Importing structured data (DrugBank, ChEBI, SNOMED CT)")
-    result = api("POST", "/import/jsonld", {
-        "data": BIOMEDICAL_JSONLD,
-        "source": "ontology"
-    })
-    print(f"  Nodes imported: {result.get('nodes_imported', '?')}")
-    print(f"  Edges imported: {result.get('edges_imported', '?')}")
-    errors = result.get("errors")
-    if errors:
-        print(f"  Errors: {errors}")
+    nodes_imported = 0
+    edges_imported = 0
+    graph = BIOMEDICAL_JSONLD.get("@graph", [])
+    for item in graph:
+        label = item.get("rdfs:label", item.get("@id", ""))
+        node_type = item.get("@type", "").split("/")[-1].split(":")[-1].lower()
+        props = {}
+        rels = []
+        for key, val in item.items():
+            if key.startswith("@") or key == "rdfs:label":
+                continue
+            if key == "schema:description":
+                props["description"] = val
+            elif key.startswith("engram:") and isinstance(val, dict) and "@id" in val:
+                rel_name = key.split(":")[-1]
+                target = val["@id"].replace("engram://node/", "")
+                rels.append((rel_name, target))
+            elif key.startswith("engram:"):
+                props[key.split(":")[-1]] = val
+        store(label, node_type, props, source="ontology")
+        nodes_imported += 1
+        for rel_name, target in rels:
+            relate(label, rel_name, target)
+            edges_imported += 1
+    print(f"  Nodes imported: {nodes_imported}")
+    print(f"  Edges imported: {edges_imported}")
 
     stats = api("GET", "/stats")
     print(f"  Graph: {stats['nodes']} nodes, {stats['edges']} edges")

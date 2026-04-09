@@ -55,7 +55,7 @@ python biomedical_demo.py
 
 #### Phase 1: Import Biomedical JSON-LD
 
-A single `/import/jsonld` call imports 13 structured nodes:
+The script parses JSON-LD client-side and imports 13 structured nodes via `/store` and `/relate`:
 
 | Entity | Type | Vocabulary |
 |--------|------|-----------|

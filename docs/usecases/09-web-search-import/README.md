@@ -139,6 +139,16 @@ Final graph: **17 nodes, 14 edges**.
 The demo uses simulated results. To connect to a real search API, replace the `SIMULATED_SEARCHES` dict with actual API calls:
 
 **SearXNG** (self-hosted, free):
+
+> **Important:** SearXNG blocks JSON API access by default. You must enable it in `settings.yml`:
+> ```yaml
+> search:
+>   formats:
+>     - html
+>     - json    # required for API access
+> ```
+> Restart SearXNG after changing the config. Without this, all API calls return `403 Forbidden`.
+
 ```python
 def search_web(query, num_results=10):
     resp = requests.get("http://localhost:8888/search", params={

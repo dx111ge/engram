@@ -147,6 +147,149 @@ Explain how a fact was derived, its confidence, edges, and co-occurrences.
 Parameters:
 - `entity` (required) — entity to explain
 
+### engram_gaps
+
+Detect knowledge gaps in the graph: frontier nodes, structural holes, temporal gaps, and confidence deserts.
+
+Parameters:
+- `min_severity` — minimum severity score to include (default: 0.3)
+- `limit` — max gaps to return (default: 10)
+
+Returns a ranked list of detected gaps with severity scores and suggested actions.
+
+### engram_frontier
+
+Find frontier nodes at the edges of the knowledge graph that have few connections.
+
+Parameters:
+- `max_edges` — maximum edge count to qualify as frontier (default: 2)
+- `limit` — max results (default: 20)
+
+### engram_mesh_discover
+
+Discover mesh peers that have knowledge about a given topic.
+
+Parameters:
+- `topic` (required) — topic to search for across peers
+
+Returns matching peers with their trust scores and topic relevance.
+
+### engram_mesh_query
+
+Query knowledge across all trusted mesh peers without copying facts locally.
+
+Parameters:
+- `query` (required) — search query
+- `max_results` — max results per peer (default: 10)
+- `min_confidence` — minimum confidence threshold
+
+### engram_ingest
+
+Ingest text through the NER pipeline: entity extraction, resolution, deduplication, and storage.
+
+Parameters:
+- `text` (required) — text to process
+- `source` — source identifier for provenance
+
+### engram_create_rule
+
+Create an event-driven action rule that triggers on graph changes.
+
+Parameters:
+- `name` (required) — rule name
+- `trigger` (required) — event type to trigger on (store, relate, correct, etc.)
+- `condition` — optional condition expression
+- `effect` (required) — effect type (webhook, edge_create, confidence_cascade, etc.)
+- `config` — effect-specific configuration
+
+### engram_provenance
+
+Get the full provenance chain for an entity (document -> fact -> entity path).
+
+Parameters:
+- `entity` (required) -- entity label
+- `depth` -- max chain depth (default: 3)
+
+### engram_documents
+
+Query documents in the knowledge base.
+
+Parameters:
+- `query` -- search query (optional, returns all if empty)
+- `limit` -- max results (default: 20)
+
+### engram_assess_create
+
+Create a new intelligence assessment with structured evidence.
+
+Parameters:
+- `title` (required) -- assessment title
+- `hypothesis` (required) -- hypothesis to evaluate
+- `initial_probability` -- starting probability (0.0-1.0, default: 0.5)
+
+### engram_assess_list
+
+List all assessments with current probabilities.
+
+Parameters:
+- `status` -- filter by status (active, stale, archived)
+
+### engram_assess_get
+
+Get a specific assessment with full details.
+
+Parameters:
+- `label` (required) -- assessment label
+
+### engram_assess_evaluate
+
+Re-evaluate an assessment based on current evidence.
+
+Parameters:
+- `label` (required) -- assessment label
+
+### engram_assess_evidence
+
+Add evidence to an assessment (updates Bayesian probability).
+
+Parameters:
+- `label` (required) -- assessment label
+- `entity` (required) -- entity providing evidence
+- `direction` -- supports or undermines (default: supports)
+- `weight` -- evidence weight (0.0-1.0, default: 0.5)
+
+### engram_assess_watch
+
+Add a watch entity to an assessment (triggers stale alerts when the entity changes).
+
+Parameters:
+- `label` (required) -- assessment label
+- `entity` (required) -- entity to watch
+
+### engram_analyze_relations
+
+Run NER/RE analysis on text and return extracted entities and relations without storing them.
+
+Parameters:
+- `text` (required) -- text to analyze
+
+### engram_kge_train
+
+Train knowledge graph embeddings on the current graph state.
+
+Parameters:
+- `epochs` -- training epochs (default: 100)
+
+### engram_kge_predict
+
+Predict missing links using trained knowledge graph embeddings.
+
+Parameters:
+- `entity` (required) -- entity to predict links for
+- `limit` -- max predictions (default: 10)
+
+---
+
 ## Available Resources
 
 ### engram://stats
@@ -175,7 +318,7 @@ The MCP server implements the `2024-11-05` protocol version.
 
 ```
 → {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"engram","version":"1.0.0"}}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"engram","version":"1.1.0"}}}
 
 → {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 ← {"jsonrpc":"2.0","id":2,"result":{"tools":[...]}}

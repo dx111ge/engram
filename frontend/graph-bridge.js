@@ -1,0 +1,1754 @@
+import SpriteText from "https://esm.sh/three-spritetext";
+import { Group, LOD, Mesh, MeshLambertMaterial, OctahedronGeometry, TetrahedronGeometry } from "https://esm.sh/three";
+
+// Type-based node color with known overrides + consistent hash fallback
+var TYPE_COLORS = {
+  'person': '#66bb6a',
+  'org': '#4fc3f7',
+  'organization': '#4fc3f7',
+  'location': '#42a5f5',
+  'event': '#ffa726',
+  'product': '#ab47bc',
+  'position': '#78909c',
+  'fact': '#ffa726',
+  'document': '#5c6bc0',
+  'source': '#78909c'
+};
+
+// Display names for legend
+var TYPE_LABELS = {
+  'person': 'Person',
+  'org': 'Organization',
+  'organization': 'Organization',
+  'location': 'Location',
+  'event': 'Event',
+  'product': 'Product',
+  'position': 'Position',
+  'fact': 'Fact',
+  'document': 'Document',
+  'source': 'Source'
+};
+
+// Shape overrides for special node types
+var TYPE_SHAPES = {
+  'fact': 'diamond',
+  'document': 'diamond',
+  'source': 'triangle'
+};
+
+// Types hidden by default in legend (provenance metadata, not core knowledge)
+var DEFAULT_HIDDEN_TYPES = new Set(['fact', 'document', 'source']);
+
+function typeColor(nodeType) {
+  if (!nodeType) return '#78909c';
+  var key = nodeType.toLowerCase();
+  if (TYPE_COLORS[key]) return TYPE_COLORS[key];
+  // Consistent hash fallback for unknown types
+  var hash = 0;
+  for (var i = 0; i < key.length; i++) {
+    hash = key.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  var h = Math.abs(hash) % 360;
+  return 'hsl(' + h + ', 55%, 55%)';
+}
+
+window.__engram_graph = {
+  instance: null,
+  _startNodeId: null,
+  _hiddenTypes: new Set(),
+  _hiddenRels: new Set(),
+  _showEdgeLabels: false,
+  _highlightedNode: null,
+  _temporalCurrentOnly: false,
+  _contextMenuEl: null,
+  _findPathFrom: null,
+  _pathHighlight: new Set(),
+  _pathNodes: new Set(),
+  _orphanedNodes: new Set(),
+  _bundlingEnabled: false,
+  _originalLinks: null,
+  _legendEl: null,
+
+  create: function(container, nodesJson, linksJson, onClickCb, onDblClickCb, startNodeId) {
+    if (this.instance) {
+      this.instance._destructor && this.instance._destructor();
+      container.innerHTML = '';
+    }
+
+    var nodes = JSON.parse(nodesJson);
+    var links = JSON.parse(linksJson);
+    var self = this;
+    self._startNodeId = startNodeId || null;
+
+    // Initialize legend hidden types
+    if (!self._legendHidden) {
+      self._legendHidden = new Set();
+      DEFAULT_HIDDEN_TYPES.forEach(function(t) { self._legendHidden.add(t); });
+    }
+
+    // Store full data, then filter out hidden types before rendering
+    self._allNodes = nodes;
+    self._allLinks = links;
+    var filtered = self._filterData(nodes, links);
+    nodes = filtered.nodes;
+    links = filtered.links;
+
+    // Remove any existing context menu
+    if (self._contextMenuEl) {
+      self._contextMenuEl.remove();
+      self._contextMenuEl = null;
+    }
+
+    // ── Smart Visual Scaling (Step B) ──
+    var nodeCount = nodes.length;
+    var particles = nodeCount < 30 ? 3 : (nodeCount < 80 ? 1 : 0);
+    var resolution = nodeCount < 80 ? 16 : 8;
+    var curvature = nodeCount < 50 ? 0.2 : 0;
+    self._showEdgeLabels = nodeCount < 80;
+
+    // ── Edge Bundling (Step I) ──
+    self._originalLinks = links.map(function(l) { return Object.assign({}, l); });
+    var displayLinks = links;
+    if (self._bundlingEnabled && links.length > 0) {
+      displayLinks = self._bundleEdges(this._originalLinks);
+    }
+
+    // ── Autocomplete helper — uses self._attachAutocomplete ──
+    function attachAutocomplete(inputEl) {
+      self._attachAutocomplete(inputEl, '/config/relation-types');
+    }
+
+    var graph = ForceGraph3D()(container)
+      .backgroundColor('#0a0e17')
+      .width(container.clientWidth)
+      .height(container.clientHeight)
+      .graphData({ nodes: nodes, links: displayLinks })
+      .nodeLabel(function(n) { return n.title || n.label; })
+      .nodeColor(function(n) {
+        var color = typeColor(n.node_type);
+        // Start node golden glow
+        if (self._startNodeId && n.id === self._startNodeId) {
+          return '#ffd700';
+        }
+        // Highlighted node
+        if (self._highlightedNode && n.id === self._highlightedNode) {
+          return '#ffffff';
+        }
+        return color;
+      })
+      .nodeVal(function(n) {
+        // Custom-shaped nodes: hide default sphere (custom mesh in nodeThreeObject)
+        var nt = (n.node_type || '').toLowerCase();
+        if (TYPE_SHAPES[nt]) return 0.01;
+        // Start node slightly larger
+        if (self._startNodeId && n.id === self._startNodeId) {
+          return (n.size || 5) * 1.5;
+        }
+        return n.size || 5;
+      })
+      .nodeOpacity(0.85)
+      .nodeResolution(resolution)
+      .nodeVisibility(function(n) {
+        // Path isolation: if path active, only show path nodes
+        if (self._pathNodes.size > 0 && !self._pathNodes.has(n.id)) return false;
+        if (self._hiddenTypes.size > 0) {
+          var nt = (n.node_type || 'Entity').toLowerCase();
+          if (self._hiddenTypes.has(nt)) return false;
+        }
+        // Hide orphaned nodes (all their edges are hidden)
+        if (self._orphanedNodes.size > 0 && self._orphanedNodes.has(n.id)) return false;
+        return true;
+      })
+      .nodeThreeObjectExtend(true)
+      .nodeThreeObject(function(node) {
+        var color = typeColor(node.node_type);
+        if (self._startNodeId && node.id === self._startNodeId) {
+          color = '#ffd700';
+        }
+
+        var nt = (node.node_type || '').toLowerCase();
+        var shape = TYPE_SHAPES[nt] || null;
+        var displayLabel = node.display_label || node.label;
+
+        // ── LOD: Level of Detail (Step C) ──
+        // Labels always visible. Type tag only at close range.
+        var lod = new LOD();
+
+        // Level 0 (close < 300): full detail - label + type tag + optional shape mesh
+        var groupFull = new Group();
+
+        // Custom shape mesh for Fact (diamond) and Source (triangle)
+        if (shape) {
+          var geomSize = (node.size || 4) * 1.2;
+          var geom, mat;
+          mat = new MeshLambertMaterial({ color: color, transparent: true, opacity: 0.85 });
+          if (shape === 'diamond') {
+            geom = new OctahedronGeometry(geomSize);
+          } else if (shape === 'triangle') {
+            geom = new TetrahedronGeometry(geomSize * 1.2);
+          }
+          if (geom) {
+            var mesh = new Mesh(geom, mat);
+            groupFull.add(mesh);
+          }
+        }
+
+        var label = new SpriteText(displayLabel);
+        label.material.depthWrite = false;
+        label.color = '#ffffff';
+        label.textHeight = shape ? 4 : 5;
+        label.fontWeight = 'bold';
+        label.strokeWidth = 0.5;
+        label.strokeColor = '#111111';
+        label.position.y = shape ? 12 : 14;
+        groupFull.add(label);
+
+        var typeName = node.node_type || 'Entity';
+        var nodeRadius = (node.size || 5) * 0.8;
+        var tag = new SpriteText(typeName.toUpperCase());
+        tag.material.depthWrite = false;
+        tag.color = color;
+        tag.textHeight = 3;
+        tag.fontWeight = '600';
+        tag.strokeWidth = 0.6;
+        tag.strokeColor = '#000000';
+        tag.position.y = -(nodeRadius + 3);
+        groupFull.add(tag);
+        lod.addLevel(groupFull, 0);
+
+        // Level 1 (far > 300): label only (+ shape mesh if special node)
+        var groupFar = new Group();
+
+        if (shape) {
+          var geomSizeFar = (node.size || 4) * 1.2;
+          var geomFar, matFar;
+          matFar = new MeshLambertMaterial({ color: color, transparent: true, opacity: 0.85 });
+          if (shape === 'diamond') {
+            geomFar = new OctahedronGeometry(geomSizeFar);
+          } else if (shape === 'triangle') {
+            geomFar = new TetrahedronGeometry(geomSizeFar * 1.2);
+          }
+          if (geomFar) {
+            var meshFar = new Mesh(geomFar, matFar);
+            groupFar.add(meshFar);
+          }
+        }
+
+        var labelFar = new SpriteText(displayLabel);
+        labelFar.material.depthWrite = false;
+        labelFar.color = '#ffffff';
+        labelFar.textHeight = shape ? 4 : 5;
+        labelFar.fontWeight = 'bold';
+        labelFar.strokeWidth = 0.5;
+        labelFar.strokeColor = '#111111';
+        labelFar.position.y = shape ? 12 : 14;
+        groupFar.add(labelFar);
+        lod.addLevel(groupFar, 300);
+
+        return lod;
+      })
+      .linkLabel(function(link) {
+        if (link._bundled) {
+          return link._children.map(function(c) { return c.label || 'related_to'; }).join(', ');
+        }
+        return link.label || '';
+      })
+      .linkColor(function(link) {
+        // Path highlight
+        var src = typeof link.source === 'object' ? link.source.id : link.source;
+        var tgt = typeof link.target === 'object' ? link.target.id : link.target;
+        if (self._pathHighlight.size > 0 && (self._pathHighlight.has(src + '>' + tgt) || self._pathHighlight.has(tgt + '>' + src))) {
+          return '#ffd700';
+        }
+        // Bundled edges: distinct tint
+        if (link._bundled) {
+          return 'rgba(130, 180, 255, 0.5)';
+        }
+        // Temporal edges: dim if not current
+        if (self._temporalCurrentOnly && link.valid_to) {
+          return 'rgba(100, 160, 255, 0.12)';
+        }
+        return 'rgba(100, 160, 255, 0.35)';
+      })
+      .linkWidth(function(link) {
+        var src = typeof link.source === 'object' ? link.source.id : link.source;
+        var tgt = typeof link.target === 'object' ? link.target.id : link.target;
+        if (self._pathHighlight.size > 0 && (self._pathHighlight.has(src + '>' + tgt) || self._pathHighlight.has(tgt + '>' + src))) {
+          return 3.5;
+        }
+        // Bundled edges: thicker based on count
+        if (link._bundled) {
+          return 1.2 + Math.min(link._bundleCount * 0.6, 4);
+        }
+        if (self._temporalCurrentOnly && link.valid_to) return 0.4;
+        return 1.2;
+      })
+      .linkDirectionalArrowLength(4)
+      .linkDirectionalArrowRelPos(1)
+      .linkDirectionalArrowColor(function() { return 'rgba(100, 160, 255, 0.6)'; })
+      .linkCurvature(curvature)
+      .linkDirectionalParticles(particles)
+      .linkDirectionalParticleWidth(1.8)
+      .linkDirectionalParticleSpeed(0.006)
+      .linkDirectionalParticleColor(function() { return 'rgba(100, 200, 255, 0.8)'; })
+      .linkVisibility(function(link) {
+        var src = typeof link.source === 'object' ? link.source : null;
+        var tgt = typeof link.target === 'object' ? link.target : null;
+        var srcId = src ? src.id : link.source;
+        var tgtId = tgt ? tgt.id : link.target;
+        // Path isolation: if path active, only show path edges
+        if (self._pathHighlight.size > 0) {
+          if (!self._pathHighlight.has(srcId + '>' + tgtId) && !self._pathHighlight.has(tgtId + '>' + srcId)) return false;
+        }
+        // Hide edges whose source or target node type is hidden
+        if (self._hiddenTypes.size > 0) {
+          if (src) { var st = (src.node_type || 'Entity').toLowerCase(); if (self._hiddenTypes.has(st)) return false; }
+          if (tgt) { var tt = (tgt.node_type || 'Entity').toLowerCase(); if (self._hiddenTypes.has(tt)) return false; }
+        }
+        if (self._hiddenRels.size > 0) {
+          var rel = (link.label || '').toLowerCase();
+          if (self._hiddenRels.has(rel)) return false;
+        }
+        // Hide expired temporal edges when "Current relations only" is on
+        if (self._temporalCurrentOnly && link.valid_to) return false;
+        return true;
+      })
+      .linkThreeObjectExtend(true)
+      .linkThreeObject(function(link) {
+        if (!self._showEdgeLabels) return null;
+        var text = link.label || 'related_to';
+        if (!text) return null;
+        // Bundled edge: show count
+        if (link._bundled) {
+          text = link._bundleCount + ' relations';
+        }
+        // Append temporal info if present
+        if (link.valid_from || link.valid_to) {
+          var temporal = ' [';
+          if (link.valid_from) temporal += link.valid_from;
+          temporal += ' - ';
+          if (link.valid_to) temporal += link.valid_to; else temporal += 'now';
+          temporal += ']';
+          text += temporal;
+        }
+        var sprite = new SpriteText(text);
+        sprite.material.depthWrite = false;
+        sprite.color = '#b0bec5';
+        sprite.textHeight = 2.5;
+        sprite.fontWeight = '600';
+        return sprite;
+      })
+      .linkPositionUpdate(function(sprite, coords) {
+        if (!sprite || !coords) return;
+        var middle = Object.assign({},
+          ...['x','y','z'].map(function(c) {
+            var obj = {}; obj[c] = coords.start[c] + (coords.end[c] - coords.start[c]) / 2; return obj;
+          })
+        );
+        Object.assign(sprite.position, middle);
+      })
+      .onNodeClick(function(node) {
+        // Dismiss context menu on click
+        if (self._contextMenuEl) {
+          self._contextMenuEl.remove();
+          self._contextMenuEl = null;
+        }
+        // Dismiss hint on interaction
+        if (window.__engram_hint_dismiss) {
+          window.__engram_hint_dismiss();
+        }
+        // Find-path mode: if source is set, run BFS to clicked node
+        if (self._findPathFrom && node.id && self._findPathFrom !== node.id) {
+          var path = self.findPath(self._findPathFrom, node.id);
+          self._findPathFrom = null;
+          self._pathHighlight = new Set();
+          self._pathNodes = new Set();
+          if (path && path.length > 1) {
+            for (var i = 0; i < path.length; i++) {
+              self._pathNodes.add(path[i]);
+            }
+            for (var i = 0; i < path.length - 1; i++) {
+              self._pathHighlight.add(path[i] + '>' + path[i+1]);
+              self._pathHighlight.add(path[i+1] + '>' + path[i]);
+            }
+            // Refresh visibility + colors to isolate path
+            graph.nodeVisibility(graph.nodeVisibility());
+            graph.linkVisibility(graph.linkVisibility());
+            graph.linkColor(graph.linkColor());
+            graph.linkWidth(graph.linkWidth());
+          }
+          // Remove cursor hint
+          var hint = document.querySelector('.engram-path-hint');
+          if (hint) hint.remove();
+          return;
+        }
+        if (onClickCb && node.id) onClickCb(node.id);
+        var distance = 120;
+        var hyp = Math.hypot(node.x, node.y, node.z);
+        if (hyp < 1) hyp = 1;
+        var distRatio = 1 + distance / hyp;
+        graph.cameraPosition(
+          { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
+          node, 1000
+        );
+      })
+      .onNodeDragEnd(function(node) {
+        node.fx = node.x;
+        node.fy = node.y;
+        node.fz = node.z;
+      })
+      .onLinkClick(function(link, event) {
+        // Dismiss any existing popup
+        if (self._edgePopupEl) {
+          self._edgePopupEl.remove();
+          self._edgePopupEl = null;
+        }
+        if (!link) return;
+
+        if (link._bundled && link._children) {
+          // Bundled edge: show popup listing individual edges
+          var popup = document.createElement('div');
+          popup.className = 'engram-context-menu';
+          popup.style.left = (event ? event.clientX : 200) + 'px';
+          popup.style.top = (event ? event.clientY : 200) + 'px';
+          popup.style.maxHeight = '300px';
+          popup.style.overflowY = 'auto';
+
+          var header = document.createElement('div');
+          header.style.padding = '6px 10px';
+          header.style.fontWeight = '600';
+          header.style.fontSize = '0.8rem';
+          header.style.borderBottom = '1px solid rgba(255,255,255,0.1)';
+          var src = typeof link.source === 'object' ? link.source.id : link.source;
+          var tgt = typeof link.target === 'object' ? link.target.id : link.target;
+          header.textContent = src + ' \u2194 ' + tgt + ' (' + link._children.length + ' relations)';
+          popup.appendChild(header);
+
+          link._children.forEach(function(child) {
+            var row = document.createElement('div');
+            row.style.padding = '5px 10px';
+            row.style.fontSize = '0.78rem';
+            row.style.display = 'flex';
+            row.style.justifyContent = 'space-between';
+            row.style.alignItems = 'center';
+            row.style.cursor = 'default';
+            row.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
+            row.onmouseenter = function() { row.style.background = 'rgba(255,255,255,0.05)'; };
+            row.onmouseleave = function() { row.style.background = 'none'; };
+
+            var labelSpan = document.createElement('span');
+            labelSpan.textContent = child.label || 'related_to';
+            labelSpan.style.color = '#e0e0e0';
+            row.appendChild(labelSpan);
+
+            if (child.title) {
+              var confSpan = document.createElement('span');
+              confSpan.textContent = child.title;
+              confSpan.style.color = 'rgba(255,255,255,0.4)';
+              confSpan.style.fontSize = '0.7rem';
+              confSpan.style.marginLeft = '8px';
+              row.appendChild(confSpan);
+            }
+
+            var editBtn = document.createElement('span');
+            editBtn.innerHTML = '<i class="fa-solid fa-pen" style="font-size:0.65rem;"></i>';
+            editBtn.style.cssText = 'cursor:pointer; color:rgba(255,255,255,0.3); margin-left:6px; padding:2px;';
+            editBtn.title = 'Rename this relation';
+            editBtn.addEventListener('click', (function(child, labelSpan, row) {
+              return function(ev) {
+                ev.stopPropagation();
+                var childSrc = typeof link.source === 'object' ? link.source.id : link.source;
+                var childTgt = typeof link.target === 'object' ? link.target.id : link.target;
+                var oldLabel = child.label || 'related_to';
+                labelSpan.style.display = 'none';
+                var inp = document.createElement('input');
+                inp.type = 'text';
+                inp.value = oldLabel;
+                inp.style.cssText = 'flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:2px 4px; font-size:0.75rem; border-radius:2px;';
+                row.insertBefore(inp, labelSpan.nextSibling);
+                inp.focus();
+                inp.select();
+
+                function commitRename() {
+                  var nv = inp.value.trim();
+                  if (!nv || nv === oldLabel) {
+                    inp.remove();
+                    labelSpan.style.display = '';
+                    return;
+                  }
+                  var xhr = new XMLHttpRequest();
+                  xhr.open('PATCH', '/edge', false);
+                  xhr.setRequestHeader('Content-Type', 'application/json');
+                  var token = localStorage.getItem('engram_token');
+                  if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+                  xhr.send(JSON.stringify({ from: childSrc, to: childTgt, old_rel_type: oldLabel, new_rel_type: nv }));
+                  if (xhr.status === 200 && JSON.parse(xhr.responseText).renamed) {
+                    var normalized = nv.toLowerCase().replace(/ /g, '_').replace(/-/g, '_');
+                    child.label = normalized;
+                    labelSpan.textContent = normalized;
+                  }
+                  inp.remove();
+                  labelSpan.style.display = '';
+                }
+
+                inp.addEventListener('keydown', function(ke) {
+                  ke.stopPropagation();
+                  if (ke.key === 'Enter') commitRename();
+                  if (ke.key === 'Escape') { inp.remove(); labelSpan.style.display = ''; }
+                });
+                inp.addEventListener('blur', commitRename);
+                inp.addEventListener('click', function(ce) { ce.stopPropagation(); });
+                attachAutocomplete(inp);
+              };
+            })(child, labelSpan, row));
+            row.appendChild(editBtn);
+
+            var delBtn = document.createElement('span');
+            delBtn.innerHTML = '<i class="fa-solid fa-trash" style="font-size:0.6rem;"></i>';
+            delBtn.style.cssText = 'cursor:pointer; color:rgba(239,83,80,0.6); margin-left:4px; padding:2px;';
+            delBtn.title = 'Delete this relation';
+            delBtn.addEventListener('click', (function(child, row) {
+              return function(ev) {
+                ev.stopPropagation();
+                var childSrc = typeof link.source === 'object' ? link.source.id : link.source;
+                var childTgt = typeof link.target === 'object' ? link.target.id : link.target;
+                var relType = child.label || 'related_to';
+                if (!confirm('Delete "' + relType + '" between ' + childSrc + ' and ' + childTgt + '?')) return;
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', '/edge/delete', false);
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                var token = localStorage.getItem('engram_token');
+                if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+                xhr.send(JSON.stringify({ from: childSrc, to: childTgt, rel_type: relType }));
+                if (xhr.status === 200 && JSON.parse(xhr.responseText).deleted) {
+                  row.remove();
+                  // Remove from _originalLinks
+                  if (self._originalLinks) {
+                    self._originalLinks = self._originalLinks.filter(function(ol) {
+                      var olSrc = typeof ol.source === 'object' ? ol.source.id : ol.source;
+                      var olTgt = typeof ol.target === 'object' ? ol.target.id : ol.target;
+                      return !(olSrc === childSrc && olTgt === childTgt && (ol.label || 'related_to') === relType);
+                    });
+                  }
+                  // Remove child from bundle
+                  link._children = link._children.filter(function(c) { return c !== child; });
+                  if (link._children.length === 0) {
+                    var data = self.instance.graphData();
+                    data.links = data.links.filter(function(l) { return l !== link; });
+                    self.instance.graphData(data);
+                    if (popup) { popup.remove(); self._edgePopupEl = null; }
+                  }
+                }
+              };
+            })(child, row));
+            row.appendChild(delBtn);
+
+            popup.appendChild(row);
+          });
+
+          document.body.appendChild(popup);
+          self._edgePopupEl = popup;
+
+          // Close on click outside
+          setTimeout(function() {
+            document.addEventListener('click', function closePopup(e) {
+              if (popup && !popup.contains(e.target)) {
+                popup.remove();
+                self._edgePopupEl = null;
+                document.removeEventListener('click', closePopup);
+              }
+            });
+          }, 100);
+        } else {
+          // Single edge: show inline detail via node click callback
+          var src = typeof link.source === 'object' ? link.source.id : link.source;
+          var tgt = typeof link.target === 'object' ? link.target.id : link.target;
+          var detail = (link.label || 'related_to') + ' (' + (link.title || '') + ')';
+          // Show a brief tooltip
+          var tip = document.createElement('div');
+          tip.className = 'engram-context-menu';
+          tip.style.left = (event ? event.clientX : 200) + 'px';
+          tip.style.top = (event ? event.clientY : 200) + 'px';
+          tip.style.padding = '8px 12px';
+          tip.style.fontSize = '0.8rem';
+          tip.innerHTML = '<strong>' + src + '</strong> <span style="color:#4fc3f7">\u2192 ' + (link.label || 'related_to') + ' \u2192</span> <strong>' + tgt + '</strong>';
+          if (link.title) {
+            tip.innerHTML += '<br><span style="color:rgba(255,255,255,0.5);font-size:0.72rem;">Confidence: ' + link.title + '</span>';
+          }
+          if (link.valid_from || link.valid_to) {
+            tip.innerHTML += '<br><span style="color:rgba(255,255,255,0.4);font-size:0.7rem;">' + (link.valid_from || '?') + ' \u2013 ' + (link.valid_to || 'present') + '</span>';
+          }
+
+          // Rename row
+          var renameRow = document.createElement('div');
+          renameRow.style.marginTop = '6px';
+          renameRow.style.display = 'flex';
+          renameRow.style.alignItems = 'center';
+          renameRow.style.gap = '4px';
+
+          var renameInput = document.createElement('input');
+          renameInput.type = 'text';
+          renameInput.value = link.label || 'related_to';
+          renameInput.style.cssText = 'flex:1; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:3px 6px; font-size:0.75rem; border-radius:3px;';
+          renameInput.placeholder = 'New relation type...';
+
+          var renameBtn = document.createElement('button');
+          renameBtn.innerHTML = '<i class="fa-solid fa-check"></i>';
+          renameBtn.style.cssText = 'background:var(--accent-bright, #4fc3f7); border:none; color:#000; padding:3px 8px; border-radius:3px; cursor:pointer; font-size:0.7rem;';
+
+          function doRename() {
+            var newType = renameInput.value.trim();
+            if (!newType || newType === (link.label || 'related_to')) return;
+            var xhr = new XMLHttpRequest();
+            xhr.open('PATCH', '/edge', false);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            var token = localStorage.getItem('engram_token');
+            if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+            xhr.send(JSON.stringify({
+              from: src,
+              to: tgt,
+              old_rel_type: link.label || 'related_to',
+              new_rel_type: newType
+            }));
+            if (xhr.status === 200) {
+              var resp = JSON.parse(xhr.responseText);
+              if (resp.renamed) {
+                var normalized = newType.toLowerCase().replace(/ /g, '_').replace(/-/g, '_');
+                link.label = normalized;
+                if (self._originalLinks) {
+                  self._originalLinks.forEach(function(ol) {
+                    var olSrc = typeof ol.source === 'object' ? ol.source.id : ol.source;
+                    var olTgt = typeof ol.target === 'object' ? ol.target.id : ol.target;
+                    if (olSrc === src && olTgt === tgt && (ol.label || 'related_to') === (link.label || 'related_to')) {
+                      ol.label = normalized;
+                    }
+                  });
+                }
+                if (tip) { tip.remove(); self._edgePopupEl = null; }
+                if (self.instance) {
+                  self.instance.linkThreeObject(self.instance.linkThreeObject());
+                  self.instance.linkLabel(self.instance.linkLabel());
+                }
+              }
+            }
+          }
+
+          renameBtn.addEventListener('click', doRename);
+          renameInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') doRename();
+            e.stopPropagation();
+          });
+          renameInput.addEventListener('click', function(e) { e.stopPropagation(); });
+          attachAutocomplete(renameInput);
+
+          var deleteBtn = document.createElement('button');
+          deleteBtn.innerHTML = '<i class="fa-solid fa-trash"></i>';
+          deleteBtn.style.cssText = 'background:#ef5350; border:none; color:#fff; padding:3px 8px; border-radius:3px; cursor:pointer; font-size:0.7rem;';
+          deleteBtn.title = 'Delete this edge';
+          deleteBtn.addEventListener('click', function() {
+            if (!confirm('Delete edge "' + (link.label || 'related_to') + '" between ' + src + ' and ' + tgt + '?')) return;
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/edge/delete', false);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            var token = localStorage.getItem('engram_token');
+            if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+            xhr.send(JSON.stringify({ from: src, to: tgt, rel_type: link.label || 'related_to' }));
+            if (xhr.status === 200 && JSON.parse(xhr.responseText).deleted) {
+              // Remove from graph data
+              var data = self.instance.graphData();
+              data.links = data.links.filter(function(l) { return l !== link; });
+              if (self._originalLinks) {
+                self._originalLinks = self._originalLinks.filter(function(ol) {
+                  var olSrc = typeof ol.source === 'object' ? ol.source.id : ol.source;
+                  var olTgt = typeof ol.target === 'object' ? ol.target.id : ol.target;
+                  return !(olSrc === src && olTgt === tgt && (ol.label || 'related_to') === (link.label || 'related_to'));
+                });
+              }
+              self.instance.graphData(data);
+              if (tip) { tip.remove(); self._edgePopupEl = null; }
+            }
+          });
+
+          renameRow.appendChild(renameInput);
+          renameRow.appendChild(renameBtn);
+          renameRow.appendChild(deleteBtn);
+          tip.appendChild(renameRow);
+
+          // Date editing row
+          var dateRow = document.createElement('div');
+          dateRow.style.marginTop = '4px';
+          dateRow.style.display = 'flex';
+          dateRow.style.alignItems = 'center';
+          dateRow.style.gap = '4px';
+          dateRow.style.fontSize = '0.72rem';
+
+          var fromLabel = document.createElement('span');
+          fromLabel.textContent = 'From:';
+          fromLabel.style.color = 'rgba(255,255,255,0.5)';
+          dateRow.appendChild(fromLabel);
+
+          var fromDate = document.createElement('input');
+          fromDate.type = 'date';
+          fromDate.value = link.valid_from || '';
+          fromDate.style.cssText = 'background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:2px 4px; font-size:0.7rem; border-radius:3px; width:110px;';
+          dateRow.appendChild(fromDate);
+
+          var toLabel = document.createElement('span');
+          toLabel.textContent = 'To:';
+          toLabel.style.color = 'rgba(255,255,255,0.5)';
+          dateRow.appendChild(toLabel);
+
+          var toDate = document.createElement('input');
+          toDate.type = 'date';
+          toDate.value = link.valid_to || '';
+          toDate.style.cssText = 'background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:2px 4px; font-size:0.7rem; border-radius:3px; width:110px;';
+          dateRow.appendChild(toDate);
+
+          var dateSaveBtn = document.createElement('button');
+          dateSaveBtn.innerHTML = '<i class="fa-solid fa-calendar-check"></i>';
+          dateSaveBtn.style.cssText = 'background:var(--accent-bright, #4fc3f7); border:none; color:#000; padding:3px 6px; border-radius:3px; cursor:pointer; font-size:0.65rem;';
+          dateSaveBtn.title = 'Save dates';
+          dateSaveBtn.addEventListener('click', function() {
+            var vf = fromDate.value || null;
+            var vt = toDate.value || null;
+            var curLabel = link.label || 'related_to';
+            var xhr = new XMLHttpRequest();
+            xhr.open('PATCH', '/edge', false);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            var token = localStorage.getItem('engram_token');
+            if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+            xhr.send(JSON.stringify({
+              from: src, to: tgt,
+              old_rel_type: curLabel, new_rel_type: curLabel,
+              valid_from: vf, valid_to: vt
+            }));
+            if (xhr.status === 200) {
+              var resp = JSON.parse(xhr.responseText);
+              if (resp.renamed) {
+                link.valid_from = vf;
+                link.valid_to = vt;
+                // Update original links too
+                if (self._originalLinks) {
+                  self._originalLinks.forEach(function(ol) {
+                    var olSrc = typeof ol.source === 'object' ? ol.source.id : ol.source;
+                    var olTgt = typeof ol.target === 'object' ? ol.target.id : ol.target;
+                    if (olSrc === src && olTgt === tgt && (ol.label || 'related_to') === curLabel) {
+                      ol.valid_from = vf;
+                      ol.valid_to = vt;
+                    }
+                  });
+                }
+                dateSaveBtn.innerHTML = '<i class="fa-solid fa-check"></i>';
+                setTimeout(function() { dateSaveBtn.innerHTML = '<i class="fa-solid fa-calendar-check"></i>'; }, 1000);
+              }
+            }
+          });
+          dateRow.appendChild(dateSaveBtn);
+
+          // Prevent click propagation from date inputs
+          fromDate.addEventListener('click', function(e) { e.stopPropagation(); });
+          toDate.addEventListener('click', function(e) { e.stopPropagation(); });
+
+          tip.appendChild(dateRow);
+
+          document.body.appendChild(tip);
+          self._edgePopupEl = tip;
+          setTimeout(function() {
+            document.addEventListener('click', function closeTip(e) {
+              if (tip && !tip.contains(e.target)) {
+                tip.remove();
+                self._edgePopupEl = null;
+                document.removeEventListener('click', closeTip);
+              }
+            });
+          }, 100);
+        }
+      });
+
+    // Right-click: show context menu
+    graph.onNodeRightClick(function(node, event) {
+      if (self._contextMenuEl) {
+        self._contextMenuEl.remove();
+        self._contextMenuEl = null;
+      }
+      if (!node || !node.id) return;
+
+      // Create context menu DOM
+      var menu = document.createElement('div');
+      menu.className = 'engram-context-menu';
+      menu.style.left = event.clientX + 'px';
+      menu.style.top = event.clientY + 'px';
+
+      var items = [
+        { icon: 'fa-solid fa-expand', label: 'Expand', action: 'expand' },
+        { icon: 'fa-solid fa-circle-info', label: 'Open Detail', action: 'details' },
+        { icon: 'fa-solid fa-route', label: 'Find Path From...', action: 'find_path' },
+        { icon: 'fa-solid fa-eye-slash', label: 'Hide Type', action: 'hide_type' },
+      ];
+
+      items.forEach(function(item) {
+        var row = document.createElement('div');
+        row.className = 'engram-context-item';
+        row.innerHTML = '<i class="' + item.icon + '"></i> ' + item.label;
+        row.addEventListener('click', function() {
+          menu.remove();
+          self._contextMenuEl = null;
+          if (item.action === 'expand' && onDblClickCb) {
+            onDblClickCb(node.id);
+          } else if (item.action === 'details') {
+            // Also trigger Leptos select
+            if (onClickCb) onClickCb(node.id);
+            // Show inline node editor popup
+            self._showNodeEditor(node, event);
+          } else if (item.action === 'find_path') {
+            // Set start node for sidebar Find Path
+            self._findPathFrom = node.id;
+            self._pathHighlight = new Set();
+            self._pathNodes = new Set();
+            // Refresh to clear old path highlight
+            graph.nodeVisibility(graph.nodeVisibility());
+            graph.linkVisibility(graph.linkVisibility());
+            graph.linkColor(graph.linkColor());
+            graph.linkWidth(graph.linkWidth());
+            // Trigger Leptos path_from signal via custom event
+            window.dispatchEvent(new CustomEvent('engram-set-path-from', { detail: node.id }));
+          } else if (item.action === 'hide_type') {
+            var nt = (node.node_type || 'Entity').toLowerCase();
+            self._hiddenTypes.add(nt);
+            graph.nodeVisibility(graph.nodeVisibility()); // refresh
+            graph.linkVisibility(graph.linkVisibility());
+          }
+        });
+        menu.appendChild(row);
+      });
+
+      document.body.appendChild(menu);
+      self._contextMenuEl = menu;
+
+      // Dismiss on click elsewhere
+      setTimeout(function() {
+        document.addEventListener('click', function dismiss() {
+          if (self._contextMenuEl) {
+            self._contextMenuEl.remove();
+            self._contextMenuEl = null;
+          }
+          document.removeEventListener('click', dismiss);
+        }, { once: true });
+      }, 10);
+    });
+
+    // ── Physics Engine (Step E) ──
+    // Use ngraph for better performance with large graphs
+    // Note: forceEngine('ngraph') not available via builder on 3d-force-graph,
+    // so we keep d3 force but tune it for performance
+    if (nodeCount < 100) {
+      graph.d3Force('charge').strength(-180);
+    } else {
+      // Lighter simulation for large graphs
+      graph.d3Force('charge').strength(-100);
+      graph.cooldownTicks(100);
+    }
+
+    // Responsive resize
+    var ro = new ResizeObserver(function() {
+      graph.width(container.clientWidth);
+      graph.height(container.clientHeight);
+    });
+    ro.observe(container);
+
+    this.instance = graph;
+    this.instance._resizeObserver = ro;
+    this.instance._destructor = function() {
+      ro.disconnect();
+      // Remove legend
+      if (self._legendEl) {
+        self._legendEl.remove();
+        self._legendEl = null;
+      }
+    };
+
+    // ── Color Legend (Step O) — uses _allNodes for full type list ──
+    self._buildLegend(container, self._allNodes);
+  },
+
+  // Filter nodes and links, removing hidden types, their edges, and orphaned nodes
+  _filterData: function(nodes, links) {
+    var self = this;
+    if (self._legendHidden.size === 0) {
+      return { nodes: nodes, links: links };
+    }
+    // Step 1: Remove hidden node types
+    var hiddenIds = new Set();
+    var visibleNodes = nodes.filter(function(n) {
+      var nt = (n.node_type || 'Entity').toLowerCase();
+      if (self._legendHidden.has(nt)) {
+        hiddenIds.add(n.id);
+        return false;
+      }
+      return true;
+    });
+    // Step 2: Remove edges touching hidden nodes
+    var filteredLinks = links.filter(function(l) {
+      var srcId = typeof l.source === 'object' ? l.source.id : l.source;
+      var tgtId = typeof l.target === 'object' ? l.target.id : l.target;
+      return !hiddenIds.has(srcId) && !hiddenIds.has(tgtId);
+    });
+    // Step 3: Remove orphaned nodes (no remaining edges)
+    var connectedIds = new Set();
+    filteredLinks.forEach(function(l) {
+      var srcId = typeof l.source === 'object' ? l.source.id : l.source;
+      var tgtId = typeof l.target === 'object' ? l.target.id : l.target;
+      connectedIds.add(srcId);
+      connectedIds.add(tgtId);
+    });
+    // Keep the start node even if orphaned (it's the search target)
+    if (self._startNodeId) connectedIds.add(self._startNodeId);
+    var filteredNodes = visibleNodes.filter(function(n) {
+      return connectedIds.has(n.id);
+    });
+    return { nodes: filteredNodes, links: filteredLinks };
+  },
+
+  // ── Edge Bundling Helper ──
+  _bundleEdges: function(links) {
+    var linkGroups = {};
+    links.forEach(function(l) {
+      var src = typeof l.source === 'object' ? l.source.id : l.source;
+      var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+      var pair = [src, tgt].sort().join('|');
+      if (!linkGroups[pair]) linkGroups[pair] = [];
+      linkGroups[pair].push(l);
+    });
+
+    var bundled = [];
+    Object.keys(linkGroups).forEach(function(pair) {
+      var group = linkGroups[pair];
+      if (group.length === 1) {
+        bundled.push(group[0]);
+      } else {
+        var b = {
+          source: group[0].source,
+          target: group[0].target,
+          label: group.length + ' relations',
+          _bundled: true,
+          _children: group,
+          _bundleCount: group.length,
+        };
+        bundled.push(b);
+      }
+    });
+    return bundled;
+  },
+
+  toggleBundling: function(enabled) {
+    this._bundlingEnabled = enabled;
+    if (this.instance && this._originalLinks) {
+      var links = enabled
+        ? this._bundleEdges(this._originalLinks)
+        : this._originalLinks.map(function(l) { return Object.assign({}, l); });
+      var data = this.instance.graphData();
+      this.instance.graphData({ nodes: data.nodes, links: links });
+    }
+  },
+
+  // ── Color Legend with filter checkboxes (Step O) ──
+  _buildLegend: function(container, nodes) {
+    var self = this;
+
+    // Remove old legend
+    if (this._legendEl) {
+      this._legendEl.remove();
+      this._legendEl = null;
+    }
+
+    // Collect unique types present in data
+    var typesInGraph = {};
+    nodes.forEach(function(n) {
+      var t = (n.node_type || 'Entity').toLowerCase();
+      if (!typesInGraph[t]) {
+        typesInGraph[t] = n.node_type || 'Entity';
+      }
+    });
+
+    var typeKeys = Object.keys(typesInGraph);
+    if (typeKeys.length === 0) return;
+
+    // Initialize hidden types from defaults (only on first build)
+    if (!self._legendInitialized) {
+      // Don't reset _hiddenTypes — it was pre-populated in create()
+      typeKeys.forEach(function(key) {
+        if (DEFAULT_HIDDEN_TYPES.has(key)) {
+          self._hiddenTypes.add(key);
+        }
+      });
+      self._legendInitialized = true;
+    }
+
+    var legend = document.createElement('div');
+    legend.className = 'engram-legend';
+
+    typeKeys.forEach(function(key) {
+      var color = typeColor(key);
+      var displayName = TYPE_LABELS[key] || typesInGraph[key];
+      var isHidden = self._legendHidden.has(key);
+
+      var row = document.createElement('label');
+      row.className = 'engram-legend-item' + (isHidden ? ' engram-legend-hidden' : '');
+      row.style.cursor = 'pointer';
+
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !isHidden;
+      cb.className = 'engram-legend-cb';
+      cb.addEventListener('change', function() {
+        if (cb.checked) {
+          self._legendHidden.delete(key);
+          self._hiddenTypes.delete(key);
+          row.classList.remove('engram-legend-hidden');
+        } else {
+          self._legendHidden.add(key);
+          self._hiddenTypes.add(key);
+          row.classList.add('engram-legend-hidden');
+        }
+        self._applyLegendFilter();
+      });
+
+      var shape = TYPE_SHAPES[key] || null;
+      var shapeClass = shape === 'diamond' ? ' engram-legend-diamond' : (shape === 'triangle' ? ' engram-legend-triangle' : '');
+      var dot = document.createElement('span');
+      dot.className = 'engram-legend-dot' + shapeClass;
+      dot.style.background = color;
+
+      var label = document.createTextNode(displayName);
+
+      row.appendChild(cb);
+      row.appendChild(dot);
+      row.appendChild(label);
+      legend.appendChild(row);
+    });
+
+    container.style.position = 'relative';
+    container.appendChild(legend);
+    this._legendEl = legend;
+  },
+
+  // Apply legend type filters by updating graph data
+  _applyLegendFilter: function() {
+    var self = this;
+    if (!self.instance || !self._allNodes) return;
+    var filtered = self._filterData(self._allNodes, self._allLinks);
+    self.instance.graphData({ nodes: filtered.nodes, links: filtered.links });
+  },
+
+  // ── Autocomplete for any input — fetches suggestions from a URL returning {types:[...]} ──
+  _acCache: {},
+  _attachAutocomplete: function(inputEl, url) {
+    var self = this;
+    var dropdown = null;
+    function fetchTypes(cb) {
+      if (self._acCache[url]) return cb(self._acCache[url]);
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url);
+      var token = localStorage.getItem('engram_token');
+      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      xhr.onload = function() {
+        try { self._acCache[url] = JSON.parse(xhr.responseText).types || []; }
+        catch(e) { self._acCache[url] = []; }
+        cb(self._acCache[url]);
+      };
+      xhr.onerror = function() { cb([]); };
+      xhr.send();
+    }
+    function show(matches) {
+      hide();
+      if (!matches.length) return;
+      dropdown = document.createElement('div');
+      dropdown.style.cssText = 'position:absolute;background:#2a2a2e;border:1px solid rgba(255,255,255,0.15);border-radius:4px;max-height:150px;overflow-y:auto;z-index:10001;min-width:' + inputEl.offsetWidth + 'px;';
+      var rect = inputEl.getBoundingClientRect();
+      dropdown.style.left = rect.left + 'px';
+      dropdown.style.top = (rect.bottom + 2) + 'px';
+      matches.slice(0, 10).forEach(function(m) {
+        var opt = document.createElement('div');
+        opt.textContent = m;
+        opt.style.cssText = 'padding:4px 8px;font-size:0.75rem;cursor:pointer;color:#e0e0e0;';
+        opt.onmouseenter = function() { opt.style.background = 'rgba(255,255,255,0.08)'; };
+        opt.onmouseleave = function() { opt.style.background = 'none'; };
+        opt.addEventListener('mousedown', function(ev) { ev.preventDefault(); inputEl.value = m; hide(); });
+        dropdown.appendChild(opt);
+      });
+      document.body.appendChild(dropdown);
+    }
+    function hide() { if (dropdown) { dropdown.remove(); dropdown = null; } }
+    function normalize(s) { return s.toLowerCase().replace(/[\s-]/g, '_'); }
+    inputEl.addEventListener('focus', function() { fetchTypes(function(){}); });
+    inputEl.addEventListener('input', function() {
+      var val = inputEl.value.trim().toLowerCase();
+      if (!val) { hide(); return; }
+      fetchTypes(function(types) {
+        var matches = types.filter(function(t) {
+          return t.toLowerCase().indexOf(val) !== -1;
+        });
+        var norm = normalize(val);
+        var similar = types.find(function(t) { return normalize(t) === norm && t !== val; });
+        if (similar && matches.indexOf(similar) === -1) matches.unshift(similar);
+        show(matches);
+      });
+    });
+    inputEl.addEventListener('blur', function() { setTimeout(hide, 200); });
+  },
+
+  // ── Inline Node Editor ──
+  _showNodeEditor: function(node, event) {
+    var self = this;
+    // Remove any existing popup
+    if (self._edgePopupEl) { self._edgePopupEl.remove(); self._edgePopupEl = null; }
+
+    var nodeType = (node.node_type || '').toLowerCase();
+    var isFact = nodeType === 'fact';
+    var isDoc = nodeType === 'document';
+    var isSource = nodeType === 'source';
+
+    var popup = document.createElement('div');
+    popup.className = 'engram-context-menu';
+    popup.style.left = (event ? event.clientX : 300) + 'px';
+    popup.style.top = (event ? event.clientY : 300) + 'px';
+    popup.style.minWidth = '280px';
+    popup.style.padding = '10px';
+
+    // Header
+    var header = document.createElement('div');
+    header.style.cssText = 'font-weight:600; font-size:0.85rem; margin-bottom:8px; color:#fff;';
+    header.textContent = node.id.length > 50 ? node.id.substring(0, 50) + '...' : node.id;
+    popup.appendChild(header);
+
+    // Type field (editable for entities and facts)
+    if (!isDoc && !isSource) {
+      var typeRow = document.createElement('div');
+      typeRow.style.cssText = 'margin-bottom:6px;';
+      var typeLabel = document.createElement('div');
+      typeLabel.style.cssText = 'font-size:0.7rem; color:rgba(255,255,255,0.5); margin-bottom:2px;';
+      typeLabel.textContent = 'TYPE';
+      typeRow.appendChild(typeLabel);
+
+      var typeInput = document.createElement('input');
+      typeInput.type = 'text';
+      typeInput.value = node.node_type || '';
+      typeInput.style.cssText = 'width:100%; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:4px 8px; font-size:0.78rem; border-radius:3px; box-sizing:border-box;';
+      typeInput.placeholder = 'Entity type...';
+      typeRow.appendChild(typeInput);
+      popup.appendChild(typeRow);
+
+      // Autocomplete for node types
+      self._attachAutocomplete(typeInput, '/config/node-types');
+    }
+
+    // Fact: Label + Claim (both editable)
+    if (isFact) {
+      // Label field (what shows in graph)
+      var labelRow = document.createElement('div');
+      labelRow.style.cssText = 'margin-bottom:6px;';
+      var labelLabel = document.createElement('div');
+      labelLabel.style.cssText = 'font-size:0.7rem; color:rgba(255,255,255,0.5); margin-bottom:2px;';
+      labelLabel.textContent = 'LABEL (displayed in graph)';
+      labelRow.appendChild(labelLabel);
+
+      var labelInput = document.createElement('input');
+      labelInput.type = 'text';
+      labelInput.value = node.display_label || node.label || node.id;
+      labelInput.style.cssText = 'width:100%; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:4px 8px; font-size:0.78rem; border-radius:3px; box-sizing:border-box;';
+      labelInput.placeholder = 'Display label...';
+      labelRow.appendChild(labelInput);
+      popup.appendChild(labelRow);
+
+      // Claim field (full fact text)
+      var claimRow = document.createElement('div');
+      claimRow.style.cssText = 'margin-bottom:6px;';
+      var claimLabel = document.createElement('div');
+      claimLabel.style.cssText = 'font-size:0.7rem; color:rgba(255,255,255,0.5); margin-bottom:2px;';
+      claimLabel.textContent = 'CLAIM (full fact text)';
+      claimRow.appendChild(claimLabel);
+
+      var claimInput = document.createElement('textarea');
+      claimInput.value = 'Loading...';
+      claimInput.style.cssText = 'width:100%; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:4px 8px; font-size:0.75rem; border-radius:3px; box-sizing:border-box; min-height:80px; resize:vertical;';
+      claimRow.appendChild(claimInput);
+      popup.appendChild(claimRow);
+
+      // Source passage (read-only, collapsible <details>)
+      var sourceDetails = document.createElement('details');
+      sourceDetails.style.cssText = 'margin-bottom:0.5rem; display:none;';
+      var sourceSummary = document.createElement('summary');
+      sourceSummary.style.cssText = 'font-size:0.72rem; color:var(--text-secondary, rgba(255,255,255,0.5)); cursor:pointer;';
+      sourceSummary.innerHTML = '<i class="fa-solid fa-file-lines" style="margin-right:0.2rem;"></i> Source passage';
+      sourceDetails.appendChild(sourceSummary);
+      var sourceText = document.createElement('blockquote');
+      sourceText.style.cssText = 'margin:0.25rem 0 0 0; padding:0.4rem 0.6rem; border-left:3px solid rgba(74,158,255,0.3); background:rgba(255,255,255,0.02); font-size:0.75rem; color:rgba(255,255,255,0.5); max-height:150px; overflow-y:auto; white-space:pre-wrap; border-radius:0 4px 4px 0;';
+      sourceDetails.appendChild(sourceText);
+      popup.appendChild(sourceDetails);
+
+      // Fetch full claim text and source passage from node properties
+      var xhrClaim = new XMLHttpRequest();
+      xhrClaim.open('GET', '/explain/' + encodeURIComponent(node.id));
+      var tkClaim = localStorage.getItem('engram_token');
+      if (tkClaim) xhrClaim.setRequestHeader('Authorization', 'Bearer ' + tkClaim);
+      xhrClaim.onload = function() {
+        try {
+          var data = JSON.parse(xhrClaim.responseText);
+          var props = data.properties || {};
+          claimInput.value = props.claim || node.id;
+          // Show source passage if available
+          if (props.source_passage) {
+            sourceText.textContent = props.source_passage;
+            sourceDetails.style.display = 'block';
+          }
+          // If no custom label yet, show derived from claim
+          if (!node.display_label && props.claim) {
+            var words = props.claim.split(' ');
+            var auto = '';
+            for (var i = 0; i < words.length && auto.length < 60; i++) {
+              if (auto) auto += ' ';
+              auto += words[i];
+            }
+            if (auto.length < props.claim.length) auto += '...';
+            labelInput.value = auto;
+          }
+        } catch(e) { claimInput.value = node.id; }
+      };
+      xhrClaim.onerror = function() { claimInput.value = node.id; };
+      xhrClaim.send();
+    }
+
+    // Title field (editable for documents)
+    if (isDoc) {
+      var titleRow = document.createElement('div');
+      titleRow.style.cssText = 'margin-bottom:6px;';
+      var titleLabel = document.createElement('div');
+      titleLabel.style.cssText = 'font-size:0.7rem; color:rgba(255,255,255,0.5); margin-bottom:2px;';
+      titleLabel.textContent = 'TITLE';
+      titleRow.appendChild(titleLabel);
+
+      var titleInput = document.createElement('input');
+      titleInput.type = 'text';
+      titleInput.value = ''; // will be filled async
+      titleInput.style.cssText = 'width:100%; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:4px 8px; font-size:0.78rem; border-radius:3px; box-sizing:border-box;';
+      titleInput.placeholder = 'Document title...';
+      titleRow.appendChild(titleInput);
+      popup.appendChild(titleRow);
+
+      // Load current title
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', '/explain/' + encodeURIComponent(node.id));
+      var token = localStorage.getItem('engram_token');
+      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      xhr.onload = function() {
+        try {
+          var data = JSON.parse(xhr.responseText);
+          var props = data.properties || {};
+          titleInput.value = props.title || '';
+        } catch(e) {}
+      };
+      xhr.send();
+    }
+
+    // Buttons row
+    var btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex; gap:6px; margin-top:8px;';
+
+    var saveBtn = document.createElement('button');
+    saveBtn.innerHTML = '<i class="fa-solid fa-check"></i> Save';
+    saveBtn.style.cssText = 'background:var(--accent-bright, #4fc3f7); border:none; color:#000; padding:4px 12px; border-radius:3px; cursor:pointer; font-size:0.75rem; font-weight:600;';
+    saveBtn.addEventListener('click', function() {
+      var body = { label: node.id, properties: {} };
+
+      // Type
+      var typeEl = popup.querySelector('input[placeholder="Entity type..."]');
+      if (typeEl && typeEl.value.trim()) {
+        body.node_type = typeEl.value.trim();
+      }
+
+      // Fact: label + claim
+      var labelEl = popup.querySelector('input[placeholder="Display label..."]');
+      if (labelEl && labelEl.value.trim()) {
+        body.properties.display_label = labelEl.value.trim();
+      }
+      var claimEl = popup.querySelector('textarea');
+      if (claimEl && claimEl.value.trim()) {
+        body.properties.claim = claimEl.value.trim();
+      }
+
+      // Title (document)
+      var titleEl = popup.querySelector('input[placeholder="Document title..."]');
+      if (titleEl && titleEl.value.trim()) {
+        body.properties.title = titleEl.value.trim();
+      }
+
+      var xhr = new XMLHttpRequest();
+      xhr.open('PATCH', '/node');
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      var token = localStorage.getItem('engram_token');
+      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      xhr.onload = function() {
+        if (xhr.status === 200) {
+          // Update local node data
+          if (body.node_type) {
+            node.node_type = body.node_type;
+          }
+          if (body.properties.display_label) {
+            node.display_label = body.properties.display_label;
+            node.label = body.properties.display_label;
+          }
+          popup.remove();
+          self._edgePopupEl = null;
+          // Refresh graph visuals (force re-render of 3D objects)
+          if (self.instance) {
+            self.instance.nodeThreeObject(self.instance.nodeThreeObject());
+          }
+        }
+      };
+      xhr.send(JSON.stringify(body));
+    });
+    btnRow.appendChild(saveBtn);
+
+    var cancelBtn = document.createElement('button');
+    cancelBtn.innerHTML = 'Cancel';
+    cancelBtn.style.cssText = 'background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.15); color:#fff; padding:4px 12px; border-radius:3px; cursor:pointer; font-size:0.75rem;';
+    cancelBtn.addEventListener('click', function() {
+      popup.remove();
+      self._edgePopupEl = null;
+    });
+    btnRow.appendChild(cancelBtn);
+
+    // Delete button (two-click confirmation)
+    var delBtn = document.createElement('button');
+    delBtn.innerHTML = '<i class="fa-solid fa-trash"></i> Delete';
+    delBtn.style.cssText = 'background:var(--danger, #ef5350); border:none; color:#fff; padding:4px 12px; border-radius:3px; cursor:pointer; font-size:0.75rem; margin-left:auto;';
+    delBtn.addEventListener('click', function() {
+      if (!delBtn.dataset.confirmed) {
+        delBtn.dataset.confirmed = '1';
+        delBtn.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Confirm?';
+        delBtn.style.background = '#f0ad4e';
+        delBtn.style.color = '#1a1a2e';
+        setTimeout(function() {
+          if (delBtn && delBtn.dataset.confirmed) {
+            delete delBtn.dataset.confirmed;
+            delBtn.innerHTML = '<i class="fa-solid fa-trash"></i> Delete';
+            delBtn.style.background = 'var(--danger, #ef5350)';
+            delBtn.style.color = '#fff';
+          }
+        }, 3000);
+        return;
+      }
+      var xhr = new XMLHttpRequest();
+      xhr.open('DELETE', '/node/' + encodeURIComponent(node.id));
+      var token = localStorage.getItem('engram_token');
+      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      xhr.onload = function() {
+        if (xhr.status === 200) {
+          popup.remove();
+          self._edgePopupEl = null;
+          if (self.instance) {
+            var gd = self.instance.graphData();
+            gd.nodes = gd.nodes.filter(function(n) { return n.id !== node.id; });
+            gd.links = gd.links.filter(function(l) {
+              var s = typeof l.source === 'object' ? l.source.id : l.source;
+              var t = typeof l.target === 'object' ? l.target.id : l.target;
+              return s !== node.id && t !== node.id;
+            });
+            self.instance.graphData(gd);
+          }
+        }
+      };
+      xhr.send();
+    });
+    btnRow.appendChild(delBtn);
+
+    popup.appendChild(btnRow);
+    document.body.appendChild(popup);
+    self._edgePopupEl = popup;
+
+    // Dismiss on click outside
+    setTimeout(function() {
+      document.addEventListener('click', function dismiss(e) {
+        if (popup && !popup.contains(e.target)) {
+          popup.remove();
+          self._edgePopupEl = null;
+          document.removeEventListener('click', dismiss);
+        }
+      });
+    }, 100);
+  },
+
+  update: function(nodesJson, linksJson) {
+    if (!this.instance) return;
+    var nodes = JSON.parse(nodesJson);
+    var links = JSON.parse(linksJson);
+    this._originalLinks = links.map(function(l) { return Object.assign({}, l); });
+    var displayLinks = this._bundlingEnabled ? this._bundleEdges(this._originalLinks) : links;
+    this.instance.graphData({ nodes: nodes, links: displayLinks });
+  },
+
+  recenter: function() {
+    if (!this.instance) return;
+    this.instance.zoomToFit(400);
+  },
+
+  filter: function(hiddenTypesJson, hiddenRelsJson) {
+    var self = this;
+    // Merge external filter with legend checkbox state (legend takes precedence)
+    var externalTypes = JSON.parse(hiddenTypesJson || '[]').map(function(t) { return t.toLowerCase(); });
+    var merged = new Set(externalTypes);
+    // Preserve legend-hidden types
+    if (self._legendHidden) {
+      self._legendHidden.forEach(function(t) { merged.add(t); });
+    }
+    self._hiddenTypes = merged;
+    self._hiddenRels = new Set(JSON.parse(hiddenRelsJson || '[]').map(function(r) { return r.toLowerCase(); }));
+    self._orphanedNodes = new Set();
+    // Clear path isolation when filters change
+    self._pathHighlight = new Set();
+    self._pathNodes = new Set();
+    if (self.instance && (self._hiddenRels.size > 0 || self._hiddenTypes.size > 0)) {
+      // Precompute: find nodes that have NO visible edges
+      var data = self.instance.graphData();
+      var nodeHasVisibleEdge = {};
+      data.links.forEach(function(l) {
+        var src = typeof l.source === 'object' ? l.source : null;
+        var tgt = typeof l.target === 'object' ? l.target : null;
+        var srcId = src ? src.id : l.source;
+        var tgtId = tgt ? tgt.id : l.target;
+        var rel = (l.label || '').toLowerCase();
+        var srcType = src ? (src.node_type || 'Entity').toLowerCase() : '';
+        var tgtType = tgt ? (tgt.node_type || 'Entity').toLowerCase() : '';
+        var edgeVisible = !self._hiddenRels.has(rel)
+          && !self._hiddenTypes.has(srcType)
+          && !self._hiddenTypes.has(tgtType)
+          && !(self._temporalCurrentOnly && l.valid_to);
+        if (edgeVisible) {
+          nodeHasVisibleEdge[srcId] = true;
+          nodeHasVisibleEdge[tgtId] = true;
+        }
+      });
+      data.nodes.forEach(function(n) {
+        var nt = (n.node_type || 'Entity').toLowerCase();
+        if (!self._hiddenTypes.has(nt) && !nodeHasVisibleEdge[n.id]) {
+          self._orphanedNodes.add(n.id);
+        }
+      });
+    }
+    if (self.instance) {
+      self.instance.nodeVisibility(self.instance.nodeVisibility());
+      self.instance.linkVisibility(self.instance.linkVisibility());
+      self.instance.linkColor(self.instance.linkColor());
+      self.instance.linkWidth(self.instance.linkWidth());
+    }
+  },
+
+  toggleEdgeLabels: function(show) {
+    this._showEdgeLabels = show;
+    if (this.instance) {
+      // Re-create link objects to toggle labels
+      this.instance.linkThreeObject(this.instance.linkThreeObject());
+    }
+  },
+
+  highlightNode: function(nodeId) {
+    this._highlightedNode = nodeId || null;
+    if (this.instance) {
+      this.instance.nodeColor(this.instance.nodeColor());
+    }
+  },
+
+  setTemporalMode: function(currentOnly) {
+    this._temporalCurrentOnly = currentOnly;
+    if (this.instance) {
+      // Recalculate orphaned nodes accounting for temporal filter
+      var self = this;
+      var data = self.instance.graphData();
+      self._orphanedNodes = new Set();
+      var nodeHasVisibleEdge = {};
+      data.links.forEach(function(l) {
+        var src = typeof l.source === 'object' ? l.source : null;
+        var tgt = typeof l.target === 'object' ? l.target : null;
+        var srcId = src ? src.id : l.source;
+        var tgtId = tgt ? tgt.id : l.target;
+        var rel = (l.label || '').toLowerCase();
+        var srcType = src ? (src.node_type || 'Entity').toLowerCase() : '';
+        var tgtType = tgt ? (tgt.node_type || 'Entity').toLowerCase() : '';
+        var edgeVisible = !self._hiddenRels.has(rel)
+          && !self._hiddenTypes.has(srcType)
+          && !self._hiddenTypes.has(tgtType)
+          && !(self._temporalCurrentOnly && l.valid_to);
+        if (edgeVisible) {
+          nodeHasVisibleEdge[srcId] = true;
+          nodeHasVisibleEdge[tgtId] = true;
+        }
+      });
+      data.nodes.forEach(function(n) {
+        var nt = (n.node_type || 'Entity').toLowerCase();
+        if (!self._hiddenTypes.has(nt) && !nodeHasVisibleEdge[n.id]) {
+          self._orphanedNodes.add(n.id);
+        }
+      });
+      // Refresh all visual properties
+      self.instance.nodeVisibility(self.instance.nodeVisibility());
+      self.instance.linkVisibility(self.instance.linkVisibility());
+      self.instance.linkColor(self.instance.linkColor());
+      self.instance.linkWidth(self.instance.linkWidth());
+    }
+  },
+
+  // ── Find Path: BFS (shortest) ──
+  findPath: function(fromId, toId) {
+    if (!this.instance) return null;
+    var data = this.instance.graphData();
+    // Use original links for pathfinding (unbundled)
+    var linkList = this._originalLinks || data.links;
+    var adj = {};
+    linkList.forEach(function(l) {
+      var src = typeof l.source === 'object' ? l.source.id : l.source;
+      var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+      if (!adj[src]) adj[src] = [];
+      if (!adj[tgt]) adj[tgt] = [];
+      adj[src].push(tgt);
+      adj[tgt].push(src);
+    });
+    var visited = new Set();
+    var queue = [[fromId]];
+    visited.add(fromId);
+    while (queue.length > 0) {
+      var path = queue.shift();
+      var current = path[path.length - 1];
+      if (current === toId) return path;
+      var neighbors = adj[current] || [];
+      for (var i = 0; i < neighbors.length; i++) {
+        if (!visited.has(neighbors[i])) {
+          visited.add(neighbors[i]);
+          queue.push(path.concat([neighbors[i]]));
+        }
+      }
+    }
+    return null;
+  },
+
+  // ── Find All Paths: DFS with backtracking (Step J) ──
+  findAllPaths: function(fromId, toId, maxDepth) {
+    if (!this.instance) return [];
+    maxDepth = maxDepth || 5;
+    var data = this.instance.graphData();
+    // Use original unbundled links for adjacency
+    var linkList = this._originalLinks || data.links;
+    var adj = {};
+    linkList.forEach(function(l) {
+      var src = typeof l.source === 'object' ? l.source.id : l.source;
+      var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+      if (!adj[src]) adj[src] = [];
+      if (!adj[tgt]) adj[tgt] = [];
+      if (adj[src].indexOf(tgt) === -1) adj[src].push(tgt);
+      if (adj[tgt].indexOf(src) === -1) adj[tgt].push(src);
+    });
+
+    var allPaths = [];
+    var visited = new Set();
+
+    function dfs(current, path) {
+      if (allPaths.length >= 10) return;
+      if (current === toId) {
+        allPaths.push(path.slice());
+        return;
+      }
+      if (path.length > maxDepth) return;
+      var neighbors = adj[current] || [];
+      for (var i = 0; i < neighbors.length; i++) {
+        var n = neighbors[i];
+        if (!visited.has(n)) {
+          visited.add(n);
+          path.push(n);
+          dfs(n, path);
+          path.pop();
+          visited.delete(n);
+        }
+      }
+    }
+
+    visited.add(fromId);
+    dfs(fromId, [fromId]);
+
+    // Sort by length (shortest first)
+    allPaths.sort(function(a, b) { return a.length - b.length; });
+    return allPaths;
+  },
+
+  // ── Show multiple paths on graph (Step J) ──
+  showPaths: function(pathsJson) {
+    var paths = JSON.parse(pathsJson);
+    this._pathNodes = new Set();
+    this._pathHighlight = new Set();
+
+    for (var p = 0; p < paths.length; p++) {
+      var path = paths[p];
+      for (var i = 0; i < path.length; i++) {
+        this._pathNodes.add(path[i]);
+      }
+      for (var i = 0; i < path.length - 1; i++) {
+        this._pathHighlight.add(path[i] + '>' + path[i+1]);
+        this._pathHighlight.add(path[i+1] + '>' + path[i]);
+      }
+    }
+
+    if (this.instance) {
+      var data = this.instance.graphData();
+      var existingNodeIds = new Set(data.nodes.map(function(n) { return n.id; }));
+      var existingEdgeKeys = new Set();
+      data.links.forEach(function(l) {
+        var src = typeof l.source === 'object' ? l.source.id : l.source;
+        var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+        existingEdgeKeys.add(src + '>' + tgt);
+        existingEdgeKeys.add(tgt + '>' + src);
+      });
+
+      // Add missing path nodes and edges to the graph
+      var newNodes = [];
+      var newLinks = [];
+      var self = this;
+
+      this._pathNodes.forEach(function(nodeId) {
+        if (!existingNodeIds.has(nodeId)) {
+          newNodes.push({
+            id: nodeId,
+            label: nodeId,
+            display_label: nodeId,
+            title: 'Path node',
+            node_type: 'Entity',
+            confidence: 0.5,
+            size: 5,
+            _pathOnly: true
+          });
+          existingNodeIds.add(nodeId);
+        }
+      });
+
+      // For each consecutive pair in each path, ensure a connecting edge exists
+      for (var p = 0; p < paths.length; p++) {
+        var path = paths[p];
+        for (var i = 0; i < path.length - 1; i++) {
+          var a = path[i], b = path[i+1];
+          if (!existingEdgeKeys.has(a + '>' + b)) {
+            newLinks.push({
+              source: a,
+              target: b,
+              label: 'path',
+              _pathOnly: true
+            });
+            existingEdgeKeys.add(a + '>' + b);
+            existingEdgeKeys.add(b + '>' + a);
+          }
+        }
+      }
+
+      if (newNodes.length > 0 || newLinks.length > 0) {
+        this.instance.graphData({
+          nodes: data.nodes.concat(newNodes),
+          links: data.links.concat(newLinks)
+        });
+      }
+
+      // Temporarily unbundle edges along paths for detail
+      if (this._bundlingEnabled && this._originalLinks) {
+        var data2 = this.instance.graphData();
+        var unbundledLinks = [];
+        var pathPairs = this._pathHighlight;
+        data2.links.forEach(function(l) {
+          var src = typeof l.source === 'object' ? l.source.id : l.source;
+          var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+          if (l._bundled && (pathPairs.has(src + '>' + tgt) || pathPairs.has(tgt + '>' + src))) {
+            l._children.forEach(function(c) { unbundledLinks.push(c); });
+          } else {
+            unbundledLinks.push(l);
+          }
+        });
+        this.instance.graphData({ nodes: data2.nodes, links: unbundledLinks });
+      }
+
+      this.instance.nodeVisibility(this.instance.nodeVisibility());
+      this.instance.linkVisibility(this.instance.linkVisibility());
+      this.instance.linkColor(this.instance.linkColor());
+      this.instance.linkWidth(this.instance.linkWidth());
+    }
+  },
+
+  fitToPath: function(pathNodes) {
+    if (!this.instance || !pathNodes || pathNodes.length === 0) return;
+    var data = this.instance.graphData();
+    var positions = [];
+    data.nodes.forEach(function(n) {
+      if (pathNodes.indexOf(n.id) !== -1 && n.x !== undefined) {
+        positions.push({ x: n.x, y: n.y, z: n.z });
+      }
+    });
+    if (positions.length === 0) return;
+    // Calculate centroid
+    var cx = 0, cy = 0, cz = 0;
+    positions.forEach(function(p) { cx += p.x; cy += p.y; cz += p.z; });
+    cx /= positions.length; cy /= positions.length; cz /= positions.length;
+    // Camera distance based on bounding box
+    var maxDist = 0;
+    positions.forEach(function(p) {
+      var d = Math.sqrt((p.x-cx)*(p.x-cx) + (p.y-cy)*(p.y-cy) + (p.z-cz)*(p.z-cz));
+      if (d > maxDist) maxDist = d;
+    });
+    var camDist = Math.max(maxDist * 2.5, 100);
+    this.instance.cameraPosition(
+      { x: cx + camDist * 0.5, y: cy + camDist * 0.3, z: cz + camDist },
+      { x: cx, y: cy, z: cz },
+      1000
+    );
+  },
+
+  clearPath: function() {
+    this._pathHighlight = new Set();
+    this._pathNodes = new Set();
+    this._findPathFrom = null;
+
+    // Remove path-only nodes and edges that were injected by showPaths
+    if (this.instance) {
+      var data = this.instance.graphData();
+      var cleanNodes = data.nodes.filter(function(n) { return !n._pathOnly; });
+      var cleanLinks = data.links.filter(function(l) { return !l._pathOnly; });
+      if (cleanNodes.length !== data.nodes.length || cleanLinks.length !== data.links.length) {
+        this.instance.graphData({ nodes: cleanNodes, links: cleanLinks });
+      }
+    }
+
+    // Re-bundle if bundling is enabled
+    if (this.instance && this._bundlingEnabled && this._originalLinks) {
+      var data = this.instance.graphData();
+      var bundled = this._bundleEdges(this._originalLinks);
+      this.instance.graphData({ nodes: data.nodes, links: bundled });
+    }
+
+    if (this.instance) {
+      this.instance.nodeVisibility(this.instance.nodeVisibility());
+      this.instance.linkVisibility(this.instance.linkVisibility());
+      this.instance.linkColor(this.instance.linkColor());
+      this.instance.linkWidth(this.instance.linkWidth());
+    }
+    var hint = document.querySelector('.engram-path-hint');
+    if (hint) hint.remove();
+  },
+
+  destroy: function() {
+    if (this.instance) {
+      this.instance._destructor && this.instance._destructor();
+      this.instance._destructor = null;
+      this.instance = null;
+    }
+    if (this._contextMenuEl) {
+      this._contextMenuEl.remove();
+      this._contextMenuEl = null;
+    }
+    if (this._legendEl) {
+      this._legendEl.remove();
+      this._legendEl = null;
+    }
+  }
+};
