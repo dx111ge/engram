@@ -19,11 +19,29 @@ jobs:
         run: cargo build --release --features all,cuda
       - name: Strip binary
         run: strip target/release/engram
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: engram-linux-x86_64
-          path: target/release/engram
+      - name: Rename artifact
+        run: cp target/release/engram engram-linux-x86_64
+      - name: Upload to Gitea release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          # Create release if not exists
+          curl -sf -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\": \"${TAG}\", \"name\": \"Engram ${TAG}\"}" \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases" || true
+          # Get release ID
+          RELEASE_ID=$(curl -sf \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          # Upload asset
+          curl -sf -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @engram-linux-x86_64 \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=engram-linux-x86_64"
 
   build-linux-aarch64:
     runs-on: ubuntu-latest
@@ -50,11 +68,26 @@ jobs:
         run: cargo build --release --features all,cuda --target aarch64-unknown-linux-gnu
       - name: Strip binary
         run: aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/engram
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: engram-linux-aarch64
-          path: target/aarch64-unknown-linux-gnu/release/engram
+      - name: Rename artifact
+        run: cp target/aarch64-unknown-linux-gnu/release/engram engram-linux-aarch64
+      - name: Upload to Gitea release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          curl -sf -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\": \"${TAG}\", \"name\": \"Engram ${TAG}\"}" \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases" || true
+          RELEASE_ID=$(curl -sf \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          curl -sf -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @engram-linux-aarch64 \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=engram-linux-aarch64"
 
   build-windows:
     runs-on: ubuntu-latest
@@ -79,11 +112,24 @@ jobs:
         run: cargo build --release --features all,directml --target x86_64-pc-windows-gnu
       - name: Strip binary
         run: x86_64-w64-mingw32-strip target/x86_64-pc-windows-gnu/release/engram.exe
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: engram-windows-x86_64
-          path: target/x86_64-pc-windows-gnu/release/engram.exe
+      - name: Upload to Gitea release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          curl -sf -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\": \"${TAG}\", \"name\": \"Engram ${TAG}\"}" \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases" || true
+          RELEASE_ID=$(curl -sf \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          curl -sf -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @target/x86_64-pc-windows-gnu/release/engram.exe \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=engram-windows-x86_64.exe"
 
   build-macos:
     runs-on: ubuntu-latest
@@ -99,6 +145,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
       - name: Install zig
         run: |
           sudo snap install zig --classic --beta || {
@@ -111,8 +161,23 @@ jobs:
         run: cargo install cargo-zigbuild --locked
       - name: Build release
         run: cargo zigbuild --release --features all,coreml --target ${{ matrix.target }}
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: target/${{ matrix.target }}/release/engram
+      - name: Rename artifact
+        run: cp target/${{ matrix.target }}/release/engram ${{ matrix.artifact }}
+      - name: Upload to Gitea release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          curl -sf -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\": \"${TAG}\", \"name\": \"Engram ${TAG}\"}" \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases" || true
+          RELEASE_ID=$(curl -sf \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          curl -sf -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @${{ matrix.artifact }} \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=${{ matrix.artifact }}"
