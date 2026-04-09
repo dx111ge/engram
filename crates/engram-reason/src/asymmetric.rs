@@ -72,26 +72,9 @@ pub fn detect_asymmetric_clusters(
         }
     }
 
-    // Compare by node type (simpler — just find very small type groups next to large ones)
-    let type_sizes: Vec<(&String, usize)> = by_type.iter().map(|(k, v)| (k, v.len())).collect();
-    if type_sizes.len() >= 2 {
-        let max_size = type_sizes.iter().map(|(_, s)| *s).max().unwrap_or(0);
-        for (type_name, size) in &type_sizes {
-            if *size > 0 && max_size as f32 / *size as f32 >= ratio_threshold {
-                let severity = (max_size as f32 / *size as f32 / 20.0).min(0.7);
-                gaps.push(BlackArea {
-                    kind: BlackAreaKind::AsymmetricCluster,
-                    entities: vec![(*type_name).clone()],
-                    severity,
-                    suggested_queries: vec![
-                        format!("more {} entities", type_name),
-                    ],
-                    domain: Some((*type_name).clone()),
-                    detected_at: now,
-                });
-            }
-        }
-    }
+    // Type-based comparison removed -- comparing node types (person vs organization)
+    // is not actionable intelligence. Only domain-based comparison (above) is meaningful.
+    // Domains are set via user-defined taxonomy + auto-classification.
 
     gaps
 }

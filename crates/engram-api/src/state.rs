@@ -145,6 +145,15 @@ pub struct EngineConfig {
     /// Minimum node count for a graph node type to be auto-promoted to a GLiNER2 label.
     /// Default: 3. Set to 0 to disable auto-discovery.
     pub ner_auto_label_threshold: Option<u32>,
+    /// System prompt prepended to all user-facing LLM calls (debate, fact extraction, enrichment).
+    /// Describes the user's research domain/mission for context-aware responses.
+    pub llm_system_prompt: Option<String>,
+    /// User-defined knowledge domains for entity classification and asymmetric gap detection.
+    /// E.g. ["Russia-EU Energy", "Semiconductor Supply Chain"].
+    pub domains: Option<Vec<String>>,
+    /// Properties that should have only one value per entity (conflicts flagged on change).
+    /// Default: ["ceo", "president", "capital", "population", "founded"].
+    pub conflict_singular_properties: Option<Vec<String>>,
 }
 
 impl EngineConfig {
@@ -294,6 +303,15 @@ impl EngineConfig {
         }
         if other.ner_auto_label_threshold.is_some() {
             self.ner_auto_label_threshold = other.ner_auto_label_threshold;
+        }
+        if other.llm_system_prompt.is_some() {
+            self.llm_system_prompt = other.llm_system_prompt.clone();
+        }
+        if other.domains.is_some() {
+            self.domains = other.domains.clone();
+        }
+        if other.conflict_singular_properties.is_some() {
+            self.conflict_singular_properties = other.conflict_singular_properties.clone();
         }
     }
 }

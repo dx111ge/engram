@@ -54,6 +54,11 @@ pub async fn get_config(
         "output_language": cfg.output_language,
         "ner_entity_labels": cfg.ner_entity_labels,
         "ner_auto_label_threshold": cfg.ner_auto_label_threshold.unwrap_or(3),
+        "llm_system_prompt": cfg.llm_system_prompt,
+        "domains": cfg.domains,
+        "conflict_singular_properties": cfg.conflict_singular_properties.clone().unwrap_or_else(|| vec![
+            "ceo".into(), "president".into(), "capital".into(), "population".into(), "founded".into(),
+        ]),
     }))
 }
 
@@ -441,4 +446,216 @@ pub async fn set_entity_labels(
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── GET /config/domains ── List user-defined domains
+
+pub async fn get_domains(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
+    let domains = cfg.domains.clone().unwrap_or_default();
+    Json(serde_json::json!({
+        "domains": domains,
+    }))
+}
+
+// ── POST /config/domains ── Set user-defined domains
+
+pub async fn set_domains(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let domains = req.get("domains").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<Vec<_>>()
+    });
+
+    if let Some(domains) = domains {
+        let mut cfg = state.config.write().unwrap();
+        cfg.domains = Some(domains);
+    }
+
+    state.save_config().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("failed to save config: {}", e) }))
+    })?;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── GET /config/domains/suggest ── LLM suggests domains from graph content
+
+pub async fn suggest_domains(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    use super::debate::llm::{call_llm, extract_content, research_context};
+
+    // Gather graph context: top entity types + high-degree nodes
+    let context = {
+        let g = state.graph.read().unwrap();
+        let types = g.all_node_types();
+        let type_counts: Vec<String> = types.iter()
+            .filter(|t| !["Document", "Source", "Fact", ""].contains(&t.as_str()))
+            .map(|t| format!("{}: {} entities", t, g.count_nodes_of_type(t)))
+            .collect();
+
+        let all = g.all_nodes().unwrap_or_default();
+        let mut by_edges: Vec<(&str, usize)> = all.iter()
+            .filter(|n| n.node_type.as_deref().unwrap_or("") != "Document"
+                     && n.node_type.as_deref().unwrap_or("") != "Source")
+            .map(|n| {
+                let ec = g.edges_from(&n.label).map(|e| e.len()).unwrap_or(0)
+                    + g.edges_to(&n.label).map(|e| e.len()).unwrap_or(0);
+                (n.label.as_str(), ec)
+            })
+            .collect();
+        by_edges.sort_by(|a, b| b.1.cmp(&a.1));
+        let top_entities: Vec<String> = by_edges.iter().take(20)
+            .map(|(l, c)| format!("{} ({} connections)", l, c))
+            .collect();
+
+        format!("Entity types:\n{}\n\nTop entities:\n{}", type_counts.join("\n"), top_entities.join("\n"))
+    };
+
+    let sys_prompt = research_context(&state);
+    let prompt = format!(
+        "{}Based on this knowledge graph content, suggest 3-8 research domains that would group these entities meaningfully.\n\n\
+         {}\n\n\
+         Return ONLY a JSON array of domain names, e.g. [\"Russia-EU Energy\", \"Semiconductor Supply Chain\"]. \
+         Each domain should be 2-5 words, specific enough to be useful, broad enough to group multiple entities.",
+        if sys_prompt.is_empty() { String::new() } else { format!("Research context: {}\n\n", sys_prompt) },
+        context
+    );
+
+    let request = serde_json::json!({
+        "messages": [
+            {"role": "system", "content": "You are a knowledge graph analyst. Suggest meaningful research domains."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 256,
+        "think": false
+    });
+
+    match call_llm(&state, request).await {
+        Ok(resp) => {
+            let content = extract_content(&resp).unwrap_or_default();
+            let suggestions: Vec<String> = if let Ok(arr) = serde_json::from_str::<Vec<String>>(&content) {
+                arr
+            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                val.as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default()
+            } else {
+                content.lines()
+                    .map(|l| l.trim().trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == '-' || c == '*').trim())
+                    .filter(|l| !l.is_empty() && l.len() > 3 && l.len() < 60)
+                    .map(|l| l.trim_matches('"').to_string())
+                    .collect()
+            };
+
+            Ok(Json(serde_json::json!({ "suggestions": suggestions })))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("LLM error: {}", e) }))),
+    }
+}
+
+// ── POST /config/domains/classify ── Classify undomained entities into user-defined domains
+
+pub async fn classify_domains(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    use super::debate::llm::{call_llm, extract_content, research_context};
+
+    let domains = state.config.read().ok()
+        .and_then(|c| c.domains.clone())
+        .unwrap_or_default();
+
+    if domains.is_empty() {
+        return Err((StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: "No domains defined. Set domains first via POST /config/domains.".into() })));
+    }
+
+    // Find entities without domain property (batch of up to 50)
+    let undomained: Vec<(String, String)> = {
+        let g = state.graph.read().unwrap();
+        let all = g.all_nodes().unwrap_or_default();
+        all.iter()
+            .filter(|n| {
+                let nt = n.node_type.as_deref().unwrap_or("");
+                nt != "Document" && nt != "Source" && nt != "Fact" && !nt.is_empty()
+            })
+            .filter(|n| !n.properties.contains_key("domain"))
+            .take(50)
+            .map(|n| (n.label.clone(), n.node_type.clone().unwrap_or_default()))
+            .collect()
+    };
+
+    if undomained.is_empty() {
+        return Ok(Json(serde_json::json!({ "classified": 0, "message": "All entities already have domains." })));
+    }
+
+    let entity_list: String = undomained.iter()
+        .map(|(label, nt)| format!("- {} ({})", label, nt))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let sys_prompt = research_context(&state);
+    let prompt = format!(
+        "{}Classify each entity into ONE of these research domains: {:?}\n\n\
+         If an entity doesn't clearly fit any domain, use \"uncategorized\".\n\n\
+         Entities:\n{}\n\n\
+         Return ONLY a JSON object mapping entity labels to domain names, e.g.:\n\
+         {{\"Germany\": \"Russia-EU Energy\", \"TSMC\": \"Semiconductor Supply Chain\"}}",
+        if sys_prompt.is_empty() { String::new() } else { format!("Research context: {}\n\n", sys_prompt) },
+        domains, entity_list
+    );
+
+    let request = serde_json::json!({
+        "messages": [
+            {"role": "system", "content": "You are a knowledge graph analyst. Classify entities into research domains."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.1,
+        "max_tokens": 2048,
+        "think": false
+    });
+
+    match call_llm(&state, request).await {
+        Ok(resp) => {
+            let content = extract_content(&resp).unwrap_or_default();
+            let mut classified = 0u32;
+
+            if let Ok(mapping) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+                let mut g = state.graph.write().unwrap();
+                for (entity, domain) in &mapping {
+                    if domain != "uncategorized" && domains.contains(domain) {
+                        let _ = g.set_property(entity, "domain", domain);
+                        classified += 1;
+                    }
+                }
+            } else if let Ok(val) = super::debate::llm::parse_json_from_llm(&content) {
+                if let Some(obj) = val.as_object() {
+                    let mut g = state.graph.write().unwrap();
+                    for (entity, domain_val) in obj {
+                        if let Some(domain) = domain_val.as_str() {
+                            if domain != "uncategorized" && domains.contains(&domain.to_string()) {
+                                let _ = g.set_property(entity, "domain", domain);
+                                classified += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if classified > 0 {
+                state.mark_dirty();
+            }
+
+            Ok(Json(serde_json::json!({
+                "classified": classified,
+                "total_undomained": undomained.len(),
+            })))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("LLM error: {}", e) }))),
+    }
 }

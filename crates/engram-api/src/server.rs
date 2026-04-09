@@ -176,6 +176,11 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/relation-types", get(handlers::list_relation_types))
         .route("/config/node-types", get(handlers::store::node_types))
         .route("/config/entity-labels", get(handlers::config::get_entity_labels).post(handlers::config::set_entity_labels))
+        .route("/config/domains", get(handlers::config::get_domains).post(handlers::config::set_domains))
+        .route("/config/domains/suggest", get(handlers::config::suggest_domains))
+        .route("/config/domains/classify", post(handlers::config::classify_domains))
+        .route("/reason/enrich/plan", post(handlers::kb::enrich_plan))
+        .route("/reason/enrich/run", post(handlers::kb::enrich_run))
         // Node + Edge operations
         .route("/node", patch(handlers::store::patch_node))
         .route("/edge", patch(handlers::rename_edge))

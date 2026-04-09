@@ -1578,15 +1578,15 @@ pub(crate) fn extract_html_tables(html: &str, max_tables: usize) -> Option<Strin
 }
 
 /// Fetched article with extracted text and original mime type.
-struct FetchedArticle {
-    text: String,
-    mime_type: String,
+pub(crate) struct FetchedArticle {
+    pub(crate) text: String,
+    pub(crate) mime_type: String,
 }
 
 /// Fetch article content from a URL using dom_smoothie (Mozilla Readability).
 /// For large pages: extracts tables and scans for data download links first.
 /// Returns extracted text + detected mime type, or None on failure.
-async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_domains: &[String]) -> Option<FetchedArticle> {
+pub(crate) async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_domains: &[String]) -> Option<FetchedArticle> {
     let url_short = safe_truncate(url, 80);
     let t0 = std::time::Instant::now();
 
@@ -1653,25 +1653,8 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_doma
     dbg_debate!("[fetch] body {} bytes in {:.1}s | {}", html.len(), t0.elapsed().as_secs_f32(), url_short);
     if html.len() < 200 { return None; }
 
-    // Always scan for machine-readable data links first (CSV, JSON, XML)
-    // These are more valuable than any HTML extraction
-    let base_origin = url.split('/').take(3).collect::<Vec<_>>().join("/");
-    if let Some(data_url) = find_data_download_link(&html, &base_origin) {
-        dbg_debate!("[fetch] >> fetching data link: {}", safe_truncate(&data_url, 80));
-        if let Ok(data_resp) = client.get(&data_url)
-            .timeout(std::time::Duration::from_secs(10))
-            .header("User-Agent", "Mozilla/5.0 (compatible; engram/1.1)")
-            .send().await
-        {
-            if data_resp.status().is_success() {
-                if let Ok(data_text) = data_resp.text().await {
-                    let capped = safe_truncate(&data_text, 8000);
-                    dbg_debate!("[fetch] << data link OK {} chars | {}", capped.len(), safe_truncate(&data_url, 60));
-                    return Some(FetchedArticle { text: capped.to_string(), mime_type: detected_mime.clone() });
-                }
-            }
-        }
-    }
+    // Data link scanning (CSV/JSON/XML) removed from gap-closing -- belongs in reprocess
+    // pipeline where full quality processing happens. Gap-closing uses readability for text.
 
     // Timeout for all blocking parse operations (table extraction, readability)
     const PARSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -1825,7 +1808,7 @@ async fn run_ingest(_state: &AppState, _source: &str, _content: &str) -> (u32, u
 /// Create a pending Document node in the graph from fetched article content.
 /// Saves metadata (URL, title, mime, content_hash) with `ner_complete: false`.
 /// Uses `try_write` to avoid blocking the async runtime.
-fn create_pending_document_node(
+pub(crate) fn create_pending_document_node(
     graph: &std::sync::Arc<std::sync::RwLock<engram_core::graph::Graph>>,
     content_hash_hex: &str,
     url: Option<&str>,

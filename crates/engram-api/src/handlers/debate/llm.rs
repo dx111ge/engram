@@ -68,19 +68,41 @@ pub fn language_name(code: &str) -> &str {
     }
 }
 
-/// Append output language instruction to a user-facing system prompt.
+/// Prepend system prompt (research context) and append output language to a user-facing system prompt.
+/// If `llm_system_prompt` is configured, prepends it as research context.
 /// If `output_language` is configured and not "en", appends "Respond in {language}."
 /// Use this for all LLM calls that produce user-visible text (synthesis, chat, assessments).
 /// Do NOT use for internal calls (NER, gap detection, search query generation, agent reasoning).
 pub fn user_facing_system_prompt(state: &AppState, base_prompt: &str) -> String {
-    let lang = state.config.read().ok()
-        .and_then(|c| c.output_language.clone())
+    let (lang, sys_prompt) = state.config.read().ok()
+        .map(|c| (c.output_language.clone().unwrap_or_default(), c.llm_system_prompt.clone().unwrap_or_default()))
         .unwrap_or_default();
-    if lang.is_empty() || lang == "en" {
-        return base_prompt.to_string();
+
+    let mut result = String::new();
+
+    // Prepend system prompt (research context) if configured
+    if !sys_prompt.is_empty() {
+        result.push_str(&sys_prompt);
+        result.push_str("\n\n");
     }
-    let name = language_name(&lang);
-    format!("{}\n\nRespond in {}.", base_prompt, name)
+
+    result.push_str(base_prompt);
+
+    // Append output language instruction
+    if !lang.is_empty() && lang != "en" {
+        let name = language_name(&lang);
+        result.push_str(&format!("\n\nRespond in {}.", name));
+    }
+
+    result
+}
+
+/// Get the configured system prompt for internal LLM calls (enrichment, query generation).
+/// Returns the raw system prompt without output language (internal calls always use English).
+pub fn research_context(state: &AppState) -> String {
+    state.config.read().ok()
+        .and_then(|c| c.llm_system_prompt.clone())
+        .unwrap_or_default()
 }
 
 /// Multiplier for reasoning models: thinking uses ~3-5x the output tokens.
@@ -88,23 +110,23 @@ pub fn user_facing_system_prompt(state: &AppState, base_prompt: &str) -> String 
 const REASONING_MULTIPLIER: u64 = 4;
 
 /// Derive a sensible max_tokens for short structured output (JSON extraction, gap reading, etc.)
-/// based on the configured context window. Returns min(context_window / 8, 2048).
+/// based on the configured context window. Scales proportionally: 4K model -> 512, 128K -> 8192.
 pub fn short_output_budget(state: &AppState) -> u64 {
     let ctx = state.config.read()
         .ok()
         .and_then(|c| c.llm_context_window)
         .unwrap_or(DEFAULT_CONTEXT_WINDOW) as u64;
-    (ctx / 8).min(2048).max(256)
+    (ctx / 8).min(8192).max(512)
 }
 
 /// Derive max_tokens for medium output (summaries, conclusions).
-/// Returns min(context_window / 4, 4096).
+/// Scales proportionally: 4K model -> 1024, 128K -> 16384.
 pub fn medium_output_budget(state: &AppState) -> u64 {
     let ctx = state.config.read()
         .ok()
         .and_then(|c| c.llm_context_window)
         .unwrap_or(DEFAULT_CONTEXT_WINDOW) as u64;
-    (ctx / 4).min(4096).max(512)
+    (ctx / 4).min(16384).max(1024)
 }
 
 /// Context budget for agent prompts: 15% of context window (in chars, ~4 chars/token).

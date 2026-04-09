@@ -423,3 +423,208 @@ pub async fn reason_frontier() -> impl axum::response::IntoResponse {
     (StatusCode::NOT_IMPLEMENTED,
      Json(ErrorResponse { error: "reason feature not enabled".into() }))
 }
+
+// ── POST /reason/enrich/plan -- Generate search queries for gap enrichment ──
+
+pub async fn enrich_plan(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    use super::debate::llm::{call_llm, extract_content, research_context};
+
+    let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let entities = req.get("entities").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    if query.is_empty() && entities.is_empty() {
+        return Err(api_err(StatusCode::BAD_REQUEST, "provide query or entities"));
+    }
+
+    // Gather graph context about the entities
+    let graph_context = {
+        let g = state.graph.read().unwrap();
+        let mut ctx = String::new();
+        for ent in entities.iter().take(5) {
+            if let Ok(edges) = g.edges_from(ent) {
+                for e in edges.iter().take(5) {
+                    ctx.push_str(&format!("  {} --[{}]--> {} ({:.2})\n", ent, e.relationship, e.to, e.confidence));
+                }
+            }
+        }
+        ctx
+    };
+
+    let sys_prompt = research_context(&state);
+    let topic = if !query.is_empty() { query.clone() } else { entities.join(", ") };
+
+    let prompt = format!(
+        "{}Generate 3-5 precise web search queries to fill knowledge gaps about: \"{}\"\n\n\
+         {}\
+         Requirements:\n\
+         - Queries must work on Google/search engines (short, specific, no LLM prose)\n\
+         - Focus on what's MISSING, not what we already know\n\
+         - Include quantitative/factual queries (numbers, dates, volumes)\n\
+         - Each query on its own line, no numbering\n\n\
+         Return ONLY the search queries, one per line.",
+        if sys_prompt.is_empty() { String::new() } else { format!("Research context: {}\n\n", sys_prompt) },
+        topic,
+        if graph_context.is_empty() { String::new() } else { format!("Known facts:\n{}\n\n", graph_context) },
+    );
+
+    let request = serde_json::json!({
+        "messages": [
+            {"role": "system", "content": "You are a research analyst generating search queries to fill intelligence gaps."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 512,
+        "think": false
+    });
+
+    match call_llm(&state, request).await {
+        Ok(resp) => {
+            let content = extract_content(&resp).unwrap_or_default();
+            let queries: Vec<String> = content.lines()
+                .map(|l| l.trim().trim_start_matches(|c: char| c.is_numeric() || c == '.' || c == '-' || c == '*').trim().to_string())
+                .filter(|l| !l.is_empty() && l.len() > 5 && l.len() < 200)
+                .take(5)
+                .collect();
+
+            Ok(Json(serde_json::json!({ "queries": queries })))
+        }
+        Err(e) => Err(api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("LLM error: {}", e))),
+    }
+}
+
+// ── POST /reason/enrich/run -- Execute background enrichment with given queries ──
+
+pub async fn enrich_run(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let queries: Vec<String> = req.get("queries").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    if queries.is_empty() {
+        return Err(api_err(StatusCode::BAD_REQUEST, "no queries provided"));
+    }
+
+    let max_sources = req.get("max_sources").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let query_count = queries.len();
+
+    // Run enrichment in background
+    let bg_state = state.clone();
+    tokio::spawn(async move {
+        use engram_core::events::GraphEvent;
+
+        let _ = bg_state.event_bus.publish(GraphEvent::IngestProgress {
+            operation: "enrichment".into(),
+            document: "".into(),
+            processed: 0,
+            total: queries.len() as u32,
+            stage: "starting web search".into(),
+        });
+
+        let mut total_docs = 0u32;
+        let blocked = bg_state.config.read().ok()
+            .and_then(|c| c.blocked_domains.clone())
+            .unwrap_or_default();
+
+        for (qi, query) in queries.iter().enumerate() {
+            eprintln!("[enrich] searching: {}", query);
+
+            // Web search
+            let results = match crate::handlers::web_search::search(&bg_state, query).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[enrich] search error for \"{}\": {}", query, e);
+                    continue;
+                }
+            };
+
+            let _ = bg_state.event_bus.publish(GraphEvent::IngestProgress {
+                operation: "enrichment".into(),
+                document: query.clone().into(),
+                processed: qi as u32 + 1,
+                total: queries.len() as u32,
+                stage: format!("found {} results", results.len()).into(),
+            });
+
+            // Fetch and store top articles as pending documents
+            for result in results.iter().take(max_sources) {
+                // Skip blocked domains
+                if blocked.iter().any(|d| result.url.contains(d)) { continue; }
+
+                let client = &bg_state.http_client;
+                let fetched = match super::debate::research::fetch_article_content(
+                    client, &result.url, &blocked
+                ).await {
+                    Some(f) => f,
+                    None => continue,
+                };
+
+                // Store in doc_store
+                let content_hash = engram_core::storage::doc_store::DocStore::hash_content(fetched.text.as_bytes());
+                let content_hash_hex = engram_core::storage::doc_store::DocStore::hash_hex(&content_hash);
+                let mime = engram_core::storage::doc_store::MimeType::from_mime_str(&fetched.mime_type);
+
+                {
+                    if let Ok(mut store) = bg_state.doc_store.write() {
+                        let _ = store.store(fetched.text.as_bytes(), mime);
+                    }
+                }
+
+                // Create pending document node
+                super::debate::research::create_pending_document_node(
+                    &bg_state.graph,
+                    &content_hash_hex,
+                    Some(&result.url),
+                    Some(&result.title),
+                    &fetched.mime_type,
+                    fetched.text.len(),
+                    None,
+                );
+
+                total_docs += 1;
+                eprintln!("[enrich] stored doc: {} ({} chars)", result.title, fetched.text.len());
+            }
+        }
+
+        let _ = bg_state.event_bus.publish(GraphEvent::IngestProgress {
+            operation: "enrichment".into(),
+            document: "".into(),
+            processed: queries.len() as u32,
+            total: queries.len() as u32,
+            stage: format!("complete: {} documents stored as pending", total_docs).into(),
+        });
+
+        // Trigger reprocess on pending docs if any were created
+        if total_docs > 0 {
+            eprintln!("[enrich] triggering reprocess on {} new pending docs", total_docs);
+            // The reprocess will be picked up by the user clicking "Process Pending" or we could auto-trigger
+            // For now, we just mark dirty so the UI updates
+            bg_state.mark_dirty();
+        }
+
+        eprintln!("[enrich] enrichment complete: {} queries, {} docs", queries.len(), total_docs);
+    });
+
+    Ok(Json(serde_json::json!({
+        "status": "started",
+        "queries": query_count,
+    })))
+}
+
+#[cfg(not(feature = "reason"))]
+pub async fn enrich_plan() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "reason feature not enabled".into() }))
+}
+
+#[cfg(not(feature = "reason"))]
+pub async fn enrich_run() -> impl axum::response::IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED,
+     Json(ErrorResponse { error: "reason feature not enabled".into() }))
+}

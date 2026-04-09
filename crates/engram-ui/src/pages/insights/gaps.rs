@@ -5,6 +5,19 @@ use crate::api::types::{GapsResponse, IngestResponse};
 
 const PAGE_SIZE: usize = 50;
 
+/// Map raw BlackAreaKind string to human-readable label.
+fn readable_gap_kind(kind: &str) -> &'static str {
+    match kind.to_uppercase().as_str() {
+        "FRONTIERNODE" | "FRONTIER_NODE" => "Isolated Entity",
+        "STRUCTURALHOLE" | "STRUCTURAL_HOLE" => "Missing Connection",
+        "ASYMMETRICCLUSTER" | "ASYMMETRIC_CLUSTER" => "Coverage Gap",
+        "TEMPORALGAP" | "TEMPORAL_GAP" => "Stale Information",
+        "CONFIDENCEDESERT" | "CONFIDENCE_DESERT" => "Low Confidence",
+        "COORDINATEDCLUSTER" | "COORDINATED_CLUSTER" => "Suspicious Pattern",
+        _ => "Unknown",
+    }
+}
+
 #[component]
 pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
     let api = use_context::<ApiClient>().expect("ApiClient context");
@@ -170,12 +183,12 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
 
                 // Count per type
                 let types: Vec<(&str, &str, u64)> = vec![
-                    ("frontier_node", "Frontier", by_kind.get("frontier_nodes").and_then(|v| v.as_u64()).unwrap_or(0)),
-                    ("structural_hole", "Structural Hole", by_kind.get("structural_holes").and_then(|v| v.as_u64()).unwrap_or(0)),
-                    ("asymmetric_cluster", "Asymmetric", by_kind.get("asymmetric_clusters").and_then(|v| v.as_u64()).unwrap_or(0)),
-                    ("temporal_gap", "Temporal", by_kind.get("temporal_gaps").and_then(|v| v.as_u64()).unwrap_or(0)),
+                    ("frontier_node", "Isolated Entity", by_kind.get("frontier_nodes").and_then(|v| v.as_u64()).unwrap_or(0)),
+                    ("structural_hole", "Missing Connection", by_kind.get("structural_holes").and_then(|v| v.as_u64()).unwrap_or(0)),
+                    ("asymmetric_cluster", "Coverage Gap", by_kind.get("asymmetric_clusters").and_then(|v| v.as_u64()).unwrap_or(0)),
+                    ("temporal_gap", "Stale Information", by_kind.get("temporal_gaps").and_then(|v| v.as_u64()).unwrap_or(0)),
                     ("confidence_desert", "Low Confidence", by_kind.get("confidence_deserts").and_then(|v| v.as_u64()).unwrap_or(0)),
-                    ("coordinated_cluster", "Coordinated", by_kind.get("coordinated_clusters").and_then(|v| v.as_u64()).unwrap_or(0)),
+                    ("coordinated_cluster", "Suspicious Pattern", by_kind.get("coordinated_clusters").and_then(|v| v.as_u64()).unwrap_or(0)),
                 ];
 
                 view! {
@@ -259,6 +272,7 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                                         let entity_for_enrich = entity_display.clone();
                                         let entity_for_enrich_display = entity_display.clone();
                                         let entity_for_search = entity_display.clone();
+                                        let entity_for_search_queries = entity_display.clone();
                                         let entity_for_search_check = entity_display.clone();
                                         let entity_for_result = entity_display.clone();
                                         let domain = gap.domain.clone().unwrap_or_default();
@@ -267,7 +281,7 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                                         view! {
                                             <tr style=move || if is_dismissed { "opacity: 0.4;" } else { "" }>
                                                 <td>
-                                                    <span class="badge">{gap.kind.clone()}</span>
+                                                    <span class="badge">{readable_gap_kind(&gap.kind)}</span>
                                                     {(!domain.is_empty()).then(|| view! {
                                                         <span style="font-size: 0.7rem; opacity: 0.6; display: block;">{domain.clone()}</span>
                                                     })}
@@ -285,6 +299,33 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                                                     {(gap.entities.len() > 1).then(|| {
                                                         let extra = gap.entities.len() - 1;
                                                         view! { <span style="font-size: 0.75rem; opacity: 0.6;">{format!(" +{extra} more")}</span> }
+                                                    })}
+                                                    // Suggested queries as clickable chips
+                                                    {(!gap.suggested_queries.is_empty()).then(|| {
+                                                        let queries = gap.suggested_queries.clone();
+                                                        let ent_for_q = entity_for_search_queries.clone();
+                                                        view! {
+                                                            <div style="display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px;">
+                                                                {queries.into_iter().take(3).map({
+                                                                    let ent = ent_for_q.clone();
+                                                                    move |q| {
+                                                                    let q2 = q.clone();
+                                                                    let ent2 = ent.clone();
+                                                                    view! {
+                                                                        <span class="badge" style="font-size: 0.65rem; cursor: pointer; opacity: 0.7;"
+                                                                            title="Click to use as search query"
+                                                                            on:click=move |_| {
+                                                                                set_search_entity.set(Some(ent2.clone()));
+                                                                                set_search_query.set(q2.clone());
+                                                                            }
+                                                                        >
+                                                                            <i class="fa-solid fa-magnifying-glass" style="font-size: 0.55rem; margin-right: 2px;"></i>
+                                                                            {q}
+                                                                        </span>
+                                                                    }
+                                                                }}).collect::<Vec<_>>()}
+                                                            </div>
+                                                        }
                                                     })}
                                                     // Inline enrich result
                                                     {move || {
