@@ -533,6 +533,7 @@ pub fn SystemPage() -> impl IntoView {
                 // ── Web Search Providers ──
                 {
                     let api = api.clone();
+                    let api_for_domains = api.clone();
                     let (ws_open, set_ws_open) = signal(true);
                     let (kb_open, set_kb_open) = signal(true);
                     let (ig_open, set_ig_open) = signal(true);
@@ -690,6 +691,169 @@ pub fn SystemPage() -> impl IntoView {
                         }
                     }}
                     </div> // kb_open
+                </div>
+
+                // ── Research Domains ──
+                <div>
+                    <h4 style="margin-bottom: 0.5rem; cursor: pointer; user-select: none;" on:click=move |_| set_ig_open.update(|v| *v = !*v)>
+                        <i class=move || if ig_open.get() { "fa-solid fa-chevron-down" } else { "fa-solid fa-chevron-right" } style="margin-right: 0.4rem; opacity: 0.7; font-size: 0.8rem;"></i>
+                        <i class="fa-solid fa-sitemap" style="margin-right: 0.4rem; opacity: 0.7;"></i>"Research Domains"
+                    </h4>
+                    <div style=move || if ig_open.get() { "" } else { "display:none" }>
+                    {
+                        let api_dom = api_for_domains.clone();
+                        let (domains, set_domains) = signal(Vec::<String>::new());
+                        let (suggestions, set_suggestions) = signal(Vec::<String>::new());
+                        let (new_domain, set_new_domain) = signal(String::new());
+                        let (suggesting, set_suggesting) = signal(false);
+
+                        // Fetch domains on mount
+                        let api_fetch = api_dom.clone();
+                        Effect::new(move || {
+                            let api = api_fetch.clone();
+                            wasm_bindgen_futures::spawn_local(async move {
+                                if let Ok(text) = api.get_text("/config/domains").await {
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                        let doms: Vec<String> = json.get("domains").and_then(|v| v.as_array())
+                                            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                            .unwrap_or_default();
+                                        set_domains.set(doms);
+                                    }
+                                }
+                            });
+                        });
+
+                        let api_suggest = api_dom.clone();
+                        let do_suggest = Action::new_local(move |_: &()| {
+                            let api = api_suggest.clone();
+                            async move {
+                                set_suggesting.set(true);
+                                match api.get_text("/config/domains/suggest").await {
+                                    Ok(text) => {
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                            let sugs: Vec<String> = json.get("suggestions").and_then(|v| v.as_array())
+                                                .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                                .unwrap_or_default();
+                                            set_suggestions.set(sugs);
+                                        }
+                                    }
+                                    Err(e) => set_status_msg.set(format!("Suggest error: {e}")),
+                                }
+                                set_suggesting.set(false);
+                            }
+                        });
+
+                        let api_save = api_dom.clone();
+                        let do_save = Action::new_local(move |_: &()| {
+                            let api = api_save.clone();
+                            let doms = domains.get_untracked();
+                            async move {
+                                let body = serde_json::json!({"domains": doms});
+                                match api.post_text("/config/domains", &body).await {
+                                    Ok(_) => set_status_msg.set("Domains saved.".into()),
+                                    Err(e) => set_status_msg.set(format!("Error: {e}")),
+                                }
+                            }
+                        });
+
+                        let api_classify = api_dom.clone();
+                        let do_classify = Action::new_local(move |_: &()| {
+                            let api = api_classify.clone();
+                            async move {
+                                set_status_msg.set("Classifying entities...".into());
+                                match api.post_text("/config/domains/classify", &serde_json::json!({})).await {
+                                    Ok(text) => {
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                            let classified = json.get("classified").and_then(|v| v.as_u64()).unwrap_or(0);
+                                            set_status_msg.set(format!("Classified {} entities into domains.", classified));
+                                        }
+                                    }
+                                    Err(e) => set_status_msg.set(format!("Classify error: {e}")),
+                                }
+                            }
+                        });
+
+                        view! {
+                            <p class="text-secondary" style="font-size: 0.8rem; margin-bottom: 0.5rem;">
+                                "Define research domains to group entities. Used for asymmetric gap detection and enrichment."
+                            </p>
+
+                            // Current domains
+                            <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 0.5rem;">
+                                {move || domains.get().iter().map(|d| {
+                                    let d2 = d.clone();
+                                    let d3 = d.clone();
+                                    view! {
+                                        <span class="badge badge-active" style="font-size: 0.8rem;">
+                                            {d2}
+                                            <button style="background: none; border: none; color: inherit; cursor: pointer; padding: 0 0 0 4px; font-size: 0.65rem;"
+                                                on:click=move |_| {
+                                                    set_domains.update(|v| v.retain(|x| x != &d3));
+                                                }
+                                            ><i class="fa-solid fa-xmark"></i></button>
+                                        </span>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            </div>
+
+                            // Add domain
+                            <div style="display: flex; gap: 4px; align-items: center; margin-bottom: 0.5rem;">
+                                <input type="text" placeholder="New domain name..."
+                                    style="font-size: 0.85rem; flex: 1; padding: 4px 8px;"
+                                    prop:value=new_domain
+                                    on:input=move |ev| set_new_domain.set(event_target_value(&ev))
+                                    on:keydown=move |ev| {
+                                        if ev.key() == "Enter" {
+                                            let v = new_domain.get_untracked().trim().to_string();
+                                            if !v.is_empty() {
+                                                set_domains.update(|d| { if !d.contains(&v) { d.push(v); } });
+                                                set_new_domain.set(String::new());
+                                            }
+                                        }
+                                    }
+                                />
+                            </div>
+
+                            // LLM suggestions
+                            {move || {
+                                let sugs = suggestions.get();
+                                (!sugs.is_empty()).then(|| view! {
+                                    <div style="margin-bottom: 0.5rem;">
+                                        <label style="font-size: 0.75rem; color: var(--text-secondary);"><i class="fa-solid fa-lightbulb"></i>" Suggestions"</label>
+                                        <div style="display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px;">
+                                            {sugs.iter().map(|s| {
+                                                let s2 = s.clone();
+                                                let s3 = s.clone();
+                                                view! {
+                                                    <span class="badge" style="font-size: 0.75rem; cursor: pointer; background: var(--bg-secondary);"
+                                                        on:click=move |_| {
+                                                            set_domains.update(|d| { if !d.contains(&s3) { d.push(s3.clone()); } });
+                                                        }
+                                                    >{s2}</span>
+                                                }
+                                            }).collect::<Vec<_>>()}
+                                        </div>
+                                    </div>
+                                })
+                            }}
+
+                            // Action buttons
+                            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                                <button class="btn btn-sm btn-primary" on:click=move |_| { let _ = do_save.dispatch(()); }>
+                                    <i class="fa-solid fa-floppy-disk"></i>" Save"
+                                </button>
+                                <button class="btn btn-sm btn-secondary" disabled=suggesting
+                                    on:click=move |_| { let _ = do_suggest.dispatch(()); }>
+                                    <i class="fa-solid fa-lightbulb"></i>" Suggest from Graph"
+                                </button>
+                                <button class="btn btn-sm btn-secondary"
+                                    on:click=move |_| { let _ = do_classify.dispatch(()); }>
+                                    <i class="fa-solid fa-tags"></i>" Classify Entities"
+                                </button>
+                            </div>
+                        }
+                    }
+                    </div>
                 </div>
 
                 // ── Ingestion Sources ──

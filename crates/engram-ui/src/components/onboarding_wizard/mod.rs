@@ -17,12 +17,13 @@ const STEP_EMBEDDER: u32 = 2;
 const STEP_NER: u32 = 3;
 const STEP_REL: u32 = 4;
 const STEP_LLM: u32 = 5;       // Mandatory — required for AoI detection + entity disambiguation
-const STEP_QUANTIZATION: u32 = 6;
-const STEP_KB_SOURCES: u32 = 7;
-const STEP_WEB_SEARCH: u32 = 8; // NEW: web search provider config
-const STEP_SEED: u32 = 9;
-const STEP_READY: u32 = 10;
-const TOTAL_STEPS: u32 = 10;
+const STEP_RESEARCH: u32 = 6;  // Research context: system prompt + domains
+const STEP_QUANTIZATION: u32 = 7;
+const STEP_KB_SOURCES: u32 = 8;
+const STEP_WEB_SEARCH: u32 = 9;
+const STEP_SEED: u32 = 10;
+const STEP_READY: u32 = 11;
+const TOTAL_STEPS: u32 = 11;
 
 // ── Quality score weights ──
 
@@ -75,6 +76,9 @@ pub fn OnboardingWizard(
     // Source trust defaults: Vec<(type_key, value_0_100)>
     let source_trust_values = RwSignal::new(Vec::<(String, u32)>::new());
     let (seed_text, set_seed_text) = signal(String::new());
+    // Research context step
+    let (research_prompt, set_research_prompt) = signal(String::new());
+    let (research_domains, set_research_domains) = signal(String::new()); // comma-separated
     // Web search step
     let (web_search_provider, set_web_search_provider) = signal("duckduckgo".to_string());
     let (web_search_api_key, set_web_search_api_key) = signal(String::new());
@@ -392,6 +396,22 @@ pub fn OnboardingWizard(
                                 set_save_error.set(Some(format!("Ollama pull failed: {e}. Make sure Ollama is running and pull '{}' manually.", llm_m)));
                             }
                         }
+                    }
+                    api.post_text("/config", &config).await
+                }
+                STEP_RESEARCH => {
+                    let mut config = serde_json::json!({});
+                    let prompt = research_prompt.get_untracked();
+                    if !prompt.trim().is_empty() {
+                        config["llm_system_prompt"] = serde_json::json!(prompt);
+                    }
+                    let domains_str = research_domains.get_untracked();
+                    let domains: Vec<String> = domains_str.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !domains.is_empty() {
+                        config["domains"] = serde_json::json!(domains);
                     }
                     api.post_text("/config", &config).await
                 }
@@ -863,7 +883,7 @@ pub fn OnboardingWizard(
     let go_next = move |_| {
         let current = step.get_untracked();
         // For steps that need saving, dispatch save and advance on success
-        if matches!(current, STEP_EMBEDDER | STEP_NER | STEP_REL | STEP_LLM | STEP_QUANTIZATION | STEP_KB_SOURCES | STEP_WEB_SEARCH) {
+        if matches!(current, STEP_EMBEDDER | STEP_NER | STEP_REL | STEP_LLM | STEP_RESEARCH | STEP_QUANTIZATION | STEP_KB_SOURCES | STEP_WEB_SEARCH) {
             save_step_config.dispatch(current);
         } else {
             set_step.set((current + 1).min(TOTAL_STEPS));
@@ -964,6 +984,39 @@ pub fn OnboardingWizard(
                             llm_model, set_llm_model,
                             ollama_llm_models, ollama_fetching,
                         ),
+                        STEP_RESEARCH => view! {
+                            <div>
+                                <h3>"Research Context"</h3>
+                                <p class="wizard-desc">"Describe your research domain and mission. This context is used by the LLM for better fact extraction, gap detection, and enrichment queries."</p>
+
+                                <div class="form-group" style="margin-top: 1rem;">
+                                    <label><i class="fa-solid fa-bullseye"></i>" System Prompt"</label>
+                                    <p class="wizard-desc">"Describe what you're researching. E.g.: 'I analyze European energy security, Russian military capabilities, and Ukraine reconstruction efforts.'"</p>
+                                    <textarea
+                                        style="width: 100%; min-height: 80px; font-size: 0.85rem;"
+                                        placeholder="Describe your research focus and domain..."
+                                        prop:value=research_prompt
+                                        on:input=move |ev| set_research_prompt.set(event_target_value(&ev))
+                                    ></textarea>
+                                </div>
+
+                                <div class="form-group" style="margin-top: 1rem;">
+                                    <label><i class="fa-solid fa-sitemap"></i>" Research Domains"</label>
+                                    <p class="wizard-desc">"Comma-separated list of domains. E.g.: Russia-EU Energy, Semiconductor Supply Chain, Ukraine Reconstruction"</p>
+                                    <input type="text"
+                                        style="width: 100%;"
+                                        placeholder="Domain 1, Domain 2, Domain 3..."
+                                        prop:value=research_domains
+                                        on:input=move |ev| set_research_domains.set(event_target_value(&ev))
+                                    />
+                                </div>
+
+                                <div class="wizard-info-box" style="margin-top: 1rem;">
+                                    <i class="fa-solid fa-circle-info" style="margin-right: 0.3rem;"></i>
+                                    " You can skip this step and configure later in System settings. Domains help engram detect knowledge gaps across your research areas."
+                                </div>
+                            </div>
+                        }.into_any(),
                         STEP_QUANTIZATION => steps_config::render_step_quantization(
                             quant_choice, set_quant_choice,
                         ),

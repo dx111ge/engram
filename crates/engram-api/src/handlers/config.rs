@@ -59,6 +59,7 @@ pub async fn get_config(
         "conflict_singular_properties": cfg.conflict_singular_properties.clone().unwrap_or_else(|| vec![
             "ceo".into(), "president".into(), "capital".into(), "population".into(), "founded".into(),
         ]),
+        "dismissed_gaps": cfg.dismissed_gaps.clone().unwrap_or_default(),
     }))
 }
 

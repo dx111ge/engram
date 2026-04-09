@@ -93,6 +93,10 @@ pub struct ExtractedRelation {
     pub method: ExtractionMethod,
     /// Source text snippet surrounding this relation (for fact node creation).
     pub source_text: Option<String>,
+    /// Temporal validity start (e.g. "2024-01-01"). None = unknown.
+    pub valid_from: Option<String>,
+    /// Temporal validity end (e.g. "2024-12-31"). None = unbounded/current.
+    pub valid_to: Option<String>,
 }
 
 // ── Entity resolution types ──

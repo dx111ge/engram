@@ -26,9 +26,39 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
     let (current_page, set_current_page) = signal(0usize);
     let (type_filter, set_type_filter) = signal(String::new()); // "" = all
 
-    // Dismissed gap labels (frontend-only, resets on page reload)
+    // Dismissed gap labels (persisted in config)
     let (dismissed, set_dismissed) = signal(Vec::<String>::new());
     let (show_dismissed, set_show_dismissed) = signal(false);
+
+    // Load dismissed from config on mount
+    let api_dismissed = api.clone();
+    Effect::new(move || {
+        let api = api_dismissed.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(text) = api.get_text("/config").await {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    let list: Vec<String> = json.get("dismissed_gaps")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default();
+                    if !list.is_empty() {
+                        set_dismissed.set(list);
+                    }
+                }
+            }
+        });
+    });
+
+    // Save dismissed to config
+    let api_save_dismissed = api.clone();
+    let save_dismissed = Action::new_local(move |_: &()| {
+        let api = api_save_dismissed.clone();
+        let list = dismissed.get_untracked();
+        async move {
+            let body = serde_json::json!({"dismissed_gaps": list});
+            let _ = api.post_text("/config", &body).await;
+        }
+    });
 
     // Which entity is currently being enriched (shows spinner)
     let (enriching_entity, set_enriching_entity) = signal(Option::<String>::None);
@@ -72,7 +102,7 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
         }
     });
 
-    // Enrich action: POST /ingest with entity text
+    // Enrich action: POST /reason/enrich/plan -> POST /reason/enrich/run
     let api_enrich = api.clone();
     let enrich_action = Action::new_local(move |entity: &String| {
         let api = api_enrich.clone();
@@ -80,52 +110,70 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
         async move {
             set_enriching_entity.set(Some(entity.clone()));
             set_enrich_result.set(None);
-            let body = serde_json::json!({
-                "text": entity,
-                "source": "gap-enrichment"
+
+            // Step 1: Generate search queries via LLM
+            let plan_body = serde_json::json!({
+                "query": entity,
+                "entities": [entity],
             });
-            match api.post::<_, IngestResponse>("/ingest", &body).await {
-                Ok(r) => {
-                    let msg = format!(
-                        "Added {} facts, {} relations",
-                        r.facts_stored, r.relations_created
-                    );
+            let queries: Vec<String> = match api.post_text("/reason/enrich/plan", &plan_body).await {
+                Ok(text) => {
+                    serde_json::from_str::<serde_json::Value>(&text).ok()
+                        .and_then(|j| j.get("queries")?.as_array().cloned())
+                        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default()
+                }
+                Err(e) => {
+                    set_enrich_result.set(Some((entity.clone(), format!("Plan failed: {e}"))));
+                    set_enriching_entity.set(None);
+                    return;
+                }
+            };
+
+            if queries.is_empty() {
+                set_enrich_result.set(Some((entity.clone(), "No search queries generated.".into())));
+                set_enriching_entity.set(None);
+                return;
+            }
+
+            // Step 2: Execute background enrichment
+            let run_body = serde_json::json!({
+                "queries": queries,
+                "max_sources": 5,
+            });
+            match api.post_text("/reason/enrich/run", &run_body).await {
+                Ok(_) => {
+                    let msg = format!("Enrichment started: {} search queries", queries.len());
                     set_enrich_result.set(Some((entity.clone(), msg.clone())));
                     set_status_msg.set(msg);
                 }
                 Err(e) => {
-                    let msg = format!("Enrich failed: {e}");
-                    set_enrich_result.set(Some((entity.clone(), msg.clone())));
-                    set_status_msg.set(msg);
+                    set_enrich_result.set(Some((entity.clone(), format!("Run failed: {e}"))));
                 }
             }
             set_enriching_entity.set(None);
         }
     });
 
-    // Search & ingest action: POST /ingest with search query
+    // Search action: same flow but with user-provided query
     let api_search = api.clone();
     let search_action = Action::new_local(move |query: &String| {
         let api = api_search.clone();
         let query = query.clone();
         async move {
             set_searching.set(true);
-            let body = serde_json::json!({
-                "text": query,
-                "source": "gap-search"
+            let run_body = serde_json::json!({
+                "queries": [query],
+                "max_sources": 5,
             });
-            match api.post::<_, IngestResponse>("/ingest", &body).await {
-                Ok(r) => {
-                    let msg = format!(
-                        "Ingested {} facts, {} relations from search",
-                        r.facts_stored, r.relations_created
-                    );
-                    set_status_msg.set(msg);
+            match api.post_text("/reason/enrich/run", &run_body).await {
+                Ok(_) => {
+                    set_status_msg.set("Enrichment started from search query.".into());
                     set_search_entity.set(None);
                     set_search_query.set(String::new());
                 }
                 Err(e) => {
-                    set_status_msg.set(format!("Search ingest failed: {e}"));
+                    set_status_msg.set(format!("Search enrichment failed: {e}"));
                 }
             }
             set_searching.set(false);
@@ -437,6 +485,7 @@ pub fn GapsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                                                                             list.push(ent.clone());
                                                                         }
                                                                     });
+                                                                    let _ = save_dismissed.dispatch(());
                                                                 }
                                                             }
                                                         >

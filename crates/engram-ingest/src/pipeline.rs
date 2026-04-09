@@ -520,6 +520,9 @@ impl Pipeline {
             }
         }
 
+        // Stage 7.7: Temporal extraction -- quick non-thinking LLM pass to add valid_from/valid_to
+        self.extract_temporal_dates(&mut facts);
+
         // Stage 8: Load — batch write to graph (chunked write locking)
         self.load_facts(facts, &mut result, &absorbed_dates)?;
 
@@ -1072,6 +1075,8 @@ impl Pipeline {
                         confidence: candidate.confidence,
                         method: candidate.method,
                         source_text: None,
+                        valid_from: None,
+                        valid_to: None,
                     });
                 }
             }
@@ -1263,14 +1268,18 @@ impl Pipeline {
                         }
                     }
 
-                    match graph.relate_upsert(
-                        &rel.from,
-                        &rel.to,
-                        &rel.rel_type,
-                        provenance,
-                    ) {
-                        Ok(r) if r.created => result.relations_created += 1,
-                        Ok(_) => result.relations_deduplicated += 1,
+                    // Use temporal variant when dates are available
+                    let relate_result = if rel.valid_from.is_some() || rel.valid_to.is_some() {
+                        graph.relate_with_temporal(
+                            &rel.from, &rel.to, &rel.rel_type, rel.confidence,
+                            rel.valid_from.as_deref(), rel.valid_to.as_deref(),
+                            provenance,
+                        )
+                    } else {
+                        graph.relate(&rel.from, &rel.to, &rel.rel_type, provenance)
+                    };
+                    match relate_result {
+                        Ok(_) => result.relations_created += 1,
                         Err(e) => result.errors.push(format!(
                             "relation {}-[{}]->{}: {}",
                             rel.from, rel.rel_type, rel.to, e
@@ -1506,6 +1515,117 @@ impl Pipeline {
             "Stage 7: LLM fact extraction complete"
         );
     }
+
+    /// Quick non-thinking LLM pass: extract temporal validity (valid_from/valid_to) for relations.
+    /// Batches all relations per document, sends to LLM, populates fields.
+    /// Only runs when LLM is configured. Skips silently otherwise.
+    fn extract_temporal_dates(&self, facts: &mut [ProcessedFact]) {
+        let (endpoint, model) = match (&self.llm_endpoint, &self.llm_model) {
+            (Some(ep), Some(m)) if !ep.is_empty() && !m.is_empty() => (ep.clone(), m.clone()),
+            _ => return,
+        };
+
+        // Collect relations that need temporal extraction (group by document)
+        let mut doc_relations: HashMap<String, Vec<(usize, usize)>> = HashMap::new(); // doc_label -> [(fact_idx, rel_idx)]
+        for (fi, fact) in facts.iter().enumerate() {
+            for (ri, rel) in fact.relations.iter().enumerate() {
+                if rel.valid_from.is_none() && rel.valid_to.is_none() {
+                    let doc_key = fact.doc_context.as_ref()
+                        .map(|d| crate::document::doc_label(&d.content_hash_hex))
+                        .unwrap_or_else(|| format!("no-doc-{}", fi));
+                    doc_relations.entry(doc_key).or_default().push((fi, ri));
+                }
+            }
+        }
+
+        if doc_relations.is_empty() {
+            return;
+        }
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+        for (_doc_label, indices) in &doc_relations {
+            if indices.is_empty() { continue; }
+
+            // Build the relation list for this document (max 20)
+            let rel_list: Vec<String> = indices.iter().take(20).map(|(fi, ri)| {
+                let rel = &facts[*fi].relations[*ri];
+                let src = rel.source_text.as_deref().unwrap_or("");
+                format!("- {} --[{}]--> {} | context: \"{}\"", rel.from, rel.rel_type, rel.to, src)
+            }).collect();
+
+            let prompt = format!(
+                "For each fact below, determine what time period it applies to.\n\
+                 Return a JSON array with one object per fact: {{\"valid_from\": \"YYYY-MM-DD\", \"valid_to\": \"YYYY-MM-DD\"}}\n\
+                 Use null if no clear date is detectable. Be conservative -- only set dates when the text clearly indicates a time period.\n\n\
+                 Facts:\n{}\n\n\
+                 Return ONLY the JSON array, no other text.",
+                rel_list.join("\n")
+            );
+
+            let request = serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You extract temporal information from facts. Return only JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.1,
+                "max_tokens": 1024,
+                "think": false
+            });
+
+            let resp = match client.post(&endpoint).json(&request).send() {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("temporal LLM call failed: {}", e);
+                    continue;
+                }
+            };
+
+            let body: serde_json::Value = match resp.json() {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+
+            let content = body.get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+
+            // Parse the JSON array
+            let dates: Vec<serde_json::Value> = serde_json::from_str(content)
+                .or_else(|_| {
+                    // Try to extract JSON array from markdown fences
+                    let trimmed = content.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+                    serde_json::from_str(trimmed)
+                })
+                .unwrap_or_default();
+
+            // Apply dates back to the relations
+            for (i, (fi, ri)) in indices.iter().take(20).enumerate() {
+                if let Some(date_obj) = dates.get(i) {
+                    let vf = date_obj.get("valid_from").and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty() && *s != "null")
+                        .map(|s| s.to_string());
+                    let vt = date_obj.get("valid_to").and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty() && *s != "null")
+                        .map(|s| s.to_string());
+
+                    if vf.is_some() || vt.is_some() {
+                        facts[*fi].relations[*ri].valid_from = vf;
+                        facts[*fi].relations[*ri].valid_to = vt;
+                    }
+                }
+            }
+        }
+
+        tracing::info!("Stage 7.7: temporal extraction complete");
+    }
 }
 
 // ── Built-in parsers ──
@@ -1689,6 +1809,8 @@ mod tests {
                     confidence: 0.8,
                     method: ExtractionMethod::Manual,
                     source_text: None,
+                    valid_from: None,
+                    valid_to: None,
                 }],
                 conflicts: vec![],
                 resolution: None,

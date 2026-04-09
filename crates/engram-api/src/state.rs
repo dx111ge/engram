@@ -154,6 +154,8 @@ pub struct EngineConfig {
     /// Properties that should have only one value per entity (conflicts flagged on change).
     /// Default: ["ceo", "president", "capital", "population", "founded"].
     pub conflict_singular_properties: Option<Vec<String>>,
+    /// Dismissed intelligence gap keys (persisted across sessions).
+    pub dismissed_gaps: Option<Vec<String>>,
 }
 
 impl EngineConfig {
@@ -312,6 +314,9 @@ impl EngineConfig {
         }
         if other.conflict_singular_properties.is_some() {
             self.conflict_singular_properties = other.conflict_singular_properties.clone();
+        }
+        if other.dismissed_gaps.is_some() {
+            self.dismissed_gaps = other.dismissed_gaps.clone();
         }
     }
 }

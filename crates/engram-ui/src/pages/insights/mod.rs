@@ -1,4 +1,5 @@
 mod assessments;
+mod conflicts;
 mod documents;
 mod gaps;
 
@@ -7,6 +8,7 @@ use leptos::prelude::*;
 use crate::api::ApiClient;
 use crate::api::types::StatsResponse;
 use assessments::AssessmentsZone;
+use conflicts::ConflictsZone;
 use documents::DocumentsZone;
 use gaps::GapsZone;
 
@@ -49,17 +51,7 @@ pub fn InsightsPage() -> impl IntoView {
         </div>
 
         // ── Contradictions & Fact Review ──
-        <div class="card mt-2">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <h3><i class="fa-solid fa-scale-unbalanced" style="color: var(--warning);"></i>" Contradictions & Conflicts"</h3>
-                <a href="/facts" class="btn btn-sm btn-secondary">
-                    <i class="fa-solid fa-list"></i>" All Facts"
-                </a>
-            </div>
-            <p class="text-secondary mt-1" style="font-size: 0.85rem;">
-                "Facts that contradict existing knowledge or have been debunked. Review conflicts to improve accuracy."
-            </p>
-        </div>
+        <ConflictsZone set_status_msg />
 
         // Zone A: Documents (pending/processed)
         <DocumentsZone set_status_msg />

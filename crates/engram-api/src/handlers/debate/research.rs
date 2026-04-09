@@ -409,6 +409,9 @@ struct GapAnswer {
     text: String,
     source_title: String,
     source_url: String,
+    /// Temporal validity extracted by LLM (e.g. "2024-01-01"). None = unknown.
+    valid_from: Option<String>,
+    valid_to: Option<String>,
 }
 
 /// Close a single gap:
@@ -764,6 +767,8 @@ async fn query_sparql_endpoints(state: &AppState, gap_query: &str, language: &st
             text,
             source_title: format!("SPARQL: {}", ep.name),
             source_url: ep.url.clone(),
+            valid_from: None, // SPARQL results have temporal data in the edges, not the answer text
+            valid_to: None,
         });
     }
 
@@ -1023,9 +1028,11 @@ You MUST return found=true if the article contains ANY of these:
 Only return found=false if the article is completely unrelated to the BROAD TOPIC AREA (not just the specific question).
 
 Return ONLY this JSON (no other text, no code fences):
-{{"found": true, "answer": "2-4 sentences summarizing ALL data and statistics in this article, noting the country/context. Include all numbers, percentages, dates, and comparisons."}}
+{{"found": true, "answer": "2-4 sentences summarizing ALL data and statistics in this article, noting the country/context. Include all numbers, percentages, dates, and comparisons.", "valid_from": "YYYY-MM-DD or null", "valid_to": "YYYY-MM-DD or null"}}
 or
-{{"found": false}}"#,
+{{"found": false}}
+
+For valid_from/valid_to: extract the time period the facts apply to (e.g. "2024-01-01" for annual data, "2024-07-01" for Q3). Use null if no clear date is mentioned."#,
         gap_query, title, safe_truncate(content, 4000)
     );
 
@@ -1076,6 +1083,8 @@ or
                                 text: partial.to_string(),
                                 source_title: title.to_string(),
                                 source_url: url.to_string(),
+                                valid_from: None,
+                                valid_to: None,
                             });
                         }
                     }
@@ -1095,10 +1104,19 @@ or
     let answer = json.get("answer").and_then(|v| v.as_str())?.to_string();
     if answer.len() < 20 { return None; }
 
+    let valid_from = json.get("valid_from").and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty() && *s != "null")
+        .map(|s| s.to_string());
+    let valid_to = json.get("valid_to").and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty() && *s != "null")
+        .map(|s| s.to_string());
+
     Some(GapAnswer {
         text: answer,
         source_title: title.to_string(),
         source_url: url.to_string(),
+        valid_from,
+        valid_to,
     })
 }
 
