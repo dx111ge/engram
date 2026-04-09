@@ -692,6 +692,7 @@ impl Graph {
             confidence: edge.confidence,
             valid_from: timestamp_to_date(edge.valid_from),
             valid_to: timestamp_to_date(edge.valid_to),
+            edge_slot,
         })
     }
 
@@ -718,6 +719,7 @@ impl Graph {
                     confidence: edge.confidence,
                     valid_from: timestamp_to_date(edge.valid_from),
                     valid_to: timestamp_to_date(edge.valid_to),
+                    edge_slot: slot,
                 });
             }
         }
@@ -780,6 +782,7 @@ impl Graph {
                     confidence: edge.confidence,
                     valid_from: timestamp_to_date(edge.valid_from),
                     valid_to: timestamp_to_date(edge.valid_to),
+                    edge_slot: slot,
                 });
             }
         }

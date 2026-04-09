@@ -126,6 +126,8 @@ pub struct Pipeline {
     /// LLM config for fact extraction (Layer 2). None = skip fact extraction.
     llm_endpoint: Option<String>,
     llm_model: Option<String>,
+    /// Properties that should have only one value per entity (conflicts flagged on change).
+    conflict_singular_properties: Vec<String>,
 }
 
 impl Pipeline {
@@ -138,6 +140,10 @@ impl Pipeline {
             config,
             graph,
             doc_store: None,
+            conflict_singular_properties: vec![
+                "ceo".into(), "president".into(), "capital".into(),
+                "population".into(), "founded".into(),
+            ],
             parsers: Vec::new(),
             language_detector: None,
             extractors: Vec::new(),
@@ -158,6 +164,11 @@ impl Pipeline {
     pub fn set_llm(&mut self, endpoint: String, model: String) {
         self.llm_endpoint = Some(endpoint);
         self.llm_model = Some(model);
+    }
+
+    /// Set user-configured singular properties for conflict detection.
+    pub fn set_conflict_properties(&mut self, properties: Vec<String>) {
+        self.conflict_singular_properties = properties;
     }
 
     /// Add a parser to the pipeline.
@@ -489,11 +500,24 @@ impl Pipeline {
         Self::log_ram("after-NER-all");
 
         // Stage 6: Apply transformers
-        let facts = self.apply_transformers(facts, &mut result);
+        let mut facts = self.apply_transformers(facts, &mut result);
 
         // Stage 7: LLM fact extraction (Layer 2, optional)
         if self.config.stages.fact_extract {
             self.extract_llm_facts(&facts, &mut result);
+        }
+
+        // Stage 7.5: Conflict detection -- check facts against existing graph
+        {
+            let detector = crate::conflict::ConflictDetector::new(
+                crate::conflict::ConflictConfig {
+                    singular_properties: self.conflict_singular_properties.clone(),
+                    min_existing_confidence: 0.3,
+                }
+            );
+            if let Ok(g) = self.graph.read() {
+                detector.check_batch(&mut facts, &g);
+            }
         }
 
         // Stage 8: Load — batch write to graph (chunked write locking)
@@ -1181,8 +1205,25 @@ impl Pipeline {
                             deferred_relations.push((provenance.clone(), fact.relations.clone()));
                         }
 
-                        // Track conflicts
-                        result.conflicts_detected += fact.conflicts.len() as u32;
+                        // Store conflicts as graph edges for later review
+                        if !fact.conflicts.is_empty() {
+                            result.conflicts_detected += fact.conflicts.len() as u32;
+                            let conflict_prov = engram_core::graph::Provenance {
+                                source_type: engram_core::graph::SourceType::Derived,
+                                source_id: "conflict-detector".to_string(),
+                            };
+                            let now_str = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default().as_secs().to_string();
+                            for conflict in &fact.conflicts {
+                                // Create conflicts_with self-edge with conflict details as properties
+                                if let Ok(r) = graph.relate_upsert(&fact.entity, &fact.entity, "conflicts_with", &conflict_prov) {
+                                    graph.set_edge_property(r.edge_slot, "description", &conflict.description);
+                                    graph.set_edge_property(r.edge_slot, "severity", &conflict.severity.to_string());
+                                    graph.set_edge_property(r.edge_slot, "detected_at", &now_str);
+                                    graph.set_edge_property(r.edge_slot, "resolution", "unresolved");
+                                }
+                            }
+                        }
 
                         let _ = node_id; // used above, suppress warning
                     }

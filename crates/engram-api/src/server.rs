@@ -181,6 +181,8 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/domains/classify", post(handlers::config::classify_domains))
         .route("/reason/enrich/plan", post(handlers::kb::enrich_plan))
         .route("/reason/enrich/run", post(handlers::kb::enrich_run))
+        .route("/conflicts", get(handlers::kb::get_conflicts))
+        .route("/conflicts/resolve", post(handlers::kb::resolve_conflict))
         // Node + Edge operations
         .route("/node", patch(handlers::store::patch_node))
         .route("/edge", patch(handlers::rename_edge))

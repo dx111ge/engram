@@ -628,3 +628,64 @@ pub async fn enrich_run() -> impl axum::response::IntoResponse {
     (StatusCode::NOT_IMPLEMENTED,
      Json(ErrorResponse { error: "reason feature not enabled".into() }))
 }
+
+// ── GET /conflicts -- List detected conflicts (conflicts_with edges) ──
+
+pub async fn get_conflicts(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let g = state.graph.read().unwrap();
+    let all_nodes = g.all_nodes().unwrap_or_default();
+
+    let mut conflicts = Vec::new();
+    for node in &all_nodes {
+        if let Ok(edges) = g.edges_from(&node.label) {
+            for edge in &edges {
+                if edge.relationship == "conflicts_with" {
+                    let props = g.get_edge_properties(edge.edge_slot)
+                        .unwrap_or_default();
+                    let resolution = props.get("resolution").cloned().unwrap_or_default();
+                    conflicts.push(serde_json::json!({
+                        "entity": node.label,
+                        "target": edge.to,
+                        "description": props.get("description").cloned().unwrap_or_default(),
+                        "severity": props.get("severity").and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.5),
+                        "detected_at": props.get("detected_at").cloned().unwrap_or_default(),
+                        "resolution": resolution,
+                        "edge_slot": edge.edge_slot,
+                    }));
+                }
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "conflicts": conflicts,
+        "total": conflicts.len(),
+    }))
+}
+
+// ── POST /conflicts/resolve -- Resolve a conflict ──
+
+pub async fn resolve_conflict(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let edge_slot = req.get("edge_slot").and_then(|v| v.as_u64())
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "edge_slot required"))?;
+    let resolution = req.get("resolution").and_then(|v| v.as_str())
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "resolution required (accepted_new, kept_old, disputed)"))?;
+
+    let valid = ["accepted_new", "kept_old", "disputed", "unresolved"];
+    if !valid.contains(&resolution) {
+        return Err(api_err(StatusCode::BAD_REQUEST, format!("invalid resolution, use one of: {:?}", valid)));
+    }
+
+    {
+        let mut g = state.graph.write().unwrap();
+        g.set_edge_property(edge_slot, "resolution", resolution);
+    }
+    state.mark_dirty();
+
+    Ok(Json(serde_json::json!({ "ok": true, "resolution": resolution })))
+}

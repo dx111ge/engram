@@ -567,6 +567,8 @@ pub struct EdgeView {
     pub confidence: f32,
     pub valid_from: Option<String>,
     pub valid_to: Option<String>,
+    /// Storage slot index (for edge property access). 0 if unknown.
+    pub edge_slot: u64,
 }
 
 /// Parse a date string like "2000-05-07" to unix seconds. Returns 0 on failure.
