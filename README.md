@@ -64,9 +64,22 @@ On first launch with an empty brain, the **onboarding wizard** guides you throug
 
 ### 1. Download
 
-Download the latest binary from [Releases](https://github.com/dx111ge/engram/releases).
+Download the latest binary **and the `frontend/` folder** from [Releases](https://github.com/dx111ge/engram/releases).
 
-Available for: **Windows** (x86_64), **Linux** (x86_64, aarch64), **macOS** (x86_64, aarch64).
+Available for: **Windows** (x86_64), **Linux** (x86_64, aarch64), **macOS** (aarch64).
+
+Place the `frontend/` folder next to the binary:
+```
+engram.exe            (or engram on Linux/macOS)
+frontend/
+  index.html
+  engram-ui-*.js
+  engram-ui-*_bg.wasm
+  graph-bridge.js
+  style-*.css
+```
+
+The web UI is served automatically when the frontend folder is detected.
 
 ### 2. Create and populate
 
