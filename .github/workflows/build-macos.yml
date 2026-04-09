@@ -7,14 +7,17 @@ on:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            artifact: engram-macos-x86_64
           - target: aarch64-apple-darwin
             artifact: engram-macos-aarch64
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            artifact: engram-macos-x86_64
+            runner: macos-13
     steps:
       - uses: actions/checkout@v4
 
