@@ -400,6 +400,187 @@ pub(crate) fn render_ner_modal(
             })
         }}
 
+        // ── Entity Categories section ──
+        {
+            let api_labels = api.clone();
+            move || {
+            let is_gliner = ner_provider.get() == "gliner";
+            let api_lbl = api_labels.clone();
+            is_gliner.then(|| {
+                let (core_labels, set_core_labels) = signal(Vec::<String>::new());
+                let (user_labels, set_user_labels) = signal(Vec::<String>::new());
+                let (auto_labels, set_auto_labels) = signal(Vec::<(String, usize)>::new());
+                let (effective_count, set_effective_count) = signal(0usize);
+                let (new_label_input, set_new_label_input) = signal(String::new());
+                let (auto_threshold, set_auto_threshold) = signal(3u32);
+
+                // Fetch entity labels on mount
+                let api_fetch = api_lbl.clone();
+                Effect::new(move || {
+                    let api = api_fetch.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        if let Ok(text) = api.get_text("/config/entity-labels").await {
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                let core: Vec<String> = json.get("core").and_then(|v| v.as_array())
+                                    .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                    .unwrap_or_default();
+                                set_core_labels.set(core);
+
+                                let user: Vec<String> = json.get("user_defined").and_then(|v| v.as_array())
+                                    .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                    .unwrap_or_default();
+                                set_user_labels.set(user);
+
+                                let auto: Vec<(String, usize)> = json.get("auto_discovered").and_then(|v| v.as_array())
+                                    .map(|a| a.iter().filter_map(|v| {
+                                        let label = v.get("label")?.as_str()?.to_string();
+                                        let count = v.get("count")?.as_u64()? as usize;
+                                        Some((label, count))
+                                    }).collect())
+                                    .unwrap_or_default();
+                                set_auto_labels.set(auto);
+
+                                let eff = json.get("effective").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                                set_effective_count.set(eff);
+
+                                let thresh = json.get("auto_threshold").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
+                                set_auto_threshold.set(thresh);
+                            }
+                        }
+                    });
+                });
+
+                let api_save = api_lbl.clone();
+                let save_labels = Action::new_local(move |_: &()| {
+                    let api = api_save.clone();
+                    let labels = user_labels.get_untracked();
+                    let thresh = auto_threshold.get_untracked();
+                    async move {
+                        let body = serde_json::json!({
+                            "labels": labels,
+                            "auto_threshold": thresh,
+                        });
+                        match api.post_text("/config/entity-labels", &body).await {
+                            Ok(_) => set_status_msg.set("Entity labels saved.".to_string()),
+                            Err(e) => set_status_msg.set(format!("Error: {e}")),
+                        }
+                    }
+                });
+
+                view! {
+                    <div style="margin-top: 1rem;">
+                        <h4><i class="fa-solid fa-tags"></i>" Entity Categories"</h4>
+                        <p class="wizard-desc">"GLiNER2 detects entities using these labels. Core types are always active. Add domain-specific categories or let engram auto-discover them from your graph."</p>
+
+                        // Budget indicator
+                        <div style="margin: 0.5rem 0; font-size: 0.8rem; color: var(--text-secondary);">
+                            <i class="fa-solid fa-gauge"></i>
+                            {move || format!(" Using {} / 25 label slots", effective_count.get())}
+                        </div>
+
+                        // Core labels (non-removable)
+                        <div style="margin-bottom: 0.5rem;">
+                            <label style="font-size: 0.8rem;"><i class="fa-solid fa-lock" style="opacity: 0.5;"></i>" Core"</label>
+                            <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+                                {move || core_labels.get().iter().map(|l| {
+                                    let l = l.clone();
+                                    view! { <span class="badge" style="font-size: 0.75rem; opacity: 0.7;">{l}</span> }
+                                }).collect::<Vec<_>>()}
+                            </div>
+                        </div>
+
+                        // User-defined labels (editable)
+                        <div style="margin-bottom: 0.5rem;">
+                            <label style="font-size: 0.8rem;"><i class="fa-solid fa-user-pen"></i>" Custom"</label>
+                            <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+                                {move || user_labels.get().iter().map(|l| {
+                                    let l2 = l.clone();
+                                    let l3 = l.clone();
+                                    view! {
+                                        <span class="badge badge-active" style="font-size: 0.75rem;">
+                                            {l2}
+                                            <button style="background: none; border: none; color: inherit; cursor: pointer; padding: 0 0 0 4px; font-size: 0.65rem;"
+                                                on:click=move |_| {
+                                                    set_user_labels.update(|labels| labels.retain(|x| x != &l3));
+                                                }
+                                            ><i class="fa-solid fa-xmark"></i></button>
+                                        </span>
+                                    }
+                                }).collect::<Vec<_>>()}
+                                <div style="display: flex; gap: 4px; align-items: center;">
+                                    <input type="text" placeholder="new category..."
+                                        style="font-size: 0.8rem; width: 140px; padding: 2px 6px;"
+                                        prop:value=new_label_input
+                                        on:input=move |ev| set_new_label_input.set(event_target_value(&ev))
+                                        on:keydown=move |ev| {
+                                            if ev.key() == "Enter" {
+                                                let v = new_label_input.get_untracked().trim().to_lowercase().replace(' ', "_");
+                                                if !v.is_empty() {
+                                                    set_user_labels.update(|labels| {
+                                                        if !labels.contains(&v) { labels.push(v); }
+                                                    });
+                                                    set_new_label_input.set(String::new());
+                                                }
+                                            }
+                                        }
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        // Auto-discovered labels
+                        {move || {
+                            let auto = auto_labels.get();
+                            (!auto.is_empty()).then(|| view! {
+                                <div style="margin-bottom: 0.5rem;">
+                                    <label style="font-size: 0.8rem;"><i class="fa-solid fa-graduation-cap"></i>" Auto-discovered"</label>
+                                    <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+                                        {auto.iter().map(|(l, count)| {
+                                            let l2 = l.clone();
+                                            let l3 = l.clone();
+                                            view! {
+                                                <span class="badge" style="font-size: 0.75rem; background: var(--bg-secondary); cursor: pointer;"
+                                                    title="Click to pin as custom label"
+                                                    on:click=move |_| {
+                                                        set_user_labels.update(|labels| {
+                                                            if !labels.contains(&l3) { labels.push(l3.clone()); }
+                                                        });
+                                                    }
+                                                >
+                                                    {format!("{} ({})", l2, count)}
+                                                </span>
+                                            }
+                                        }).collect::<Vec<_>>()}
+                                    </div>
+                                </div>
+                            })
+                        }}
+
+                        // Threshold
+                        <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; font-size: 0.8rem;">
+                            <label>"Auto-discovery threshold: "</label>
+                            <input type="number" min="0" max="50" style="width: 50px; font-size: 0.8rem; padding: 2px 4px;"
+                                prop:value=move || auto_threshold.get().to_string()
+                                on:input=move |ev| {
+                                    if let Ok(v) = event_target_value(&ev).parse::<u32>() {
+                                        set_auto_threshold.set(v);
+                                    }
+                                }
+                            />
+                            <span style="color: var(--text-secondary);">" nodes needed"</span>
+                        </div>
+
+                        // Save button
+                        <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem;"
+                            on:click=move |_| { let _ = save_labels.dispatch(()); }
+                        >
+                            <i class="fa-solid fa-floppy-disk"></i>" Save Entity Labels"
+                        </button>
+                    </div>
+                }
+            })
+        }}
+
         // ── System extras ──
 
         // NER model download status

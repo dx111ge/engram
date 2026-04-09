@@ -175,6 +175,7 @@ pub fn router_with_frontend(state: AppState, frontend_dir: Option<&str>) -> Rout
         .route("/config/relation-templates/import", post(handlers::import_relation_templates))
         .route("/config/relation-types", get(handlers::list_relation_types))
         .route("/config/node-types", get(handlers::store::node_types))
+        .route("/config/entity-labels", get(handlers::config::get_entity_labels).post(handlers::config::set_entity_labels))
         // Node + Edge operations
         .route("/node", patch(handlers::store::patch_node))
         .route("/edge", patch(handlers::rename_edge))

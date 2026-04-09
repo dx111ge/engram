@@ -676,14 +676,6 @@ pub async fn execute_agent_turn(
                                 source: "graph".into(),
                                 supporting: true,
                             });
-                        } else if !label.is_empty() {
-                            research_summary.push_str(&format!("  - {} (confidence: {:.2}, relevance: {:.2})\n", label, conf, score));
-                            all_evidence.push(TurnEvidence {
-                                entity: label.to_string(),
-                                confidence: conf,
-                                source: "graph".into(),
-                                supporting: true,
-                            });
                         }
                     }
                     all_tool_invocations.push(ToolInvocation {
@@ -710,6 +702,12 @@ pub async fn execute_agent_turn(
                                         let econf = e.get("confidence").and_then(|c| c.as_f64()).unwrap_or(0.5);
                                         if !rel.is_empty() && !target.is_empty() {
                                             research_summary.push_str(&format!("  - {} --[{}]--> {} (confidence: {:.2})\n", label, rel, target, econf));
+                                            all_evidence.push(TurnEvidence {
+                                                entity: target.to_string(),
+                                                confidence: econf as f32,
+                                                source: "graph".into(),
+                                                supporting: true,
+                                            });
                                         }
                                     }
                                 }

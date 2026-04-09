@@ -139,6 +139,12 @@ pub struct EngineConfig {
     /// Output language for user-facing LLM responses (ISO 639-1 code, e.g. "de", "fr").
     /// Default: None (= English). Set via POST /config {"output_language": "de"}
     pub output_language: Option<String>,
+    /// User-defined custom NER entity labels (domain-specific, e.g. "military_unit", "cryptocurrency").
+    /// Merged with core labels and auto-discovered labels from graph at pipeline construction.
+    pub ner_entity_labels: Option<Vec<String>>,
+    /// Minimum node count for a graph node type to be auto-promoted to a GLiNER2 label.
+    /// Default: 3. Set to 0 to disable auto-discovery.
+    pub ner_auto_label_threshold: Option<u32>,
 }
 
 impl EngineConfig {
@@ -282,6 +288,12 @@ impl EngineConfig {
         }
         if other.output_language.is_some() {
             self.output_language = other.output_language.clone();
+        }
+        if other.ner_entity_labels.is_some() {
+            self.ner_entity_labels = other.ner_entity_labels.clone();
+        }
+        if other.ner_auto_label_threshold.is_some() {
+            self.ner_auto_label_threshold = other.ner_auto_label_threshold;
         }
     }
 }
@@ -490,6 +502,9 @@ pub struct AppState {
     pub ingest_sessions: Arc<RwLock<HashMap<String, IngestSession>>>,
     /// Active multi-agent debate sessions (in-memory, 2h TTL).
     pub debate_sessions: Arc<RwLock<HashMap<String, crate::handlers::debate::DebateSession>>>,
+    /// Shared gazetteer for NER pipeline (rebuilt after each ingest).
+    #[cfg(feature = "ingest")]
+    pub gazetteer: Arc<tokio::sync::RwLock<engram_ingest::GraphGazetteer>>,
 }
 
 impl AppState {
@@ -554,6 +569,10 @@ impl AppState {
             seed_sessions: Arc::new(RwLock::new(HashMap::new())),
             ingest_sessions: Arc::new(RwLock::new(HashMap::new())),
             debate_sessions: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "ingest")]
+            gazetteer: Arc::new(tokio::sync::RwLock::new(
+                engram_ingest::GraphGazetteer::new(&PathBuf::new(), 0.3)
+            )),
         }
     }
 

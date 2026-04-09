@@ -158,6 +158,40 @@ impl Gliner2Backend {
             classifier_file,
         };
 
+        // Initialize ort environment with GPU execution provider (once, idempotent).
+        // Platform-specific: DirectML (Windows/DX12), CUDA (Linux), CoreML (macOS).
+        // Falls back to CPU automatically if EP unavailable at runtime.
+        {
+            use ort::ep;
+            #[allow(unused_mut)]
+            let mut providers: Vec<ort::ep::ExecutionProviderDispatch> = Vec::new();
+
+            #[cfg(all(target_os = "windows", feature = "directml"))]
+            {
+                providers.push(ep::DirectML::default().build());
+                eprintln!("[gliner2] requesting DirectML (DX12) execution provider");
+            }
+            #[cfg(all(target_os = "linux", feature = "cuda"))]
+            {
+                providers.push(ep::CUDA::default().build());
+                eprintln!("[gliner2] requesting CUDA execution provider");
+            }
+            #[cfg(all(target_os = "macos", feature = "coreml"))]
+            {
+                providers.push(ep::CoreML::default().build());
+                eprintln!("[gliner2] requesting CoreML execution provider");
+            }
+
+            if !providers.is_empty() {
+                let committed = ort::init().with_execution_providers(providers).commit();
+                if committed {
+                    eprintln!("[gliner2] ort environment initialized with GPU execution provider");
+                } else {
+                    eprintln!("[gliner2] ort environment already initialized (reusing existing)");
+                }
+            }
+        }
+
         // Scale intra-op threads to available cores. Important for FP16 hybrid
         // models where Cast(FP16->FP32) adds per-op overhead that benefits from
         // parallelization.

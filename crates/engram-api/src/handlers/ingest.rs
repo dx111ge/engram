@@ -2,6 +2,67 @@ use super::*;
 
 // ── POST /ingest -- ingest pipeline ──
 
+/// Core NER entity labels -- always present, not removable.
+#[cfg(feature = "gliner2")]
+pub(crate) const CORE_ENTITY_LABELS: &[&str] = &["person", "organization", "location", "date", "event", "product"];
+
+/// Maximum GLiNER2 labels (attention quadratic, degrades beyond ~25).
+#[cfg(feature = "gliner2")]
+pub(crate) const MAX_ENTITY_LABELS: usize = 25;
+
+/// Compute effective GLiNER2 entity label set by merging:
+/// 1. Core labels (always present)
+/// 2. User-defined labels from config
+/// 3. Auto-discovered labels from graph node types above threshold
+/// Deduplicates and caps at MAX_ENTITY_LABELS.
+#[cfg(feature = "gliner2")]
+pub(crate) fn resolve_entity_labels(
+    graph: &engram_core::graph::Graph,
+    user_labels: &[String],
+    auto_threshold: u32,
+) -> Vec<String> {
+    let mut labels: Vec<String> = CORE_ENTITY_LABELS.iter().map(|s| s.to_string()).collect();
+
+    // User-defined labels (higher priority than auto-discovered)
+    for ul in user_labels {
+        let normalized = ul.to_lowercase().replace(' ', "_");
+        if !normalized.is_empty() && !labels.contains(&normalized) {
+            labels.push(normalized);
+        }
+    }
+
+    // Auto-discover from graph: node types with >= threshold instances
+    if auto_threshold > 0 {
+        let all_types = graph.all_node_types();
+        let mut candidates: Vec<(String, usize)> = all_types.iter()
+            .filter_map(|t| {
+                let lower = t.to_lowercase();
+                // Skip internal types and types already in the list
+                if lower == "document" || lower == "source" || lower == "fact" || labels.contains(&lower) {
+                    return None;
+                }
+                let count = graph.count_nodes_of_type(t);
+                if count >= auto_threshold as usize {
+                    Some((lower, count))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // Sort by count descending so most frequent types get priority
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        for (label, _count) in candidates {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+    }
+
+    labels.truncate(MAX_ENTITY_LABELS);
+    eprintln!("[ner] effective entity labels ({}/{}): {:?}", labels.len(), MAX_ENTITY_LABELS, labels);
+    labels
+}
+
 /// Build a pipeline with all available NER + relation extraction backends wired up.
 /// Public for MCP tool access.
 #[cfg(feature = "ingest")]
@@ -15,8 +76,9 @@ pub fn build_pipeline_mcp(
     // MCP / A2A callers don't have access to AppState caches -- pass empty caches.
     let no_ner_cache = std::sync::Arc::new(std::sync::RwLock::new(None));
     let no_rel_cache = std::sync::Arc::new(std::sync::RwLock::new(None));
+    let default_labels = CORE_ENTITY_LABELS.iter().map(|s| s.to_string()).collect();
     build_pipeline(graph, config, kb_endpoints, ner_model, rel_model, None, None, None,
-        no_ner_cache, no_rel_cache)
+        no_ner_cache, no_rel_cache, default_labels)
 }
 
 /// Build a pipeline with all available NER + relation extraction backends wired up.
@@ -35,6 +97,7 @@ pub(crate) fn build_pipeline(
     _coreference_enabled: Option<bool>,
     _ner_cache: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn engram_ingest::Extractor>>>>,
     _rel_cache: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<dyn engram_ingest::RelationExtractor>>>>,
+    entity_labels: Vec<String>,
 ) -> engram_ingest::Pipeline {
     use engram_ingest::{NerChain, ChainStrategy};
 
@@ -76,11 +139,8 @@ pub(crate) fn build_pipeline(
             let variant = "fp16"; // default to FP16 hybrid (half size, full precision)
             match Gliner2Backend::load(&cfg.model_dir, variant) {
                 Ok(backend) => {
-                    // Default entity labels and relation types
-                    let entity_labels = vec![
-                        "person".into(), "organization".into(), "location".into(),
-                        "date".into(), "event".into(), "product".into(),
-                    ];
+                    // Entity labels: resolved from core + user-defined + auto-discovered
+                    let entity_labels = entity_labels.clone();
                     let relation_types: Vec<String> = relation_templates
                         .as_ref()
                         .map(|t| t.keys().cloned().collect())
@@ -232,16 +292,25 @@ pub async fn ingest(
         ..Default::default()
     };
 
-    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled, llm_endpoint, llm_model) = {
+    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled, llm_endpoint, llm_model, user_entity_labels, auto_label_threshold) = {
         let c = state.config.read().unwrap();
         (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
          c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled,
-         c.llm_endpoint.clone(), c.llm_model.clone())
+         c.llm_endpoint.clone(), c.llm_model.clone(),
+         c.ner_entity_labels.clone().unwrap_or_default(),
+         c.ner_auto_label_threshold.unwrap_or(3))
     };
     let graph = state.graph.clone();
     let ner_cache = state.cached_ner.clone();
     let rel_cache = state.cached_rel.clone();
     let doc_store = state.doc_store.clone();
+    #[cfg(feature = "gliner2")]
+    let entity_labels = {
+        let g = graph.read().unwrap();
+        resolve_entity_labels(&g, &user_entity_labels, auto_label_threshold)
+    };
+    #[cfg(not(feature = "gliner2"))]
+    let entity_labels: Vec<String> = Vec::new();
 
     // Convert IngestItems to RawItems
     let items: Vec<engram_ingest::types::RawItem> = req.items
@@ -285,7 +354,7 @@ pub async fn ingest(
         // Store results in IngestSession for later review + selective commit.
         let result = tokio::task::spawn_blocking(move || {
             let mut pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
-                relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+                relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache, entity_labels.clone());
             pipeline.set_doc_store(doc_store.clone());
             if let (Some(ep), Some(m)) = (llm_endpoint.as_ref(), llm_model.as_ref()) {
                 pipeline.set_llm(ep.clone(), m.clone());
@@ -346,9 +415,13 @@ pub async fn ingest(
 
     // Normal mode: run pipeline and commit to graph.
     let parallel = req.parallel.unwrap_or(false);
+    // Save copies for post-ingest label comparison (originals move into spawn_blocking)
+    let labels_snapshot = entity_labels.clone();
+    let user_labels_snapshot = user_entity_labels.clone();
+    let threshold_snapshot = auto_label_threshold;
     let result = tokio::task::spawn_blocking(move || {
         let mut pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
-            relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+            relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache, entity_labels.clone());
         pipeline.set_doc_store(doc_store.clone());
         if parallel {
             pipeline.execute_parallel(items)
@@ -361,6 +434,35 @@ pub async fn ingest(
     .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     state.mark_dirty();
+
+    // Rebuild gazetteer from enriched graph so NER recognizes newly ingested entities.
+    if result.facts_stored > 0 {
+        let gaz = state.gazetteer.clone();
+        let graph = state.graph.clone();
+        tokio::spawn(async move {
+            let mut gaz = gaz.write().await;
+            if let Ok(g) = graph.read() {
+                gaz.build_from_graph(&g);
+            }
+        });
+
+        // Check if new node types crossed the auto-discovery threshold.
+        // If so, invalidate NER cache so next ingest uses the expanded label set.
+        #[cfg(feature = "gliner2")]
+        {
+            let new_labels = {
+                let g = state.graph.read().unwrap();
+                resolve_entity_labels(&g, &user_labels_snapshot, threshold_snapshot)
+            };
+            if new_labels != labels_snapshot {
+                if let Ok(mut c) = state.cached_ner.write() {
+                    *c = None;
+                    eprintln!("[ner] label set changed after ingest ({} -> {} labels), NER cache invalidated",
+                        labels_snapshot.len(), new_labels.len());
+                }
+            }
+        }
+    }
 
     Ok(Json(IngestResponse {
         facts_stored: result.facts_stored,
@@ -399,23 +501,32 @@ pub async fn ingest_analyze(
     use engram_ingest::PipelineConfig;
 
     let config = PipelineConfig::default();
-    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled, llm_endpoint, llm_model) = {
+    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled, llm_endpoint, llm_model, user_entity_labels, auto_label_threshold) = {
         let c = state.config.read().unwrap();
         (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
          c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled,
-         c.llm_endpoint.clone(), c.llm_model.clone())
+         c.llm_endpoint.clone(), c.llm_model.clone(),
+         c.ner_entity_labels.clone().unwrap_or_default(),
+         c.ner_auto_label_threshold.unwrap_or(3))
     };
     let graph = state.graph.clone();
     let ner_cache = state.cached_ner.clone();
     let rel_cache = state.cached_rel.clone();
     let doc_store = state.doc_store.clone();
+    #[cfg(feature = "gliner2")]
+    let entity_labels = {
+        let g = graph.read().unwrap();
+        resolve_entity_labels(&g, &user_entity_labels, auto_label_threshold)
+    };
+    #[cfg(not(feature = "gliner2"))]
+    let entity_labels: Vec<String> = Vec::new();
     let text = req.text;
 
     // Run build_pipeline + analyze in spawn_blocking to avoid tokio runtime panic
     // from reqwest::blocking (KbRelationExtractor)
     let result = tokio::task::spawn_blocking(move || {
         let mut pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
-            relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+            relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache, entity_labels.clone());
         pipeline.set_doc_store(doc_store.clone());
         let items = vec![engram_ingest::types::RawItem {
             content: engram_ingest::types::Content::Text(text),
@@ -503,16 +614,25 @@ pub async fn ingest_file(
         ..Default::default()
     };
 
-    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled, llm_endpoint, llm_model) = {
+    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled, llm_endpoint, llm_model, user_entity_labels, auto_label_threshold) = {
         let c = state.config.read().unwrap();
         (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
          c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled,
-         c.llm_endpoint.clone(), c.llm_model.clone())
+         c.llm_endpoint.clone(), c.llm_model.clone(),
+         c.ner_entity_labels.clone().unwrap_or_default(),
+         c.ner_auto_label_threshold.unwrap_or(3))
     };
     let graph = state.graph.clone();
     let ner_cache = state.cached_ner.clone();
     let rel_cache = state.cached_rel.clone();
     let doc_store = state.doc_store.clone();
+    #[cfg(feature = "gliner2")]
+    let entity_labels = {
+        let g = graph.read().unwrap();
+        resolve_entity_labels(&g, &user_entity_labels, auto_label_threshold)
+    };
+    #[cfg(not(feature = "gliner2"))]
+    let entity_labels: Vec<String> = Vec::new();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -557,7 +677,7 @@ pub async fn ingest_file(
     let parallel = params.get("parallel").is_some_and(|v| v == "true" || v == "1");
     let result = tokio::task::spawn_blocking(move || {
         let mut pipeline = build_pipeline(graph, config, kb_endpoints, ner_model, rel_model,
-            relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+            relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache, entity_labels.clone());
         pipeline.set_doc_store(doc_store.clone());
         // Wire LLM for translation + fact extraction
         if let (Some(ep), Some(m)) = (llm_endpoint.as_ref(), llm_model.as_ref()) {
@@ -824,12 +944,22 @@ async fn reprocess_docs_background(
     let total = docs_to_process.len() as u32;
 
     let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold,
-         coreference_enabled, llm_endpoint, llm_model) = {
+         coreference_enabled, llm_endpoint, llm_model, user_entity_labels, auto_label_threshold) = {
         let c = state.config.read().unwrap();
         (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
          c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled,
-         c.llm_endpoint.clone(), c.llm_model.clone())
+         c.llm_endpoint.clone(), c.llm_model.clone(),
+         c.ner_entity_labels.clone().unwrap_or_default(),
+         c.ner_auto_label_threshold.unwrap_or(3))
     };
+
+    #[cfg(feature = "gliner2")]
+    let entity_labels = {
+        let g = state.graph.read().unwrap();
+        resolve_entity_labels(&g, &user_entity_labels, auto_label_threshold)
+    };
+    #[cfg(not(feature = "gliner2"))]
+    let entity_labels: Vec<String> = Vec::new();
 
     let http_client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -990,7 +1120,7 @@ async fn reprocess_docs_background(
             name: "reprocess-docs".into(),
             ..Default::default()
         }, kb_endpoints, ner_model, rel_model,
-           relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache);
+           relation_templates, rel_threshold, coreference_enabled, ner_cache, rel_cache, entity_labels.clone());
         pipeline.set_doc_store(doc_store);
         if let (Some(ep), Some(m)) = (llm_endpoint.as_ref(), llm_model.as_ref()) {
             pipeline.set_llm(ep.clone(), m.clone());

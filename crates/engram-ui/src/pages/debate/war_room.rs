@@ -465,6 +465,8 @@ pub fn WarRoom(
         });
     }
 
+    let (show_help, set_show_help) = signal(false);
+
     view! {
         <div class="war-room">
             // Left: Agent cards
@@ -512,8 +514,34 @@ pub fn WarRoom(
                 }}
             </div>
 
-            // Right: Evidence board
+            // Right: Evidence board + Help button
             <div class="war-room-evidence">
+                <div style="display: flex; justify-content: flex-end; margin-bottom: 0.3rem;">
+                    <button class="btn btn-sm" style="font-size: 0.7rem; opacity: 0.6;"
+                        title="War Room Help"
+                        on:click=move |_| set_show_help.set(!show_help.get_untracked())>
+                        <i class="fa-solid fa-circle-question"></i>
+                    </button>
+                </div>
+                {move || show_help.get().then(|| view! {
+                    <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem; margin-bottom: 0.5rem; font-size: 0.8rem; line-height: 1.5;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                            <strong><i class="fa-solid fa-circle-question" style="margin-right: 0.3rem;"></i>"War Room Guide"</strong>
+                            <button class="btn btn-sm" style="font-size: 0.65rem;"
+                                on:click=move |_| set_show_help.set(false)>
+                                <i class="fa-solid fa-times"></i>
+                            </button>
+                        </div>
+                        <div style="color: var(--text-secondary);">
+                            <p style="margin: 0.3rem 0;"><i class="fa-solid fa-users" style="width: 1rem; color: var(--accent-bright);"></i>" "<strong>"Agents"</strong>" -- AI debaters with different perspectives. Each card shows confidence, evidence count, and agreement/disagreement."</p>
+                            <p style="margin: 0.3rem 0;"><i class="fa-solid fa-star" style="width: 1rem; color: var(--warning);"></i>" "<strong>"Vote"</strong>" -- Click an agent name to support their position. This prefills the inject box as a moderator note."</p>
+                            <p style="margin: 0.3rem 0;"><i class="fa-solid fa-paper-plane" style="width: 1rem; color: var(--accent-bright);"></i>" "<strong>"Inject"</strong>" -- Type a question or directive and press Enter. Agents will address it in the next round."</p>
+                            <p style="margin: 0.3rem 0;"><i class="fa-solid fa-forward" style="width: 1rem;"></i>" "<strong>"Continue"</strong>" -- Proceed to the next debate round without injecting."</p>
+                            <p style="margin: 0.3rem 0;"><i class="fa-solid fa-flask" style="width: 1rem; color: var(--success);"></i>" "<strong>"Synthesize"</strong>" -- Generate a final synthesis combining all agent positions and evidence."</p>
+                            <p style="margin: 0.3rem 0;"><i class="fa-solid fa-layer-group" style="width: 1rem;"></i>" "<strong>"Evidence"</strong>" -- Facts discovered from graph, web, and knowledge bases during the debate."</p>
+                        </div>
+                    </div>
+                })}
                 <EvidenceBoard items=evidence_items />
             </div>
 

@@ -280,6 +280,53 @@ async fn run_debate_loop(state: AppState, session_id: String) {
          session.mode.clone(), session.mode_input.clone(), tx)
     };
 
+    // ── Detect topic languages (once, before briefing so searches use them) ──
+    {
+        let already_has = state.debate_sessions.read().ok()
+            .and_then(|s| s.get(&session_id).map(|s| s.topic_languages.len() > 1))
+            .unwrap_or(false);
+        if !already_has {
+            dbg_debate!("[debate] >> detecting topic languages");
+            let prompt = serde_json::json!({
+                "messages": [{"role": "system", "content": format!(
+                    "What 1-3 languages would be most useful for researching this topic? \
+                     Consider the countries, organizations, and primary sources involved. \
+                     Always include 'en'. Return ONLY ISO 639-1 codes separated by commas. \
+                     Example: en,ru,uk\n\nTopic: \"{}\"", topic
+                )}],
+                "temperature": 0.1,
+                "max_tokens": 32,
+                "think": false
+            });
+            let langs = match llm::call_llm(&state, prompt).await {
+                Ok(resp) => {
+                    let content = llm::extract_content(&resp).unwrap_or_default();
+                    let mut codes: Vec<String> = content.trim().split(',')
+                        .map(|s| s.trim().to_lowercase())
+                        .filter(|s| s.len() == 2 && s.chars().all(|c| c.is_ascii_lowercase()))
+                        .collect();
+                    if !codes.contains(&"en".to_string()) {
+                        codes.insert(0, "en".to_string());
+                    }
+                    codes.truncate(3); // cap at 3
+                    codes
+                }
+                Err(_) => vec!["en".to_string()],
+            };
+            dbg_debate!("[debate] << topic languages: {:?}", langs);
+            if let Ok(mut sessions) = state.debate_sessions.write() {
+                if let Some(s) = sessions.get_mut(&session_id) {
+                    s.topic_languages = langs;
+                }
+            }
+        }
+    }
+
+    // ── Read topic languages for use in briefing and rounds ──
+    let topic_languages = state.debate_sessions.read().ok()
+        .and_then(|s| s.get(&session_id).map(|s| s.topic_languages.clone()))
+        .unwrap_or_else(|| vec!["en".to_string()]);
+
     // ── Starter Plate: build briefing before Round 1 ──
     {
         let needs_briefing = {
@@ -297,7 +344,7 @@ async fn run_debate_loop(state: AppState, session_id: String) {
 
             let t_briefing = std::time::Instant::now();
             dbg_debate!("[debate] >> briefing START topic=\"{}\"", research::safe_truncate(&topic, 60));
-            let briefing = research::build_starter_plate(&state, &topic, &tx).await;
+            let briefing = research::build_starter_plate(&state, &topic, &topic_languages, &tx).await;
             dbg_debate!("[debate] << briefing DONE {} facts, {} stored, {:.1}s", briefing.facts.len(), briefing.facts_stored, t_briefing.elapsed().as_secs_f32());
             eprintln!("[debate] briefing took {:.1}s ({} facts, {} stored)", t_briefing.elapsed().as_secs_f32(), briefing.facts.len(), briefing.facts_stored);
 
@@ -357,48 +404,6 @@ async fn run_debate_loop(state: AppState, session_id: String) {
             queries
         }
     };
-
-    // ── Detect topic languages (once, reuse for all rounds) ──
-    {
-        let already_has = state.debate_sessions.read().ok()
-            .and_then(|s| s.get(&session_id).map(|s| s.topic_languages.len() > 1))
-            .unwrap_or(false);
-        if !already_has {
-            dbg_debate!("[debate] >> detecting topic languages");
-            let prompt = serde_json::json!({
-                "messages": [{"role": "system", "content": format!(
-                    "What 1-3 languages would be most useful for researching this topic? \
-                     Consider the countries, organizations, and primary sources involved. \
-                     Always include 'en'. Return ONLY ISO 639-1 codes separated by commas. \
-                     Example: en,ru,uk\n\nTopic: \"{}\"", topic
-                )}],
-                "temperature": 0.1,
-                "max_tokens": 32,
-                "think": false
-            });
-            let langs = match llm::call_llm(&state, prompt).await {
-                Ok(resp) => {
-                    let content = llm::extract_content(&resp).unwrap_or_default();
-                    let mut codes: Vec<String> = content.trim().split(',')
-                        .map(|s| s.trim().to_lowercase())
-                        .filter(|s| s.len() == 2 && s.chars().all(|c| c.is_ascii_lowercase()))
-                        .collect();
-                    if !codes.contains(&"en".to_string()) {
-                        codes.insert(0, "en".to_string());
-                    }
-                    codes.truncate(3); // cap at 3
-                    codes
-                }
-                Err(_) => vec!["en".to_string()],
-            };
-            dbg_debate!("[debate] << topic languages: {:?}", langs);
-            if let Ok(mut sessions) = state.debate_sessions.write() {
-                if let Some(s) = sessions.get_mut(&session_id) {
-                    s.topic_languages = langs;
-                }
-            }
-        }
-    }
 
     for round_idx in current_round..max_rounds {
         // Check if we should stop

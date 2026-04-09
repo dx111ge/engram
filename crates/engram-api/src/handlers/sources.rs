@@ -862,11 +862,13 @@ async fn run_ingest_items(
     source_name: &str,
 ) -> Result<serde_json::Value, String> {
     let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold,
-         coreference_enabled, llm_endpoint, llm_model) = {
+         coreference_enabled, llm_endpoint, llm_model, user_entity_labels, auto_label_threshold) = {
         let c = state.config.read().unwrap();
         (c.kb_endpoints.clone(), c.ner_model.clone(), c.rel_model.clone(),
          c.relation_templates.clone(), c.rel_threshold, c.coreference_enabled,
-         c.llm_endpoint.clone(), c.llm_model.clone())
+         c.llm_endpoint.clone(), c.llm_model.clone(),
+         c.ner_entity_labels.clone().unwrap_or_default(),
+         c.ner_auto_label_threshold.unwrap_or(3))
     };
 
     let graph = state.graph.clone();
@@ -874,6 +876,14 @@ async fn run_ingest_items(
     let rel_cache = state.cached_rel.clone();
     let doc_store = state.doc_store.clone();
     let _source_name = source_name.to_string();
+
+    #[cfg(feature = "gliner2")]
+    let entity_labels = {
+        let g = graph.read().unwrap();
+        super::ingest::resolve_entity_labels(&g, &user_entity_labels, auto_label_threshold)
+    };
+    #[cfg(not(feature = "gliner2"))]
+    let entity_labels: Vec<String> = Vec::new();
 
     let result = tokio::task::spawn_blocking(move || {
         let mut pipeline = super::ingest::build_pipeline(
@@ -883,7 +893,7 @@ async fn run_ingest_items(
             },
             kb_endpoints, ner_model, rel_model,
             relation_templates, rel_threshold, coreference_enabled,
-            ner_cache, rel_cache,
+            ner_cache, rel_cache, entity_labels,
         );
         pipeline.set_doc_store(doc_store);
         if let (Some(ep), Some(m)) = (llm_endpoint.as_ref(), llm_model.as_ref()) {

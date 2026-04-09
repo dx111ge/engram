@@ -29,10 +29,20 @@ pub async fn seed_start(
         let rel_threshold = config_snap.rel_threshold;
         let coreference_enabled = config_snap.coreference_enabled;
 
+        let user_entity_labels = config_snap.ner_entity_labels.clone().unwrap_or_default();
+        let auto_label_threshold = config_snap.ner_auto_label_threshold.unwrap_or(3);
+        #[cfg(feature = "gliner2")]
+        let ner_labels = {
+            let g = graph.read().unwrap();
+            super::ingest::resolve_entity_labels(&g, &user_entity_labels, auto_label_threshold)
+        };
+        #[cfg(not(feature = "gliner2"))]
+        let ner_labels: Vec<String> = Vec::new();
+
         let mut pipeline = build_pipeline(
             graph.clone(), config, kb_endpoints, ner_model, rel_model,
             relation_templates, rel_threshold, coreference_enabled,
-            ner_cache, rel_cache,
+            ner_cache, rel_cache, ner_labels,
         );
         pipeline.set_doc_store(doc_store.clone());
 

@@ -15,7 +15,7 @@ pub(crate) fn safe_truncate(s: &str, max_chars: usize) -> &str {
 // ── Starter Plate ───────────────────────────────────────────────────────
 
 /// Build the starter plate briefing: decompose topic, gather facts, ingest, assemble.
-pub async fn build_starter_plate(state: &AppState, topic: &str, tx: &tokio::sync::broadcast::Sender<String>) -> Briefing {
+pub async fn build_starter_plate(state: &AppState, topic: &str, topic_languages: &[String], tx: &tokio::sync::broadcast::Sender<String>) -> Briefing {
     let questions = decompose_topic(state, topic).await;
     let mut all_facts = Vec::new();
     let mut total_stored = 0u32;
@@ -26,7 +26,7 @@ pub async fn build_starter_plate(state: &AppState, topic: &str, tx: &tokio::sync
     // Search the exact topic first (highest priority)
     let _ = tx.send(format!("event: briefing_progress\ndata: {}\n\n",
         serde_json::json!({"question": topic, "index": 1, "total": q_total, "phase": "searching"})));
-    let exact_facts = gather_facts_for_question(state, topic, topic).await;
+    let exact_facts = gather_facts_for_question(state, topic, topic, topic_languages).await;
     let _ = tx.send(format!("event: briefing_progress\ndata: {}\n\n",
         serde_json::json!({"question": topic, "index": 1, "total": q_total, "facts_found": exact_facts.len()})));
     all_facts.extend(exact_facts);
@@ -35,7 +35,7 @@ pub async fn build_starter_plate(state: &AppState, topic: &str, tx: &tokio::sync
     for (qi, question) in questions.iter().enumerate() {
         let _ = tx.send(format!("event: briefing_progress\ndata: {}\n\n",
             serde_json::json!({"question": question, "index": qi + 2, "total": q_total, "phase": "searching"})));
-        let facts = gather_facts_for_question(state, question, topic).await;
+        let facts = gather_facts_for_question(state, question, topic, topic_languages).await;
         let new_count = facts.len();
         for fact in facts {
             if !all_facts.iter().any(|f| f.content == fact.content) {
@@ -137,8 +137,8 @@ Return ONLY a JSON array:
     }
 }
 
-/// Gather facts for a question from graph + web.
-async fn gather_facts_for_question(state: &AppState, question: &str, _topic: &str) -> Vec<BriefingFact> {
+/// Gather facts for a question from graph + web (multi-language).
+async fn gather_facts_for_question(state: &AppState, question: &str, _topic: &str, topic_languages: &[String]) -> Vec<BriefingFact> {
     let mut facts = Vec::new();
 
     // Graph search (spawn_blocking to never block async runtime)
@@ -179,7 +179,7 @@ async fn gather_facts_for_question(state: &AppState, question: &str, _topic: &st
         }
     }
 
-    // Web search
+    // Web search -- English first, then retry with non-English topic languages
     let web_results = execute_web_search(state, question).await;
     if !web_results.is_empty() {
         for line in web_results.lines().take(5) {
@@ -191,6 +191,23 @@ async fn gather_facts_for_question(state: &AppState, question: &str, _topic: &st
                     content: line.to_string(),
                     confidence: 0.4,
                 });
+            }
+        }
+    }
+
+    // Retry with non-English languages for additional primary sources
+    for lang in topic_languages.iter().filter(|l| l.as_str() != "en") {
+        if let Ok(lang_results) = crate::handlers::web_search::search_with_language(state, question, lang).await {
+            for r in lang_results.iter().take(3) {
+                let content = format!("[{}] {} -- {}", lang, r.title, r.snippet);
+                if !facts.iter().any(|f| f.content == content) {
+                    facts.push(BriefingFact {
+                        question: question.to_string(),
+                        source: "web".into(),
+                        content,
+                        confidence: 0.35,
+                    });
+                }
             }
         }
     }
@@ -453,7 +470,8 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
     // 2. SPARQL knowledge bases (most precise for entity facts)
     let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
         serde_json::json!({"message": "Querying SPARQL knowledge bases..."})));
-    if let Some(sparql_answer) = query_sparql_endpoints(state, original_query).await {
+    let primary_lang = topic_languages.first().map(|s| s.as_str()).unwrap_or("en");
+    if let Some(sparql_answer) = query_sparql_endpoints(state, original_query, primary_lang).await {
         all_findings.push(format!("[sparql] {}: {}", sparql_answer.source_title, safe_truncate(&sparql_answer.text, 100)));
         let _ = tx.send(format!("event: gap_research_progress\ndata: {}\n\n",
             serde_json::json!({"message": format!("SPARQL: found answer from {}", sparql_answer.source_title)})));
@@ -553,15 +571,20 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
         }
 
         // Create pending Document node with full metadata (ner_complete: false)
-        create_pending_document_node(
-            &state.graph,
-            &content_hash_hex,
-            Some(&result.url),
-            Some(&result.title),
-            &fetched.mime_type,
-            fetched.text.len(),
-            topic_languages.first().map(|s| s.as_str()),
-        );
+        // Skip if URL is empty (shouldn't happen after fetch, but guard against bare nodes)
+        let doc_url = if result.url.is_empty() { None } else { Some(result.url.as_str()) };
+        let doc_title = if result.title.is_empty() { None } else { Some(result.title.as_str()) };
+        if doc_url.is_some() {
+            create_pending_document_node(
+                &state.graph,
+                &content_hash_hex,
+                doc_url,
+                doc_title,
+                &fetched.mime_type,
+                fetched.text.len(),
+                topic_languages.first().map(|s| s.as_str()),
+            );
+        }
 
         let content = fetched.text;
         let truncated = safe_truncate(&content, 4000);
@@ -645,7 +668,7 @@ async fn close_single_gap(state: &AppState, original_query: &str, _topic: &str, 
 
 /// Query all configured SPARQL endpoints (Wikidata, DBpedia, custom) for structured facts.
 /// Has the LLM generate a SPARQL query, executes it, formats results.
-async fn query_sparql_endpoints(state: &AppState, gap_query: &str) -> Option<GapAnswer> {
+async fn query_sparql_endpoints(state: &AppState, gap_query: &str, language: &str) -> Option<GapAnswer> {
     let endpoints = {
         let cfg = state.config.read().ok()?;
         cfg.kb_endpoints.clone().unwrap_or_default()
@@ -661,7 +684,7 @@ async fn query_sparql_endpoints(state: &AppState, gap_query: &str) -> Option<Gap
     for ep in &enabled {
         let t_ep = std::time::Instant::now();
         // Step 1: LLM generates a SPARQL query for this endpoint
-        let sparql = generate_sparql_query(state, gap_query, &ep.name).await;
+        let sparql = generate_sparql_query(state, gap_query, &ep.name, language).await;
         let sparql = match sparql {
             Some(q) if !q.is_empty() => q,
             _ => continue,
@@ -751,7 +774,7 @@ async fn query_sparql_endpoints(state: &AppState, gap_query: &str) -> Option<Gap
 /// 1. LLM extracts the entity name and property from the question
 /// 2. Wikidata search API resolves the entity to a QID
 /// 3. Build a correct SPARQL query with the verified QID
-async fn generate_sparql_query(state: &AppState, gap_query: &str, endpoint_name: &str) -> Option<String> {
+async fn generate_sparql_query(state: &AppState, gap_query: &str, endpoint_name: &str, language: &str) -> Option<String> {
     // Step 1: LLM extracts entity + property from the question
     let prompt = format!(
         r#"Extract the main entity and the property being asked about from this question:
@@ -799,7 +822,7 @@ Return ONLY valid JSON, no other text."#,
     // Step 2: Resolve entity name to QID via Wikidata search API
     let is_wikidata = endpoint_name.to_lowercase().contains("wikidata");
     let qid = if is_wikidata {
-        resolve_wikidata_qid(&state.http_client, entity).await
+        resolve_wikidata_qid(&state.http_client, entity, language).await
     } else {
         None
     };
@@ -811,10 +834,10 @@ Return ONLY valid JSON, no other text."#,
             let query = format!(
                 r#"SELECT ?value ?valueLabel WHERE {{
   wd:{qid} {prop} ?value .
-  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "{lang},en" . }}
 }}
 LIMIT 10"#,
-                qid = qid, prop = sparql_property
+                qid = qid, prop = sparql_property, lang = language
             );
             eprintln!("[sparql] built query: wd:{} {} -> ...", qid, sparql_property);
             return Some(query);
@@ -824,10 +847,10 @@ LIMIT 10"#,
                 r#"SELECT ?property ?propertyLabel ?value ?valueLabel WHERE {{
   wd:{qid} ?prop ?value .
   ?property wikibase:directClaim ?prop .
-  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "{lang},en" . }}
 }}
 LIMIT 20"#,
-                qid = qid
+                qid = qid, lang = language
             );
             eprintln!("[sparql] built broad query for wd:{}", qid);
             return Some(query);
@@ -839,13 +862,14 @@ LIMIT 20"#,
 }
 
 /// Resolve an entity name to a Wikidata QID using the wbsearchentities API.
-async fn resolve_wikidata_qid(client: &reqwest::Client, entity_name: &str) -> Option<String> {
-    dbg_debate!("[wikidata] >> resolving entity=\"{}\"", entity_name);
+async fn resolve_wikidata_qid(client: &reqwest::Client, entity_name: &str, language: &str) -> Option<String> {
+    dbg_debate!("[wikidata] >> resolving entity=\"{}\" lang={}", entity_name, language);
     let t0 = std::time::Instant::now();
 
+    let lang = if language.is_empty() { "en" } else { language };
     let url = format!(
-        "https://www.wikidata.org/w/api.php?action=wbsearchentities&search={}&language=en&limit=3&format=json",
-        urlencoding::encode(entity_name),
+        "https://www.wikidata.org/w/api.php?action=wbsearchentities&search={}&language={}&limit=3&format=json",
+        urlencoding::encode(entity_name), lang,
     );
 
     let resp = client.get(&url)
@@ -1711,10 +1735,13 @@ async fn fetch_article_content(client: &reqwest::Client, url: &str, blocked_doma
 async fn run_ingest(state: &AppState, source_name: &str, content: &str) -> (u32, u32) {
     use engram_ingest::types::{RawItem, Content};
 
-    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled) = {
+    let (kb_endpoints, ner_model, rel_model, relation_templates, rel_threshold, coreference_enabled,
+         user_entity_labels, auto_label_threshold) = {
         let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
         (cfg.kb_endpoints.clone(), cfg.ner_model.clone(), cfg.rel_model.clone(),
-         cfg.relation_templates.clone(), cfg.rel_threshold, cfg.coreference_enabled)
+         cfg.relation_templates.clone(), cfg.rel_threshold, cfg.coreference_enabled,
+         cfg.ner_entity_labels.clone().unwrap_or_default(),
+         cfg.ner_auto_label_threshold.unwrap_or(3))
     };
     let llm_config = {
         let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
@@ -1729,6 +1756,14 @@ async fn run_ingest(state: &AppState, source_name: &str, content: &str) -> (u32,
     let source_owned = source_name.to_string();
     let dirty = state.dirty.clone();
 
+    #[cfg(feature = "gliner2")]
+    let entity_labels = {
+        let g = graph.read().unwrap();
+        super::super::ingest::resolve_entity_labels(&g, &user_entity_labels, auto_label_threshold)
+    };
+    #[cfg(not(feature = "gliner2"))]
+    let entity_labels: Vec<String> = Vec::new();
+
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         tokio::task::spawn_blocking(move || {
@@ -1739,7 +1774,7 @@ async fn run_ingest(state: &AppState, source_name: &str, content: &str) -> (u32,
             let mut pipeline = super::super::ingest::build_pipeline(
                 graph, config, kb_endpoints, ner_model, rel_model,
                 relation_templates, rel_threshold, coreference_enabled,
-                cached_ner, cached_rel,
+                cached_ner, cached_rel, entity_labels,
             );
             pipeline.set_doc_store(doc_store);
             if let (Some(ep), Some(m)) = (llm_config.0.as_ref(), llm_config.1.as_ref()) {

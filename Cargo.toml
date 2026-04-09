@@ -43,6 +43,9 @@ actions = ["engram-api/actions", "engram-action"]
 reason = ["engram-api/reason", "engram-reason"]
 assess = ["engram-api/assess", "engram-assess"]
 gliner2 = ["engram-api/gliner2", "ingest"]
+directml = ["engram-api/directml", "gliner2"]  # GPU: DirectML (Windows)
+cuda = ["engram-api/cuda", "gliner2"]           # GPU: CUDA (Linux)
+coreml = ["engram-api/coreml", "gliner2"]       # GPU: CoreML (macOS)
 pdf = ["engram-api/pdf"]
 
 [dependencies]

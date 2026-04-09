@@ -52,6 +52,8 @@ pub async fn get_config(
             "studylibid.com".into(), "studylib.net".into(), "doczz.net".into(),
         ]),
         "output_language": cfg.output_language,
+        "ner_entity_labels": cfg.ner_entity_labels,
+        "ner_auto_label_threshold": cfg.ner_auto_label_threshold.unwrap_or(3),
     }))
 }
 
@@ -164,7 +166,8 @@ pub async fn set_config(
     // Invalidate cached NER/REL backends if relevant config fields changed
     #[cfg(feature = "ingest")]
     {
-        let ner_changed = patch.ner_model.is_some() || patch.ner_provider.is_some();
+        let ner_changed = patch.ner_model.is_some() || patch.ner_provider.is_some()
+            || patch.ner_entity_labels.is_some() || patch.ner_auto_label_threshold.is_some();
         let rel_changed = patch.rel_model.is_some() || patch.relation_templates.is_some();
         if ner_changed {
             if let Ok(mut c) = state.cached_ner.write() {
@@ -349,5 +352,93 @@ pub async fn wizard_complete(
     state.save_config().map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("failed to save config: {}", e) }))
     })?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── GET /config/entity-labels ── Effective NER entity label set with breakdown
+
+#[cfg(feature = "gliner2")]
+pub async fn get_entity_labels(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    use super::ingest::{resolve_entity_labels, CORE_ENTITY_LABELS, MAX_ENTITY_LABELS};
+
+    let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
+    let user_labels = cfg.ner_entity_labels.clone().unwrap_or_default();
+    let threshold = cfg.ner_auto_label_threshold.unwrap_or(3);
+    drop(cfg);
+
+    let g = state.graph.read().unwrap();
+    let effective = resolve_entity_labels(&g, &user_labels, threshold);
+
+    // Build auto-discovered breakdown
+    let core: Vec<&str> = CORE_ENTITY_LABELS.to_vec();
+    let core_set: std::collections::HashSet<String> = core.iter().map(|s| s.to_string()).collect();
+    let user_set: std::collections::HashSet<String> = user_labels.iter().map(|s| s.to_lowercase().replace(' ', "_")).collect();
+
+    let auto_discovered: Vec<serde_json::Value> = {
+        let all_types = g.all_node_types();
+        all_types.iter()
+            .filter_map(|t| {
+                let lower = t.to_lowercase();
+                if lower == "document" || lower == "source" || lower == "fact"
+                    || core_set.contains(&lower) || user_set.contains(&lower)
+                {
+                    return None;
+                }
+                let count = g.count_nodes_of_type(t);
+                if count >= threshold as usize {
+                    Some(serde_json::json!({"label": lower, "count": count}))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    Json(serde_json::json!({
+        "core": core,
+        "user_defined": user_labels,
+        "auto_discovered": auto_discovered,
+        "effective": effective,
+        "max_labels": MAX_ENTITY_LABELS,
+        "auto_threshold": threshold,
+    }))
+}
+
+// ── POST /config/entity-labels ── Set user-defined labels and/or threshold
+
+#[cfg(feature = "gliner2")]
+pub async fn set_entity_labels(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let labels = req.get("labels").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<Vec<_>>()
+    });
+    let threshold = req.get("auto_threshold").and_then(|v| v.as_u64()).map(|n| n as u32);
+
+    {
+        let mut cfg = state.config.write().unwrap();
+        if let Some(labels) = labels {
+            cfg.ner_entity_labels = Some(labels);
+        }
+        if let Some(t) = threshold {
+            cfg.ner_auto_label_threshold = Some(t);
+        }
+    }
+
+    // Save config + invalidate NER cache
+    state.save_config().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("failed to save config: {}", e) }))
+    })?;
+    #[cfg(feature = "ingest")]
+    {
+        if let Ok(mut c) = state.cached_ner.write() {
+            *c = None;
+            eprintln!("[ner] entity labels updated, NER cache invalidated");
+        }
+    }
+
     Ok(Json(serde_json::json!({ "ok": true })))
 }

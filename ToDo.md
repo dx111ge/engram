@@ -1,36 +1,36 @@
 # Engram Open Issues & Roadmap
 
-Last updated: 2026-04-08
+Last updated: 2026-04-09
 
 ## High Priority
 
-- [ ] **GLiNER2 ONNX runs on CPU** -- 6GB RAM baseline, should use RTX 5070 via DirectML/CUDA in `ort` crate. 10-50x speedup, tensors to VRAM instead of system RAM. Check `crates/engram-ingest/Cargo.toml` + `gliner2_backend.rs` session creation.
-- [ ] **Multi-language search not wired into debate** -- briefing + agent research always use `language=en`. Languages detected correctly (`en,ru,uk`) but not passed to web search calls. Missing Russian/Ukrainian primary sources. Fix in `research.rs` briefing search + agent research.
-- [ ] **Evidence board always shows 0** -- War Room evidence panel not populating from SSE `turn_complete` evidence data. Needs investigation.
+- [x] **GLiNER2 ONNX runs on CPU** -- FIXED: conditional execution providers (DirectML/CUDA/CoreML per platform) with CPU fallback. Features: `directml`, `cuda`, `coreml`. Build with `--features directml` on Windows to enable GPU.
+- [x] **Multi-language search not wired into debate** -- FIXED: language detection moved before briefing, `topic_languages` passed to `build_starter_plate`, `gather_facts_for_question` retries with non-English languages, Wikidata/SPARQL queries use topic language.
+- [x] **Evidence board always shows 0** -- FIXED: graph traversal results now added to `all_evidence` (were only logged to `research_summary` text). Dead duplicate branch removed.
 
 ## Moderate Priority
 
 ### Debate
-- [ ] **Inject question flow untested** -- only vote tested with new center panel state machine. Inject text + send button needs verification.
-- [ ] **Doc nodes missing metadata** -- some web fetches create docs with empty title/URL. Need empty-string guard in `create_pending_document_node`.
-- [ ] **No language property on Document nodes** -- `create_pending_document_node` doesn't set language even though search language is known.
+- [ ] **Inject question flow untested** -- fully implemented (controls.rs + API endpoint), needs manual verification with active debate.
+- [x] **Doc nodes missing metadata** -- FIXED: call-site guard skips doc node creation when URL is empty.
+- [x] **No language property on Document nodes** -- FIXED: `create_pending_document_node` already accepts and sets `language` parameter.
 
 ### Sources / System UX
-- [ ] **Sources page disconnect** -- Sources page (`/sources`) is empty, disconnected from System page's Sources & Integrations section.
-- [ ] **Wizard should open on System page** -- add-source wizard should open in-place, not navigate to empty Sources page.
-- [ ] **Unify Sources and System pages** -- merge Sources content into System page.
+- [x] **Sources page disconnect** -- FIXED: `/sources` route removed, `SourcesSection` embedded in System page.
+- [x] **Wizard should open on System page** -- FIXED: wizard opens as inline modal in System page.
+- [x] **Unify Sources and System pages** -- FIXED: sources merged into System page under "Ingestion Sources".
 
 ### War Room
-- [ ] **Help content** -- question mark button needs meaningful content about War Room, how to vote/boost/inject.
+- [x] **Help content** -- FIXED: help button (fa-circle-question) with modal explaining agents, voting, inject, continue, synthesize, evidence.
 
 ### NER / Pipeline
-- [ ] **NER category learning** -- verify gazetteer learns from confirmed graph entities. Does feedback loop (graph -> gazetteer -> NER) work? Test with overlapping documents.
+- [x] **NER category learning** -- FIXED: three-tier label system (core + user-defined + auto-discovered from graph). GLiNER2 labels dynamically resolved at pipeline construction. Self-improving loop: ingest -> new node types -> labels expand -> better NER. API: GET/POST `/config/entity-labels`. UI: Entity Categories section in System/NER config.
 
 ## Low Priority
 
 - [ ] **Data link wrong MIME** -- debate stores CSV/JSON with parent page MIME (`text/html`) instead of data file MIME. Low impact, gap closure still works.
 - [ ] **Data link truncated at 8000 chars** -- debate caps data links for speed. Fine for gap closure, not for full processing.
-- [ ] **No language on documents** -- all docs show `lang=-` in UI. Pipeline doesn't propagate detected language to Document node.
+- [x] **No language on documents** -- FIXED: pipeline propagates `topic_languages.first()` to Document node via `create_pending_document_node`.
 - [ ] **doc_date always empty** -- no date extraction from document content.
 
 ## Performance
