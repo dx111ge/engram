@@ -2,7 +2,9 @@
 
 **AI Memory Engine** -- knowledge graph + semantic search + reasoning + learning in a single binary.
 
-![Engram Graph Explorer](assets/screenshot.jpg)
+![Engram Knowledge Graph](assets/graph.jpg)
+
+![Engram Analysis Panel](assets/debate.jpg)
 
 ---
 
