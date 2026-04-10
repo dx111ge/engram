@@ -7,46 +7,36 @@ on:
 
 jobs:
   build-macos:
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            artifact: engram-macos-aarch64
-            runner: macos-latest
-          - target: x86_64-apple-darwin
-            artifact: engram-macos-x86_64
-            runner: macos-13
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - name: Install deps
         run: brew install protobuf
 
       - name: Build release
-        run: cargo build --release --features all,coreml --target ${{ matrix.target }}
+        run: cargo build --release --features all,coreml --target aarch64-apple-darwin
 
       - name: Strip binary
-        run: strip target/${{ matrix.target }}/release/engram
+        run: strip target/aarch64-apple-darwin/release/engram
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: target/${{ matrix.target }}/release/engram
+          name: engram-macos-aarch64
+          path: target/aarch64-apple-darwin/release/engram
 
       - name: Package artifact
         run: |
-          cp target/${{ matrix.target }}/release/engram engram
-          zip ${{ matrix.artifact }}.zip engram
+          cp target/aarch64-apple-darwin/release/engram engram
+          zip engram-macos-aarch64.zip engram
 
       - name: Generate checksum
-        run: shasum -a 256 ${{ matrix.artifact }}.zip > ${{ matrix.artifact }}.zip.sha256
+        run: shasum -a 256 engram-macos-aarch64.zip > engram-macos-aarch64.zip.sha256
 
       - name: Upload to VirusTotal
         if: startsWith(github.ref, 'refs/tags/')
@@ -56,7 +46,7 @@ jobs:
           curl -sf --request POST \
             --url https://www.virustotal.com/api/v3/files \
             --header "x-apikey: ${VT_API_KEY}" \
-            --form "file=@${{ matrix.artifact }}.zip" || echo "VirusTotal upload failed (non-fatal)"
+            --form "file=@engram-macos-aarch64.zip" || echo "VirusTotal upload failed (non-fatal)"
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -65,8 +55,8 @@ jobs:
         run: |
           TAG=${GITHUB_REF#refs/tags/}
           gh release create "$TAG" --title "Engram $TAG" --notes "Build artifacts" --draft 2>/dev/null || true
-          gh release upload "$TAG" "${{ matrix.artifact }}.zip" --clobber
-          gh release upload "$TAG" "${{ matrix.artifact }}.zip.sha256" --clobber
+          gh release upload "$TAG" engram-macos-aarch64.zip --clobber
+          gh release upload "$TAG" engram-macos-aarch64.zip.sha256 --clobber
 
   update-release-notes:
     runs-on: ubuntu-latest
@@ -81,7 +71,7 @@ jobs:
 
           # Download checksum files from release
           mkdir -p checksums
-          for ARTIFACT in engram-macos-aarch64.zip engram-macos-x86_64.zip; do
+          for ARTIFACT in engram-macos-aarch64.zip; do
             gh release download "$TAG" --pattern "${ARTIFACT}.sha256" --dir checksums 2>/dev/null || true
           done
 
@@ -91,7 +81,7 @@ jobs:
           BODY+="| File | SHA-256 | VirusTotal |\n"
           BODY+="|------|---------|------------|\n"
 
-          for ARTIFACT in engram-macos-aarch64.zip engram-macos-x86_64.zip; do
+          for ARTIFACT in engram-macos-aarch64.zip; do
             if [ -f "checksums/${ARTIFACT}.sha256" ]; then
               CHECKSUM=$(awk '{print $1}' "checksums/${ARTIFACT}.sha256")
               VT_LINK="https://www.virustotal.com/gui/file/${CHECKSUM}"
