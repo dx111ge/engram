@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "engram"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "axum",
  "engram-a2a",
@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "engram-a2a"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "engram-api",
  "engram-core",
@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "engram-action"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "engram-core",
  "reqwest",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "engram-api"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -945,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "engram-assess"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "engram-core",
  "serde",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "engram-compute"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "engram-core"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "crc32fast",
  "criterion",
@@ -989,7 +989,7 @@ dependencies = [
 
 [[package]]
 name = "engram-inference"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "engram-core",
  "thiserror 2.0.18",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "engram-ingest"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "dom_smoothie",
  "engram-core",
@@ -1023,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "engram-learning"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "engram-core",
  "thiserror 2.0.18",
@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "engram-mesh"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "engram-core",
  "serde",
@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "engram-reason"
-version = "1.1.0"
+version = "1.1.3"
 dependencies = [
  "engram-core",
  "engram-mesh",

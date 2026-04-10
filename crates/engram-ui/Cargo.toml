@@ -1,6 +1,6 @@
 [package]
 name = "engram-ui"
-version = "1.1.0"
+version = "1.1.3"
 edition = "2024"
 license = "LicenseRef-Proprietary"
 description = "Leptos WASM frontend for engram"

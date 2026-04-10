@@ -974,34 +974,36 @@ fn dirs_next_home() -> PathBuf {
 
 /// Find the installed GLiNER2 model directory.
 pub fn find_gliner2_model() -> Option<Gliner2Config> {
-    let model_dir = dirs_next_home()
+    let base = dirs_next_home()
         .join(".engram")
         .join("models")
-        .join("gliner2")
-        .join("gliner2-multi-v1");
+        .join("gliner2");
 
-    if model_dir.join("gliner2_config.json").exists() {
-        Some(Gliner2Config {
-            model_dir,
-            max_width: 8,
-            hidden_size: 768,
-            special_tokens: SpecialTokens {
-                p: 0,
-                l: 0,
-                e: 0,
-                r: 0,
-                sep_struct: 0,
-                sep_text: 0,
-            },
-            encoder_file: String::new(),
-            span_rep_file: String::new(),
-            count_embed_file: String::new(),
-            count_pred_file: String::new(),
-            classifier_file: String::new(),
-        })
-    } else {
-        None
-    }
+    // Check both folder names: the download endpoint creates "gliner2-multi-v1-onnx",
+    // but older installs may have "gliner2-multi-v1".
+    let model_dir = ["gliner2-multi-v1-onnx", "gliner2-multi-v1"]
+        .iter()
+        .map(|name| base.join(name))
+        .find(|dir| dir.join("gliner2_config.json").exists())?;
+
+    Some(Gliner2Config {
+        model_dir,
+        max_width: 8,
+        hidden_size: 768,
+        special_tokens: SpecialTokens {
+            p: 0,
+            l: 0,
+            e: 0,
+            r: 0,
+            sep_struct: 0,
+            sep_text: 0,
+        },
+        encoder_file: String::new(),
+        span_rep_file: String::new(),
+        count_embed_file: String::new(),
+        count_pred_file: String::new(),
+        classifier_file: String::new(),
+    })
 }
 
 /// List installed GLiNER2 models.
