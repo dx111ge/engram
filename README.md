@@ -1,6 +1,6 @@
 # Engram v1.1.2
 
-**AI Memory Engine** -- knowledge graph + semantic search + reasoning + learning in a single binary.
+**AI Intelligence Platform** -- knowledge graph + semantic search + reasoning + learning in a single binary.
 
 ![Engram Knowledge Graph](assets/graph.jpg)
 
