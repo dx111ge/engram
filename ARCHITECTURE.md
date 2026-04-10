@@ -1,4 +1,4 @@
-# Engram Architecture
+# Engram Architecture (v1.1.2)
 
 High-level overview of the Engram system design.
 
