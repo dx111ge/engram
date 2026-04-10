@@ -1,4 +1,4 @@
-# Engram
+# Engram v1.1.2
 
 **AI Memory Engine** -- knowledge graph + semantic search + reasoning + learning in a single binary.
 
@@ -8,55 +8,31 @@
 
 ## What is Engram?
 
-Engram is a high-performance knowledge graph engine built as persistent memory for AI systems. It combines graph storage, semantic search, logical reasoning, and continuous learning into a single binary with a single `.brain` file.
+Engram is a self-hosted AI knowledge engine that combines graph storage, semantic search, logical reasoning, and continuous learning into a single Rust binary with a single `.brain` file. No cloud, no external dependencies.
 
 - **Single binary** -- no runtime dependencies, no Docker, no cloud
 - **Single file** -- one `.brain` file is your entire knowledge base. Copy = backup, move = migrate
-- **No external database** -- everything is built in
+- **No external database** -- custom mmap storage, everything built in
 - **Hybrid search** -- BM25 full-text + HNSW vector similarity + bitmap filtering
 - **Confidence lifecycle** -- knowledge strengthens with confirmation, weakens with time, corrects on contradiction
 - **Inference engine** -- forward/backward chaining, rule evaluation, transitive reasoning
-- **Ingest pipeline** -- NER (GLiNER2 ONNX), entity resolution, conflict detection, PDF/HTML/table extraction
+- **Ingest pipeline** -- NER (GLiNER2 ONNX, GPU-accelerated), entity resolution, conflict detection, PDF/HTML/table extraction
 - **Multi-agent debate** -- 7 analysis modes with War Room live dashboard and 3-layer synthesis
 - **Chat system** -- 47 tools across 8 clusters (analysis, investigation, reporting, temporal, assessment)
 - **Assessment engine** -- Bayesian confidence with living assessments and evidence boards
 - **Temporal facts** -- valid_from / valid_to on edges with automatic extraction
 - **Contradiction detection** -- automatic conflict detection with resolution workflows
 - **Knowledge mesh** -- peer-to-peer sync with ed25519 identity and trust scoring
-- **Built-in web UI** -- Leptos WASM frontend with graph visualization, onboarding wizard, and SSE live updates
+- **Built-in web UI** -- Leptos WASM frontend with 3D graph visualization, onboarding wizard, and SSE live updates
 - **Multiple APIs** -- HTTP REST (230+ endpoints), MCP, gRPC, A2A, LLM tool-calling
 
 ---
 
-## Two Ways to Use Engram
+## Who is Engram for?
 
-Engram works in two complementary modes. Both use the same binary and the same `.brain` file.
+**As a backend memory layer** -- integrate Engram into your AI pipeline via REST, MCP, or gRPC. Use the onboarding wizard once, then run headless.
 
-### <i class="fa-solid fa-terminal"></i> Backend Engine (API / CLI)
-
-Use engram as a headless knowledge graph engine. Store nodes, create edges, run queries, push inference rules, and ingest data -- all through CLI commands, HTTP REST, MCP, gRPC, A2A, or LLM tool-calling.
-
-This is the **integration path**: embed engram into AI agents, automation pipelines, or existing applications. No browser needed.
-
-```bash
-engram create my.brain
-engram store "Berlin" my.brain
-engram relate "Berlin" "capital_of" "Germany" my.brain
-engram serve my.brain
-```
-
-After starting the server, run through the **onboarding wizard** via API to configure your LLM, embedder, and NER providers. See the [Configuration wiki](https://github.com/dx111ge/engram/wiki/Configuration) for the API-based setup flow.
-
-### <i class="fa-solid fa-desktop"></i> Interactive Playground (Web UI)
-
-Start the server and open `http://localhost:3030` in your browser. Four sections:
-
-- **Knowledge** -- graph explorer, search, documents, facts, chat
-- **Insights** -- intelligence gaps, assessments, contradictions
-- **Debate** -- multi-agent analysis with 7 modes and a live War Room
-- **System** -- configuration, NER/RE settings, sources, domain taxonomy
-
-On first launch with an empty brain, the **onboarding wizard** guides you through 11 setup steps.
+**As an intelligence workbench** -- ingest documents, build knowledge graphs, run multi-agent debate, assess with Bayesian confidence. Full web UI with interactive 3D graph, chat, and War Room.
 
 ---
 
@@ -64,59 +40,46 @@ On first launch with an empty brain, the **onboarding wizard** guides you throug
 
 ### 1. Download
 
-Download the latest binary **and the `frontend/` folder** from [Releases](https://github.com/dx111ge/engram/releases).
+Download the latest release from [Releases](https://github.com/dx111ge/engram/releases/tag/v1.1.2).
 
-Available for: **Windows** (x86_64), **Linux** (x86_64, aarch64), **macOS** (aarch64).
+| Platform | Download |
+|----------|----------|
+| Windows x86_64 | `engram-windows-x86_64.zip` |
+| Linux x86_64 | `engram-linux-x86_64.zip` |
+| Linux aarch64 | `engram-linux-aarch64.zip` |
+| macOS aarch64 | `engram-macos-aarch64.zip` |
 
-Place the `frontend/` folder next to the binary:
-```
-engram.exe            (or engram on Linux/macOS)
-frontend/
-  index.html
-  engram-ui-*.js
-  engram-ui-*_bg.wasm
-  graph-bridge.js
-  style-*.css
-```
+Unzip and run. The web UI frontend is bundled inside the zip.
 
-The web UI is served automatically when the frontend folder is detected.
-
-### 2. Create and populate
-
-```bash
-engram create my.brain
-engram store "PostgreSQL" my.brain
-engram store "Redis" my.brain
-engram relate "PostgreSQL" "caches_with" "Redis" my.brain
-```
-
-### 3. Start the server
+### 2. Start
 
 ```bash
 engram serve my.brain
-# HTTP API: http://localhost:3030
-# Web UI:   http://localhost:3030
+# HTTP API + Web UI: http://localhost:3030
 ```
 
-### 4. Configure (recommended: Gemma 4)
+### 3. Configure
 
-We recommend **Gemma 4** as the LLM (thinking mode, large context window). Run it locally with [Ollama](https://ollama.com/):
+Open `http://localhost:3030` -- the onboarding wizard guides you through setup.
+
+We recommend **Gemma 4** as the LLM. Run it locally with [Ollama](https://ollama.com/):
 
 ```bash
 ollama pull gemma4:e4b
 ```
 
-Then configure engram via the web UI onboarding wizard, or via API:
-
-```bash
-curl -X POST http://localhost:3030/config \
-  -H "Content-Type: application/json" \
-  -d '{"llm_endpoint": "http://localhost:11434/v1/chat/completions", "llm_model": "gemma4:e4b"}'
-
-curl -X POST http://localhost:3030/config/wizard-complete
-```
-
 Any OpenAI-compatible LLM endpoint works (Ollama, vLLM, OpenAI, Azure, etc.).
+
+---
+
+## Web UI
+
+Four sections accessible after login:
+
+- **Knowledge** -- interactive 3D graph explorer, entity search, Knowledge Chat with 47 tools
+- **Insights** -- knowledge stats, contradictions, documents, intelligence gaps
+- **Debate** -- 7 AI analysis modes: Analyze, Red Team, Outcome Engineering, Scenario Forecast, Stakeholder Simulation, Pre-mortem, Decision Matrix
+- **System** -- hardware, embeddings, NER, LLM config, web search providers, ingestion sources, domain taxonomy
 
 ---
 
@@ -139,17 +102,15 @@ Any OpenAI-compatible LLM endpoint works (Ollama, vLLM, OpenAI, Azure, etc.).
 
 ## Documentation
 
-Full documentation is available on the [GitHub Wiki](https://github.com/dx111ge/engram/wiki):
-
 | Page | Description |
 |------|-------------|
-| [Getting Started](https://github.com/dx111ge/engram/wiki/Getting-Started) | Download, install, first brain, quick start for both modes |
-| [Configuration](https://github.com/dx111ge/engram/wiki/Configuration) | Onboarding wizard, LLM setup, embeddings, SearXNG, API-based config |
+| [Getting Started](https://github.com/dx111ge/engram/wiki/Getting-Started) | Download, install, first brain, quick start |
+| [Configuration](https://github.com/dx111ge/engram/wiki/Configuration) | Onboarding wizard, LLM setup, embeddings, SearXNG |
 | [HTTP API](https://github.com/dx111ge/engram/wiki/HTTP-API) | Full REST API reference (230+ endpoints) |
 | [MCP Server](https://github.com/dx111ge/engram/wiki/MCP-Server) | MCP tools for Claude, Cursor, Windsurf (24 tools) |
 | [Python Integration](https://github.com/dx111ge/engram/wiki/Python-Integration) | EngramClient, bulk import, LangChain, auth, debate, chat |
+| [SearxNG Setup](docs/searxng-setup.md) | Self-hosted web search: installation, engines, rate limits |
 | [Architecture](https://github.com/dx111ge/engram/wiki/Architecture) | System design, layers, storage engine, compute |
-| [Integrations](https://github.com/dx111ge/engram/wiki/Integrations) | MCP, A2A, gRPC, SSE, webhooks, web search providers |
 | [Use Cases](https://github.com/dx111ge/engram/wiki/Use-Cases) | 13 end-to-end walkthroughs with Python demos |
 
 ---
