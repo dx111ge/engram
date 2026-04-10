@@ -4,6 +4,26 @@ All notable changes to Engram are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.2] - 2026-04-10
+
+### Fixed
+- Chat search tool now generates LLM summary after showing results
+- Chat topic_map tool now generates LLM summary after topic mapping
+- Conflicts list pagination (was hardcoded to 20, now paginated)
+- Mesh endpoints return 200 with disabled status instead of 503
+- Ingest page sends correct JSON format (items array)
+- Onboarding wizard includes Serper.dev as search provider
+
+### Added
+- SearxNG setup guide (docs/searxng-setup.md)
+
+## [1.1.1] - 2026-04-09
+
+### Fixed
+- Bundle frontend with binary in zip (no separate folder needed)
+- Detect frontend in both dist/ and flat layout
+- macOS native runners per architecture
+
 ## [1.1.0] - 2026-04-09
 
 ### Added
