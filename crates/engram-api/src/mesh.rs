@@ -317,13 +317,20 @@ pub async fn remove_peer(
 pub async fn audit(
     State(state): State<AppState>,
 ) -> MeshResult<serde_json::Value> {
-    let mesh = state.mesh.as_ref()
-        .ok_or_else(|| mesh_err(StatusCode::SERVICE_UNAVAILABLE, "mesh not enabled"))?;
+    let mesh = match state.mesh.as_ref() {
+        Some(m) => m,
+        None => return Ok(Json(serde_json::json!({
+            "enabled": false,
+            "entries": [],
+            "stats": { "total_accepted": 0, "total_rejected": 0 }
+        }))),
+    };
     let audit = mesh.audit.read()
         .map_err(|_| mesh_err(StatusCode::INTERNAL_SERVER_ERROR, "audit lock poisoned"))?;
     let recent = audit.recent(100);
     let (accepted_count, rejected_count) = audit.stats();
     Ok(Json(serde_json::json!({
+        "enabled": true,
         "entries": recent,
         "stats": {
             "total_accepted": accepted_count,
@@ -337,9 +344,15 @@ pub async fn audit(
 pub async fn identity(
     State(state): State<AppState>,
 ) -> MeshResult<serde_json::Value> {
-    let mesh = state.mesh.as_ref()
-        .ok_or_else(|| mesh_err(StatusCode::SERVICE_UNAVAILABLE, "mesh not enabled"))?;
+    let mesh = match state.mesh.as_ref() {
+        Some(m) => m,
+        None => return Ok(Json(serde_json::json!({
+            "enabled": false,
+            "public_key": null
+        }))),
+    };
     Ok(Json(serde_json::json!({
+        "enabled": true,
         "public_key": mesh.identity.public.to_hex(),
     })))
 }

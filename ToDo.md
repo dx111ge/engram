@@ -1,17 +1,27 @@
 # Engram Open Issues & Roadmap
 
-Last updated: 2026-04-09
+Last updated: 2026-04-10
 
-## Current Release -- Bug Fix Round
+## v1.1.2 Bug Fix Round
 
-1. [ ] **LLM output budget caps** -- raise `short_output_budget` cap from 2048 to 8192, `medium_output_budget` from 4096 to 16384. Dynamic scaling based on model context window.
-2. [ ] **Data link removal from gap-closing** -- remove data link fetch from `fetch_article_content`. Fixes wrong MIME + 8000 char truncation. Data link processing belongs in reprocess (future).
-3. [ ] **doc_date editable** -- make `doc_date` field editable in document detail UI. No auto-extraction, user sets manually.
-4. [ ] **Temporal facts** -- three-layer: extend LLM prompts with valid_from/valid_to, add quick non-thinking LLM pass after NER/RE, user manual fallback. Wire `relate_with_temporal()` in pipeline.
-5. [ ] **Contradictions & Conflicts** -- wire ConflictDetector into production pipeline, store as `conflicts_with` graph edges, user-configurable singular properties, API endpoint, UI display with resolution actions.
-6. [ ] **Intelligence Gaps UX overhaul** -- filter internal types, human-readable labels, show suggested queries, domain-based asymmetric detection (remove type-based noise), background quality enrichment endpoint with LLM query generation + user edit, persist dismissed gaps.
-7. [ ] **System prompt wire-up** -- add `llm_system_prompt` to EngineConfig (currently UI writes but backend ignores), use in all LLM calls, generate during onboarding.
-8. [ ] **Domain taxonomy** -- user-defined domains in EngineConfig, LLM suggests domains from graph content, auto-classify entities during ingest/debate, UI in System page + onboarding wizard.
+1. [ ] **Chat: search tool missing LLM summary** -- `dispatch.rs:163`, `search` falls into generic path without `llm_analysis()`. Needs own match arm like `explain`.
+2. [ ] **Chat: topic_map tool missing LLM summary** -- `dispatch.rs:695`, same issue. Add `llm_analysis()` after tool card result.
+3. [ ] **Insights: pagination** -- Documents list and other long lists need pagination, page is too long.
+4. [ ] **Mesh endpoints return 503 when disabled** -- `/mesh/audit` and `/mesh/identity` return 503 even when mesh is disabled. Should return 200 with empty/disabled status, or 404.
+5. [ ] **Ingest page 422: missing field `items`** -- Ingest Pipeline page sends wrong JSON format to `/ingest` endpoint. Error: "missing field `items` at line 1 column 22".
+6. [ ] **Onboarding wizard: Serper.dev missing** -- search engine configuration step in onboarding wizard doesn't include Serper.dev as an option.
+7. [ ] **GitHub docs: SearxNG setup guide** -- document where to find SearxNG settings, how to configure delays, and how to enable all search engines.
+
+## Fixed in v1.1.0/v1.1.1 (closed)
+
+- [x] LLM output budget caps (b568dbf)
+- [x] Data link removal from gap-closing (b568dbf)
+- [x] doc_date editable (ebb4e54)
+- [x] Temporal facts (ebb4e54)
+- [x] Contradictions & Conflicts (5d52f05)
+- [x] Intelligence Gaps UX overhaul (b568dbf)
+- [x] System prompt wire-up (b568dbf)
+- [x] Domain taxonomy (b568dbf)
 
 ## Next Release
 

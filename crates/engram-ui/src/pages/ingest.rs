@@ -35,7 +35,7 @@ pub fn IngestPage() -> impl IntoView {
         async move {
             set_loading.set(true);
             set_analyze_result.set(None);
-            let body = serde_json::json!({"text": text});
+            let body = serde_json::json!({"items": [{"text": text}]});
             match api.post::<_, IngestResponse>("/ingest", &body).await {
                 Ok(r) => {
                     let msg = format!(

@@ -162,7 +162,26 @@ pub fn setup_card_dispatch(
                     }
                     "search" => {
                         let body = serde_json::json!({"query": p("q"), "limit": 20});
-                        api.post_text("/search", &body).await.map(|r| ("engram_search".into(), r)).map_err(|e| e.to_string())
+                        match api.post_text("/search", &body).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_search", &json_str);
+                                dispatch_graph_data("engram_search", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                llm_analysis(&api, set_messages,
+                                    "Summarize the search results. What are the key findings? Highlight the most relevant facts and their confidence levels. Be concise (2-3 sentences).",
+                                    &format!("Search results:\n{}", &json_str[..json_str.len().min(3000)]),
+                                ).await;
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
                     }
                     "explain" => {
                         let entity = p("e");
@@ -695,7 +714,26 @@ pub fn setup_card_dispatch(
                     "topic_map" => {
                         let topic = p("topic");
                         let body = serde_json::json!({"topic": topic});
-                        api.post_text("/chat/topic_map", &body).await.map(|r| ("engram_topic_map".into(), r)).map_err(|e| e.to_string())
+                        match api.post_text("/chat/topic_map", &body).await {
+                            Ok(json_str) => {
+                                let card_html = cards::render_tool_card("engram_topic_map", &json_str);
+                                dispatch_graph_data("engram_topic_map", &json_str);
+                                set_messages.update(|msgs| {
+                                    if let Some(pos) = msgs.iter().rposition(|m| m.role == ChatRole::Context) { msgs.remove(pos); }
+                                    msgs.push(ChatMessage {
+                                        role: ChatRole::ToolResult,
+                                        content: json_str.chars().take(500).collect(),
+                                        display_html: Some(card_html),
+                                    });
+                                });
+                                llm_analysis(&api, set_messages,
+                                    "Analyze this topic map. Describe the key entities, how they relate to the topic, and what patterns or clusters emerge. Note any surprising connections. Be concise (2-3 sentences).",
+                                    &format!("Topic map for '{}':\n{}", topic, &json_str[..json_str.len().min(3000)]),
+                                ).await;
+                                return;
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
                     }
                     "graph_stats" => {
                         let body = serde_json::json!({});

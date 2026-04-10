@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>engram - Knowledge Graph</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="/style-3653bdbdb7fda1f0.css" integrity="sha384-FipLsOq33iH5EywOIuzwgCG2NaqQn9af+vuWsl8v8pC4dBGxXg+Pf8zp4ZIhQ0ig"/>
+  <script src="//cdn.jsdelivr.net/npm/3d-force-graph"></script>
+<link rel="modulepreload" href="/engram-ui-4f5f148df7e6e69d.js" crossorigin="anonymous" integrity="sha384-84TdB9nIbfEqH0io9cuQnuZC/FmtpRhqpkSULDjhwKtR9S6mVM7weEVuTOddCPme"><link rel="preload" href="/engram-ui-4f5f148df7e6e69d_bg.wasm" crossorigin="anonymous" integrity="sha384-Whnq8dq9cRiR/8+vkMpgb9Nrd7k+29VHQomxKe+3HHhXk/UZtqF1yh2lnEsW31Bs" as="fetch" type="application/wasm"></head>
+<body>
+  <!-- Leptos mounts here -->
+  
+  <script type="module" src="graph-bridge.js"></script>
+
+<script type="module">
+import init, * as bindings from '/engram-ui-4f5f148df7e6e69d.js';
+const wasm = await init({ module_or_path: '/engram-ui-4f5f148df7e6e69d_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script></body>
+</html>

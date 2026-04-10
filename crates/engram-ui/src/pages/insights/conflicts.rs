@@ -7,6 +7,8 @@ pub fn ConflictsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
 
     let (conflicts, set_conflicts) = signal(Vec::<serde_json::Value>::new());
     let (loading, set_loading) = signal(true);
+    let (conf_page, set_conf_page) = signal(0usize);
+    let conf_page_size: usize = 20;
 
     // Fetch conflicts on mount
     let api_fetch = api.clone();
@@ -96,7 +98,7 @@ pub fn ConflictsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                         </div>
 
                         <div style="display: flex; flex-direction: column; gap: 4px;">
-                            {list.iter().take(20).map(|c| {
+                            {list.iter().skip(conf_page.get() * conf_page_size).take(conf_page_size).map(|c| {
                                 let entity = c.get("entity").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                 let desc = c.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                 let severity = c.get("severity").and_then(|v| v.as_f64()).unwrap_or(0.5);
@@ -145,6 +147,27 @@ pub fn ConflictsZone(set_status_msg: WriteSignal<String>) -> impl IntoView {
                                 }
                             }).collect::<Vec<_>>()}
                         </div>
+                        {
+                            let total_conf_pages = if total == 0 { 1 } else { (total + conf_page_size - 1) / conf_page_size };
+                            (total_conf_pages > 1).then(|| {
+                                let tp = total_conf_pages;
+                                view! {
+                                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; justify-content: center;">
+                                        <button class="btn btn-sm btn-secondary"
+                                            disabled=move || conf_page.get() == 0
+                                            on:click=move |_| set_conf_page.update(|p| *p = p.saturating_sub(1))>
+                                            <i class="fa-solid fa-chevron-left"></i>
+                                        </button>
+                                        <span style="font-size: 0.8rem;">{format!("Page {} of {}", conf_page.get() + 1, tp)}</span>
+                                        <button class="btn btn-sm btn-secondary"
+                                            disabled=move || conf_page.get() + 1 >= tp
+                                            on:click=move |_| set_conf_page.update(|p| *p += 1)>
+                                            <i class="fa-solid fa-chevron-right"></i>
+                                        </button>
+                                    </div>
+                                }
+                            })
+                        }
                     </div>
                 }.into_any()
             }}

@@ -166,6 +166,7 @@ pub(crate) fn render_step_web_search(
                 let p = web_search_provider.get();
                 let name = match p.as_str() {
                     "brave" => "Brave Search",
+                    "serper" => "Serper.dev (Google)",
                     "searxng" => "SearXNG (Self-hosted)",
                     _ => "DuckDuckGo",
                 };
@@ -200,6 +201,17 @@ pub(crate) fn render_step_web_search(
                     </div>
                 </div>
                 <div
+                    class=move || if web_search_provider.get() == "serper" { "wizard-card wizard-card-selected" } else { "wizard-card" }
+                    on:click=move |_| set_web_search_provider.set("serper".into())
+                >
+                    <h4>"Serper.dev (Google)"</h4>
+                    <div class="wizard-card-grid">
+                        <span class="wc-label">"Auth"</span><span>"API key required"</span>
+                        <span class="wc-label">"Quality"</span><span>"Google search results"</span>
+                        <span class="wc-label">"Cost"</span><span>"Free tier: 2500 queries"</span>
+                    </div>
+                </div>
+                <div
                     class=move || if web_search_provider.get() == "searxng" { "wizard-card wizard-card-selected" } else { "wizard-card" }
                     on:click=move |_| set_web_search_provider.set("searxng".into())
                 >
@@ -211,15 +223,19 @@ pub(crate) fn render_step_web_search(
                     </div>
                 </div>
             </div>
-            // Brave API key field
-            {move || (web_search_provider.get() == "brave").then(|| view! {
-                <div class="form-group mt-1">
-                    <label><i class="fa-solid fa-key"></i>" Brave API Key"</label>
-                    <input type="password" class="form-control" placeholder="BSA..."
-                        prop:value=web_search_api_key
-                        on:input=move |ev| set_web_search_api_key.set(event_target_value(&ev))
-                    />
-                </div>
+            // Brave / Serper API key field
+            {move || (web_search_provider.get() == "brave" || web_search_provider.get() == "serper").then(|| {
+                let label = if web_search_provider.get() == "brave" { "Brave API Key" } else { "Serper.dev API Key" };
+                let placeholder = if web_search_provider.get() == "brave" { "BSA..." } else { "your-serper-api-key" };
+                view! {
+                    <div class="form-group mt-1">
+                        <label><i class="fa-solid fa-key"></i>" "{label}</label>
+                        <input type="password" class="form-control" placeholder=placeholder
+                            prop:value=web_search_api_key
+                            on:input=move |ev| set_web_search_api_key.set(event_target_value(&ev))
+                        />
+                    </div>
+                }
             })}
             // SearXNG URL field
             {move || (web_search_provider.get() == "searxng").then(|| view! {
@@ -231,10 +247,15 @@ pub(crate) fn render_step_web_search(
                     />
                 </div>
             })}
-            // Brave API key hint
+            // Brave / Serper API key hint
             {move || (web_search_provider.get() == "brave" && web_search_api_key.get().is_empty()).then(|| view! {
                 <p class="text-secondary" style="font-size: 0.85rem; margin-top: 0.5rem;">
                     <i class="fa-solid fa-info-circle"></i>" Get a free API key at search.brave.com/api"
+                </p>
+            })}
+            {move || (web_search_provider.get() == "serper" && web_search_api_key.get().is_empty()).then(|| view! {
+                <p class="text-secondary" style="font-size: 0.85rem; margin-top: 0.5rem;">
+                    <i class="fa-solid fa-info-circle"></i>" Get a free API key at serper.dev — 2500 free Google searches"
                 </p>
             })}
             // SearXNG URL hint
