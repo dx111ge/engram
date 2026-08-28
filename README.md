@@ -1,4 +1,4 @@
-# Engram v1.1.2
+# Engram v1.2.0
 
 **AI Intelligence Platform** -- knowledge graph + semantic search + reasoning + learning in a single binary.
 
@@ -42,7 +42,7 @@ Engram is a self-hosted AI knowledge engine that combines graph storage, semanti
 
 ### 1. Download
 
-Download the latest release from [Releases](https://github.com/dx111ge/engram/releases/tag/v1.1.2).
+Download the latest release from [Releases](https://github.com/dx111ge/engram/releases/tag/v1.2.0).
 
 | Platform | Download |
 |----------|----------|

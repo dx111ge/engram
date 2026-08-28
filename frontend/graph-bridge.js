@@ -1385,6 +1385,21 @@ window.__engram_graph = {
     this._originalLinks = links.map(function(l) { return Object.assign({}, l); });
     var displayLinks = this._bundlingEnabled ? this._bundleEdges(this._originalLinks) : links;
     this.instance.graphData({ nodes: nodes, links: displayLinks });
+    // v1.2.0 fix: auto-fit the camera when the new dataset is small enough that
+    // the force layout can't spread nodes into the camera's default viewport
+    // (orphans sit at origin, tiny clusters cluster near origin). Without this,
+    // a user creating a lone node and querying it saw an empty canvas.
+    var self = this;
+    var nodeCount = nodes.length;
+    var linkCount = links.length;
+    if (nodeCount > 0 && (nodeCount <= 5 || linkCount === 0)) {
+      // Give the force engine a tick to stabilise (for 0-link cases this is
+      // instant; for small clusters 200ms is enough).
+      var delay = linkCount === 0 ? 120 : 250;
+      setTimeout(function() {
+        try { self.instance.zoomToFit(400, 50); } catch (_) {}
+      }, delay);
+    }
   },
 
   recenter: function() {

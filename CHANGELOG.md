@@ -4,6 +4,62 @@ All notable changes to Engram are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.0] - 2026-08-28
+
+### Added
+
+**Temporal event queries**
+- Settable node `event_time` and `GET /nodes/event-range` for temporal event windows
+- `GET /nodes?type=` -- indexed node-by-type enumeration
+
+**Structured extraction**
+- GLiNER2 structured extraction (`[OUTPUT]`) wired into the ingest pipeline, producing `Metric` nodes
+- `Metric.observed_at` stamped from source document time, giving charts a real time axis
+- GLiNER2 classification as both an extraction head and a pipeline stage
+
+**Intelligence page and artifact store**
+- Sidecar-backed artifact store (`.brain.artifacts`) with versioned history
+- `/intelligence` page and a fifth top-nav item, with REST API and markdown rendering
+- Node-detail "Artifacts" tab giving back-references from graph nodes
+
+**Research and briefing**
+- Standalone `/research` endpoint with SSE streaming and preset-to-budget mapping
+- `/briefing` endpoint, briefing dialog and chat tool
+- `engram_research` and `engram_orphans` chat tools
+
+**Orphan manager**
+- `GET /orphans` with a keep-isolated flag, Knowledge-page badge and Insights panel
+- Connection suggestions from rules, vectors and LLM, with an end-to-end merge action
+
+**Stakeholder simulation**
+- Data model, wizard backend and UI, with phase wire-format tests
+- Persona fidelity: multi-step extractive distill, web-quote seeding, digital-twin alias, redistill endpoint
+- Voice fields covering rhetorical style, talking points, characteristic distortions, formative context, audience and moves
+- Two-pass voice-fidelity critique for debate turns, and biased retrieval via `SourceAccess::ActorDoctrine`
+- Red lines, coalitions and objectives reach the per-turn prompts
+- Me-moderator live UI in the War Room, plus persona profile import and export
+
+**Document pipeline hardening**
+- Per-document lifecycle persisted to a `.brain.docstate` sidecar
+- Background worker pool with bounded concurrency and per-host serialisation
+- Watchdog for stuck jobs with per-stage soft timeouts
+
+### Fixed
+- Char-boundary-safe `chunk_text` -- non-ASCII text such as Cyrillic or Arabic no longer panics and poisons the graph lock
+- Classification and structured extraction now run when reprocessing existing documents
+- `add_evidence` upserts by node label, making it idempotent
+- Graph event bus wired so assessment auto-propagation works
+- `tests/debate.rs` repaired; it had not compiled since the persona-fidelity fields were added
+
+## [1.1.3] - 2026-04-10
+
+### Fixed
+- GLiNER2 model path mismatch
+- Removed an invalid secrets reference from a GitHub Actions `if` condition
+
+### Changed
+- CI builds Apple Silicon only; the x86_64 macOS target was dropped
+
 ## [1.1.2] - 2026-04-10
 
 ### Fixed
