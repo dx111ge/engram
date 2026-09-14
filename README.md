@@ -6,6 +6,13 @@
 
 ![Engram Analysis Panel](assets/debate.jpg)
 
+#### 📺 Watch the Walkthrough on YouTube
+
+Watch the full system overview on my channel **[sven andreas](https://youtu.be/hoJ574uGboM?si=Zg_HLIzu1DPVWjdo)** to see the 3D graph explorer, contradiction engine, and live war room in action:
+
+[![Watch the walkthrough](https://youtube.com)](https://youtu.be/hoJ574uGboM?si=Zg_HLIzu1DPVWjdo)
+
+*Click the image above to watch the deep dive on YouTube.*
 ---
 
 ## What is Engram?
