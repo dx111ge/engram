@@ -13,15 +13,32 @@ proposes:
       agent does not fetch or unpack archives, and a support tool that
       installed software would be a different kind of program
 ---
-This machine is aarch64 and the archive you downloaded is the x86_64 build.
+**Engram does not start at all.** No window, no error, or an error about the
+file not being executable or not being a valid program. It is not a
+configuration problem and there is nothing to fix in your setup: the download
+you unpacked is built for a different kind of processor than the one in this
+machine.
+
+This machine is **aarch64** (ARM). The archive you have is the **x86_64**
+(Intel/AMD) build.
+
+## What to do
+
+Download `engram-linux-aarch64.zip` from the releases page instead, unpack it,
+and start it the same way you tried before.
+
+**Your knowledge base is not affected.** A `.brain` file is the same on both
+builds — one created by the Intel build opens in the ARM build and the other way
+round. If you already made one, keep it.
+
+**There is nothing to clean up.** The archive you have never ran, so it changed
+nothing on this machine. Delete the unpacked files if you like, or leave them.
+
+## Why there is no error message worth reading
+
 Engram ships as a single binary with no runtime dependencies, which is what
-makes it easy to install and also what makes this failure total: there is no
-loader, no shim and no emulation layer to fall back on, so the binary simply
-does not start.
-
-Download `engram-linux-aarch64.zip` from the releases page instead. Your
-`.brain` file is not affected — it is the same format on both, so a brain
-created by one build opens in the other.
-
-Nothing else needs undoing. The x86_64 archive never ran, so it left nothing
-behind except the files you unpacked.
+makes it easy to install — and also what makes this failure complete. There is
+no loader to complain, no runtime to report a mismatch, and no emulation layer
+to fall back on. The operating system is handed a program built in an
+instruction set this processor does not speak, and there is nothing further to
+say about it.
