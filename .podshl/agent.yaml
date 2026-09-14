@@ -1,0 +1,87 @@
+# Support Engram publishes about itself.
+#
+# Everything here is taken from this project's own README and CLI reference. No
+# symptom is described that the project does not already document, and where the
+# machine cannot answer a question, a person is asked one with a bounded set of
+# answers -- free text never travels.
+
+endpoint: https://github.com/dx111ge/engram/issues
+commit: v1.2.0
+status: active
+
+langs: [en, de]
+
+problem_classes:
+  - engram.start.wrong-build
+  - engram.search.stale-after-model-change
+  - engram.llm.model-not-pulled
+
+collect:
+  # Engram publishes four builds and they are not interchangeable. This is the
+  # one reading that settles which of them belongs on this machine, and it costs
+  # no execution at all.
+  - id: os.arch
+    kind: machine
+    describes: Processor architecture
+    why: Engram ships separate x86_64 and aarch64 builds, and the wrong one
+         does not start
+    read: { op: os_fact, name: arch }
+
+  - id: os.name
+    kind: machine
+    describes: Operating system
+    why: The Windows, Linux and macOS downloads are different archives
+    read: { op: os_fact, name: name }
+
+  # Asked of a person, because nothing on the machine records which archive was
+  # downloaded. `choices` is what lets this fact travel at all.
+  - id: engram.download
+    kind: human
+    describes: Which archive was downloaded
+    why: A build for another architecture is the most common reason the binary
+         does not start
+    prompt: Which file did you download from the releases page?
+    choices:
+      - engram-linux-x86_64.zip
+      - engram-linux-aarch64.zip
+      - engram-windows-x86_64.zip
+      - engram-macos-aarch64.zip
+      - I built it from source
+      - I do not remember
+
+  - id: engram.embedding_changed
+    kind: human
+    describes: Whether the embedding model was changed
+    why: Nodes are embedded when they are stored, so changing the model leaves
+         every existing node embedded by the old one until `engram reindex` runs
+    prompt: Did you change the embedding model under System > Embeddings after
+            storing knowledge?
+    choices:
+      - "yes, and I did not run engram reindex"
+      - "yes, and I did run engram reindex"
+      - "no"
+      - I do not know
+
+  - id: engram.llm_endpoint
+    kind: human
+    describes: Which LLM endpoint is configured
+    why: Debate and chat need an OpenAI-compatible endpoint that answers, and
+         the recommended local setup needs its model pulled first
+    prompt: What is configured under System > LLM?
+    choices:
+      - Ollama on this machine
+      - another OpenAI-compatible endpoint
+      - nothing is configured yet
+      - I do not know
+
+escalate:
+  reason: Nothing published matches these readings, and it may be a defect
+          rather than a setup problem
+  queue: github-issues
+  target: https://github.com/dx111ge/engram/issues
+  reply_via: [ticket_url, none]
+
+solutions:
+  - solutions/wrong-build-for-this-machine.md
+  - solutions/search-stale-after-model-change.md
+  - solutions/llm-model-not-pulled.md
