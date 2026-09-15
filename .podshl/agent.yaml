@@ -11,10 +11,17 @@ status: active
 
 langs: [en, de]
 
+# The name is what a rule matches on and what a solution answers. `describes` is
+# the line a person picks it by, and it is ours to write because we are the only
+# ones who know what the symptom looks like from outside. Each is the opening
+# sentence of the solution it leads to: what they see, not what is wrong.
 problem_classes:
-  - engram.start.wrong-build
-  - engram.search.stale-after-model-change
-  - engram.llm.model-not-pulled
+  - id: engram.start.wrong-build
+    describes: Engram does not start at all - no window, or "cannot execute binary file"
+  - id: engram.search.stale-after-model-change
+    describes: Search stopped finding things it used to find
+  - id: engram.llm.model-not-pulled
+    describes: Debate and Chat fail, but storing knowledge and search still work
 
 collect:
   # Engram publishes four builds and they are not interchangeable. This is the
