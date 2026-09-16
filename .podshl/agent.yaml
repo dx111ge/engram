@@ -112,11 +112,16 @@ escalate:
   reply_via: [ticket_url, none]
 
 solutions:
-  # Least specific first is not required, but it reads in the order the tree
-  # walks: what to do when the archive is not known yet, then the two answers
-  # that need to know.
-  - solutions/find-out-which-archive.md
+  # One answer per operating system, because `when` compares readings and cannot
+  # say "the archive and the machine disagree". The last of the four is what to
+  # do when the archive is not known yet -- and it is conditioned on exactly
+  # that, not merely on the operating system, which is what it said first and
+  # which made it answer in place of all three: a rule whose condition is a
+  # subset of another's is reached first and the specific answer never fires.
   - solutions/wrong-archive-for-this-system.md
+  - solutions/wrong-archive-on-windows.md
+  - solutions/wrong-archive-on-macos.md
   - solutions/wrong-build-for-this-machine.md
+  - solutions/find-out-which-archive.md
   - solutions/search-stale-after-model-change.md
   - solutions/llm-model-not-pulled.md
