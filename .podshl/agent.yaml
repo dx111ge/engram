@@ -11,6 +11,24 @@ status: active
 
 langs: [en, de]
 
+# We owe English and nothing more, so a reader in another language meets every
+# sentence below through their own model -- and a small model turns a product's
+# term into the ordinary word it resembles. These four are ours and must arrive
+# as written:
+#
+#   Engram   German already has "Engramm" for a memory trace, and that is not us
+#   brain    a knowledge base and the file that holds it, not an organ; it came
+#            back as "cerveau" and "Gehirn" before anyone listed it here
+#   Debate   a feature, not the activity, and German writes it "Debatte"
+#   Chat     a feature -- and in French "chat" is a cat, so "Debate and Chat
+#            fail" becomes a sentence about a cat that has stopped working
+#
+# Matching is case-insensitive and stands on word boundaries, so one entry
+# covers "Engram" and the `engram` command, and "brain" covers "my.brain"
+# without touching "brainstorm".
+glossary:
+  keep: [Engram, brain, Debate, Chat]
+
 # The name is what a rule matches on and what a solution answers. `describes` is
 # the line a person picks it by, and it is ours to write because we are the only
 # ones who know what the symptom looks like from outside. Each is the opening
