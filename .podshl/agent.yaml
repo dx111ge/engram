@@ -52,11 +52,16 @@ collect:
          does not start
     read: { op: os_fact, name: arch }
 
+  # `name: os`, not `name: name`. The op takes one of `os`, `arch`, `version` or
+  # `container`; anything else reads nothing at all and says nothing about it,
+  # so this probe was silently empty and every rule that needed it could never
+  # match. Found on 2026-09-16 by somebody on Linux saying they had downloaded
+  # the Windows archive and being told nothing was wrong.
   - id: os.name
     kind: machine
     describes: Operating system
     why: The Windows, Linux and macOS downloads are different archives
-    read: { op: os_fact, name: name }
+    read: { op: os_fact, name: os }
 
   # Asked of a person, because nothing on the machine records which archive was
   # downloaded. `choices` is what lets this fact travel at all.
@@ -107,6 +112,11 @@ escalate:
   reply_via: [ticket_url, none]
 
 solutions:
+  # Least specific first is not required, but it reads in the order the tree
+  # walks: what to do when the archive is not known yet, then the two answers
+  # that need to know.
+  - solutions/find-out-which-archive.md
+  - solutions/wrong-archive-for-this-system.md
   - solutions/wrong-build-for-this-machine.md
   - solutions/search-stale-after-model-change.md
   - solutions/llm-model-not-pulled.md
