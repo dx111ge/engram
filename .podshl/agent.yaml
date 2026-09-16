@@ -122,6 +122,7 @@ solutions:
   - solutions/wrong-archive-on-windows.md
   - solutions/wrong-archive-on-macos.md
   - solutions/wrong-build-for-this-machine.md
+  - solutions/wrong-build-on-an-intel-machine.md
   - solutions/find-out-which-archive.md
   - solutions/search-stale-after-model-change.md
   - solutions/llm-model-not-pulled.md
